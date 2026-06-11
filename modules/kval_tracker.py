@@ -47,6 +47,32 @@ class AccountProgress:
     operations: list[OperationTurnoverResult] = field(default_factory=list)
 
 
+MONTH_MIN_TRADES = 1     # каждый месяц периода: минимум сделок
+QUARTER_MIN_TRADES = 10  # каждый квартал периода: минимум сделок
+
+
+@dataclass
+class MonthCheck:
+    """Проверка месяца на минимальную активность."""
+    label: str            # 'YYYY-MM'
+    trade_count: int = 0
+
+    @property
+    def ok(self) -> bool:
+        return self.trade_count >= MONTH_MIN_TRADES
+
+
+@dataclass
+class QuarterCheck:
+    """Проверка квартала на минимальную активность."""
+    label: str            # 'YYYYQn'
+    trade_count: int = 0
+
+    @property
+    def ok(self) -> bool:
+        return self.trade_count >= QUARTER_MIN_TRADES
+
+
 @dataclass
 class KvalProgress:
     """
@@ -60,6 +86,8 @@ class KvalProgress:
     all_trades: list[TradeRecord]
     approximate_warnings: list[str]
     generated_at: str
+    months: list[MonthCheck] = field(default_factory=list)
+    quarter_checks: list[QuarterCheck] = field(default_factory=list)
 
     # ─── Производные метрики ────────────────────────────────────────────────
 
@@ -107,6 +135,31 @@ class KvalProgress:
     def total_operation_count(self) -> int:
         return sum(a.operation_count for a in self.accounts)
 
+    # ─── Право на квал-статус: оборот + помесячная/поквартальная активность ──
+
+    @property
+    def turnover_ok(self) -> bool:
+        """Оборот достиг цели с буфером безопасности."""
+        return self.total_turnover >= self.effective_target
+
+    @property
+    def months_ok(self) -> bool:
+        """В каждом месяце периода есть минимум сделок."""
+        return bool(self.months) and all(m.ok for m in self.months)
+
+    @property
+    def quarters_ok(self) -> bool:
+        """В каждом квартале периода есть минимум сделок."""
+        return bool(self.quarter_checks) and all(q.ok for q in self.quarter_checks)
+
+    @property
+    def qualification_ready(self) -> bool:
+        """
+        Готовность к квал-статусу: оборот достигнут И каждый месяц активен
+        (>= 1 сделки) И каждый квартал активен (>= 10 сделок).
+        """
+        return self.turnover_ok and self.months_ok and self.quarters_ok
+
 
 # ─── Трекер ─────────────────────────────────────────────────────────────────
 
@@ -123,6 +176,19 @@ def _quarter_for(d: date, period: KvalPeriod) -> Quarter | None:
         if q.contains(d):
             return q
     return None
+
+
+def _period_months(period: KvalPeriod) -> list[str]:
+    """Список меток месяцев 'YYYY-MM' от начала до конца периода включительно."""
+    months: list[str] = []
+    y, m = period.start.year, period.start.month
+    end_y, end_m = period.end.year, period.end.month
+    while (y, m) <= (end_y, end_m):
+        months.append(f"{y:04d}-{m:02d}")
+        m += 1
+        if m > 12:
+            m, y = 1, y + 1
+    return months
 
 
 def _parse_op_date(date_str: str) -> date | None:
@@ -234,6 +300,20 @@ class KvalTracker:
                 f"приближённых {ap.approximate_count}"
             )
 
+        # Помесячная и поквартальная активность (по фактическим сделкам)
+        month_checks = {lbl: MonthCheck(lbl) for lbl in _period_months(period)}
+        quarter_checks = {q.label: QuarterCheck(q.label) for q in period.quarters}
+        for t in all_trades:
+            d = _parse_op_date(t.date)
+            if d is None:
+                continue
+            mk = f"{d.year:04d}-{d.month:02d}"
+            if mk in month_checks:
+                month_checks[mk].trade_count += 1
+            q = _quarter_for(d, period)
+            if q is not None:
+                quarter_checks[q.label].trade_count += 1
+
         progress = KvalProgress(
             period=period,
             target=settings.kval_target,
@@ -243,12 +323,14 @@ class KvalTracker:
             all_trades=all_trades,
             approximate_warnings=warnings,
             generated_at=datetime.now(timezone.utc).isoformat(),
+            months=[month_checks[lbl] for lbl in _period_months(period)],
+            quarter_checks=[quarter_checks[q.label] for q in period.quarters],
         )
 
         logger.info(
             f"ИТОГО оборот: {grand_total} ₽ из {settings.kval_target} ₽ "
             f"({progress.progress_pct}%). "
-            f"Достигнуто (с буфером): {progress.achieved}"
+            f"Готовность к квал-статусу: {progress.qualification_ready}"
         )
         return progress
 

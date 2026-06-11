@@ -10,6 +10,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from common.helpers import mask_identifier
 from modules.kval_tracker import KvalProgress
 
 _console = Console()
@@ -68,7 +69,7 @@ def render(progress: KvalProgress) -> None:
     for a in p.accounts:
         acc_table.add_row(
             a.account_name,
-            a.account_id,
+            mask_identifier(a.account_id),
             _fmt_money(a.total_turnover),
             str(a.operation_count),
             str(a.approximate_count) if a.approximate_count else "—",
@@ -95,6 +96,30 @@ def render(progress: KvalProgress) -> None:
             str(quarter_ops.get(q.label, 0)),
         )
     _console.print(q_table)
+
+    # ─── Разбивка по месяцам ────────────────────────────────────────────────
+    m_table = Table(title="\nПо месяцам", show_lines=False)
+    m_table.add_column("Месяц", style="cyan")
+    m_table.add_column("Сделок", justify="right")
+    m_table.add_column("Статус", justify="center")
+    for m in p.months:
+        status_cell = "[green]OK[/green]" if m.ok else "[red]FAIL[/red]"
+        m_table.add_row(m.label, str(m.trade_count), status_cell)
+    _console.print(m_table)
+
+    # ─── Готовность к квал-статусу ──────────────────────────────────────────
+    def _flag(ok: bool) -> str:
+        return "[green]OK[/green]" if ok else "[red]FAIL[/red]"
+
+    verdict = "[bold green]READY[/bold green]" if p.qualification_ready \
+        else "[bold red]NOT READY[/bold red]"
+    gate = (
+        f"[bold]Оборот:[/bold]   {_flag(p.turnover_ok)}\n"
+        f"[bold]Месяцы:[/bold]   {_flag(p.months_ok)}\n"
+        f"[bold]Кварталы:[/bold] {_flag(p.quarters_ok)}\n"
+        f"[bold]Итог:[/bold]     {verdict}"
+    )
+    _console.print(Panel(gate, title="Готовность к квал-статусу"))
 
     # ─── Предупреждения ─────────────────────────────────────────────────────
     if p.has_approximate:

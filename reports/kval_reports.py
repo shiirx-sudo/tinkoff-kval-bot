@@ -35,6 +35,10 @@ def _progress_row(p: KvalProgress) -> dict[str, Any]:
         "remaining_to_effective": p.remaining_to_effective,
         "achieved": p.achieved,
         "achieved_bare": p.achieved_bare,
+        "turnover_ok": p.turnover_ok,
+        "months_ok": p.months_ok,
+        "quarters_ok": p.quarters_ok,
+        "qualification_ready": p.qualification_ready,
         "operation_count": p.total_operation_count,
         "trade_count": p.total_trade_count,
         "approximate_count": len(p.approximate_warnings),
@@ -95,6 +99,25 @@ def _quarters_rows(p: KvalProgress) -> list[dict[str, Any]]:
     return rows
 
 
+def _months_rows(p: KvalProgress) -> list[dict[str, Any]]:
+    today = date.today().isoformat()
+    return [{
+        "date": today,
+        "month": m.label,
+        "trade_count": m.trade_count,
+        "status": "ok" if m.ok else "fail",
+    } for m in p.months]
+
+
+def _monthly_status(p: KvalProgress) -> list[dict[str, Any]]:
+    return [{"month": m.label, "trade_count": m.trade_count, "ok": m.ok} for m in p.months]
+
+
+def _quarterly_status(p: KvalProgress) -> list[dict[str, Any]]:
+    return [{"quarter": q.label, "trade_count": q.trade_count, "ok": q.ok}
+            for q in p.quarter_checks]
+
+
 def broker_sync_status_rows(
     p: KvalProgress | None,
     *,
@@ -126,9 +149,14 @@ def write_all(p: KvalProgress, reports_dir: str | Path = "data/reports") -> dict
     written: dict[str, Path] = {}
 
     progress_row = _progress_row(p)
+    json_payload = {
+        **progress_row,
+        "monthly_status": _monthly_status(p),
+        "quarterly_status": _quarterly_status(p),
+        **report_metadata(),
+    }
     written["kval_progress.json"] = write_report_json(
-        {**progress_row, **report_metadata()},
-        out / "kval_progress.json",
+        json_payload, out / "kval_progress.json",
     )
     written["kval_progress.csv"] = write_report_csv(
         [progress_row], "kval_progress", out / "kval_progress.csv"
@@ -138,6 +166,9 @@ def write_all(p: KvalProgress, reports_dir: str | Path = "data/reports") -> dict
     )
     written["kval_trades.csv"] = write_report_csv(
         _trades_rows(p), "kval_trades", out / "kval_trades.csv"
+    )
+    written["kval_months.csv"] = write_report_csv(
+        _months_rows(p), "kval_months", out / "kval_months.csv"
     )
     written["kval_quarters.csv"] = write_report_csv(
         _quarters_rows(p), "kval_quarters", out / "kval_quarters.csv"

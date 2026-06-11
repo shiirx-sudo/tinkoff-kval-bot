@@ -50,3 +50,48 @@ def test_accounts_masked(tmp_path):
     kval_reports.write_all(_progress(), tmp_path)
     content = (tmp_path / "kval_accounts.csv").read_text(encoding="utf-8-sig")
     assert "***" in content  # account id маскируется
+
+
+def test_console_report_masks_account_id():
+    from rich.console import Console
+    import io
+    from reports import console_report
+
+    class FC:
+        def get_broker_accounts(self):
+            return [make_account("2000123456", "Основной")]
+        def get_operations(self, account_id, from_dt, to_dt):
+            return [make_operation("OPERATION_TYPE_BUY", id="a",
+                                   date="2025-05-10T10:00:00Z",
+                                   trades=[make_trade("1000", 10)])]
+
+    p = KvalTracker(client=FC()).analyze(as_of=date(2026, 6, 11))
+
+    buf = io.StringIO()
+    console_report._console = Console(file=buf, width=240, force_terminal=False)
+    console_report.render(p)
+    out = buf.getvalue()
+
+    assert "2000123456" not in out      # полный id не светится
+    assert "***3456" in out             # показан замаскированный
+
+
+def test_kval_months_csv_written(tmp_path):
+    from reports import kval_reports
+    p = KvalTracker(client=FakeClient()).analyze(as_of=date(2026, 6, 11))
+    written = kval_reports.write_all(p, tmp_path)
+    assert "kval_months.csv" in written
+    assert written["kval_months.csv"].exists()
+    header = (tmp_path / "kval_months.csv").read_text(encoding="utf-8-sig").splitlines()[0]
+    assert header.split(";") == ["date", "month", "trade_count", "status"]
+
+
+def test_kval_progress_json_has_status_lists(tmp_path):
+    import json
+    from reports import kval_reports
+    p = KvalTracker(client=FakeClient()).analyze(as_of=date(2026, 6, 11))
+    kval_reports.write_all(p, tmp_path)
+    data = json.loads((tmp_path / "kval_progress.json").read_text(encoding="utf-8"))
+    assert "monthly_status" in data and len(data["monthly_status"]) == 12
+    assert "quarterly_status" in data and len(data["quarterly_status"]) == 4
+    assert "qualification_ready" in data

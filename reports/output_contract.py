@@ -27,8 +27,13 @@ REPORT_COLUMN_ORDER: dict[str, list[str]] = {
         "date", "period_start", "period_end", "quarters", "current_quarter",
         "total_turnover", "target", "effective_target", "progress_pct",
         "remaining_to_target", "remaining_to_effective",
-        "achieved", "achieved_bare", "operation_count", "trade_count",
+        "achieved", "achieved_bare",
+        "turnover_ok", "months_ok", "quarters_ok", "qualification_ready",
+        "operation_count", "trade_count",
         "approximate_count", "generated_at_utc",
+    ],
+    "kval_months": [
+        "date", "month", "trade_count", "status",
     ],
     "kval_accounts": [
         "date", "broker", "account_id_masked", "account_name", "account_type",

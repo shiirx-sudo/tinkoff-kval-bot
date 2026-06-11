@@ -92,3 +92,64 @@ def test_broker_plus_iis_both_counted():
     assert len(p.accounts) == 2
     by_type = {a.account_id: a.account_type for a in p.accounts}
     assert by_type == {"acc-1": "broker", "acc-2": "iis"}
+
+
+# ─── Помесячная / поквартальная готовность ──────────────────────────────────
+
+from modules.kval_tracker import _period_months  # noqa: E402
+from modules.period_calculator import calculate_kval_period  # noqa: E402
+
+AS_OF = date(2026, 6, 11)
+
+
+def _ops_for_months(labels, trades_per_month, price="200000", qty=1):
+    ops = []
+    for lbl in labels:
+        ops.append(make_operation(
+            "OPERATION_TYPE_BUY",
+            id=f"op-{lbl}",
+            date=f"{lbl}-15T10:00:00Z",
+            trades=[make_trade(price, qty) for _ in range(trades_per_month)],
+        ))
+    return ops
+
+
+def _period_month_labels():
+    return _period_months(calculate_kval_period(AS_OF))
+
+
+def test_zero_ops_all_fail():
+    accounts = [make_account("acc-1", "Основной")]
+    p = KvalTracker(client=FakeClient(accounts, {"acc-1": []})).analyze(as_of=AS_OF)
+    assert all(not m.ok for m in p.months)
+    assert all(not q.ok for q in p.quarter_checks)
+    assert p.months_ok is False
+    assert p.quarters_ok is False
+    assert p.turnover_ok is False
+    assert p.qualification_ready is False
+    assert len(p.months) == 12
+
+
+def test_turnover_ok_but_one_empty_month_not_ready():
+    labels = _period_month_labels()
+    # Пропускаем первый месяц периода → он пустой; обороту это не мешает.
+    ops = _ops_for_months(labels[1:], trades_per_month=4)  # 11 месяцев × 4 сделки
+    accounts = [make_account("acc-1", "Основной")]
+    p = KvalTracker(client=FakeClient(accounts, {"acc-1": ops})).analyze(as_of=AS_OF)
+    assert p.turnover_ok is True            # 11*4*200000 = 8.8M >= 6.1M
+    assert p.months_ok is False             # первый месяц пустой
+    assert p.qualification_ready is False
+    empty = next(m for m in p.months if m.label == labels[0])
+    assert empty.trade_count == 0
+
+
+def test_full_eligibility_ready():
+    labels = _period_month_labels()
+    ops = _ops_for_months(labels, trades_per_month=4)  # 12 мес × 4 = квартал 12 сделок
+    accounts = [make_account("acc-1", "Основной")]
+    p = KvalTracker(client=FakeClient(accounts, {"acc-1": ops})).analyze(as_of=AS_OF)
+    assert p.turnover_ok is True            # 12*4*200000 = 9.6M >= 6.1M
+    assert p.months_ok is True              # каждый месяц >= 1
+    assert p.quarters_ok is True            # каждый квартал >= 10 (по 12)
+    assert p.qualification_ready is True
+    assert all(q.trade_count >= 10 for q in p.quarter_checks)
