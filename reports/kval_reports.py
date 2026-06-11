@@ -15,6 +15,7 @@ from reports.output_contract import (
     report_metadata,
     write_report_csv,
     write_report_json,
+    write_report_jsonl,
 )
 
 BROKER = "tinkoff_invest"
@@ -74,8 +75,11 @@ def _trades_rows(p: KvalProgress) -> list[dict[str, Any]]:
             "account_id_masked": mask_identifier(t.account_id),
             "operation_id": t.operation_id,
             "op_date": t.date,
+            "instrument_uid": t.instrument_uid,
             "ticker": t.ticker,
+            "instrument_name": t.instrument_name,
             "figi": t.figi,
+            "instrument_type": t.instrument_type,
             "direction": t.direction,
             "price": t.price,
             "quantity": t.quantity,
@@ -192,5 +196,8 @@ def write_all(p: KvalProgress, reports_dir: str | Path = "data/reports") -> dict
     written["broker_sync_status.csv"] = write_report_csv(
         broker_sync_status_rows(p, connection_status="connected", sync_status="ok"),
         "broker_sync_status", out / "broker_sync_status.csv",
+    )
+    written["kval_operations_raw.jsonl"] = write_report_jsonl(
+        p.raw_operations, out / "kval_operations_raw.jsonl"
     )
     return written

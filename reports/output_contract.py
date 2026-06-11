@@ -43,8 +43,9 @@ REPORT_COLUMN_ORDER: dict[str, list[str]] = {
     ],
     "kval_trades": [
         "date", "broker", "account_id_masked", "operation_id", "op_date",
-        "ticker", "figi", "direction", "price", "quantity", "turnover",
-        "is_approximate", "raw_payment",
+        "instrument_uid", "ticker", "instrument_name", "figi", "instrument_type",
+        "direction", "price", "quantity", "turnover", "is_approximate",
+        "raw_payment",
     ],
     "kval_quarters": [
         "date", "account_id_masked", "quarter", "turnover",
@@ -108,6 +109,16 @@ def write_report_json(payload: dict[str, Any], path: str | Path) -> Path:
         json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default),
         encoding="utf-8",
     )
+    return path
+
+
+def write_report_jsonl(records: list[dict[str, Any]], path: str | Path) -> Path:
+    """Пишет JSONL: по одному JSON-объекту на строку (для raw-диагностики)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for rec in records:
+            f.write(json.dumps(rec, ensure_ascii=False, default=_json_default) + "\n")
     return path
 
 

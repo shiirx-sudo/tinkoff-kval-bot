@@ -48,6 +48,10 @@ ACCOUNT_TYPE_LABELS: dict[str, str] = {
 
 OPERATION_STATE_EXECUTED = "OPERATION_STATE_EXECUTED"
 
+# Типы идентификаторов инструмента для GetInstrumentBy
+INSTRUMENT_ID_TYPE_FIGI = "INSTRUMENT_ID_TYPE_FIGI"
+INSTRUMENT_ID_TYPE_UID = "INSTRUMENT_ID_TYPE_UID"
+
 
 def account_type_label(acc_type: str) -> str:
     """Короткая метка типа счёта (broker / iis / invest_box / …)."""
@@ -187,3 +191,15 @@ class TinkoffReadOnlyClient:
         if not account_id:
             raise ValueError("account_id must be a non-empty string")
         return self._post(_OPERATIONS, "GetPortfolio", {"accountId": account_id})
+
+    # ─── Инструменты ────────────────────────────────────────────────────────
+
+    def get_instrument_by(self, id_type: str, id_value: str) -> dict[str, Any]:
+        """
+        InstrumentsService/GetInstrumentBy — справочник по figi или uid.
+        Возвращает сырой ответ {'instrument': {...}}.
+        """
+        return self._post(
+            _INSTRUMENTS, "GetInstrumentBy",
+            {"idType": id_type, "id": id_value},
+        )

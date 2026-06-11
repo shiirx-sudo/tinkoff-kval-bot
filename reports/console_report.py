@@ -135,3 +135,19 @@ def render(progress: KvalProgress) -> None:
             f"{len(p.approximate_warnings)} операций посчитаны приближённо "
             f"(по payment, без trades). Сверьте с брокерским отчётом."
         )
+        approx = [t for t in p.all_trades if t.is_approximate]
+        if approx:
+            ap_table = Table(title="\nПриближённые операции", show_lines=False)
+            ap_table.add_column("Операция", style="dim")
+            ap_table.add_column("Тикер", style="cyan")
+            ap_table.add_column("Инструмент")
+            ap_table.add_column("Оборот", justify="right")
+            for t in approx:
+                ident = t.ticker or (t.instrument_uid[:8] + "…" if t.instrument_uid else "—")
+                ap_table.add_row(
+                    t.operation_id,
+                    t.ticker or "—",
+                    t.instrument_name or ident,
+                    _fmt_money(t.turnover),
+                )
+            _console.print(ap_table)

@@ -11,6 +11,7 @@ from loguru import logger
 
 from api.client import ReadOnlyClient
 from brokers.tinkoff.rest_client import account_type_label
+from common.helpers import mask_identifier
 from config.settings import settings
 from modules.operation_filter import is_qualifying_operation
 from modules.period_calculator import KvalPeriod, Quarter, calculate_kval_period
@@ -102,6 +103,7 @@ class KvalProgress:
     generated_at: str
     months: list[MonthCheck] = field(default_factory=list)
     quarter_checks: list[QuarterCheck] = field(default_factory=list)
+    raw_operations: list[dict] = field(default_factory=list)
 
     # ─── Производные метрики ────────────────────────────────────────────────
 
@@ -217,6 +219,19 @@ def _period_months(period: KvalPeriod) -> list[str]:
     return months
 
 
+def _mask_raw_operation(op: dict, account_id: str) -> dict:
+    """
+    Готовит запись операции для raw-экспорта: account_id маскируется,
+    любые account-поля внутри тоже. Токенов в операции нет.
+    """
+    rec = dict(op)
+    for key in ("accountId", "account_id"):
+        if key in rec:
+            rec[key] = mask_identifier(rec[key])
+    rec["account_id_masked"] = mask_identifier(account_id)
+    return rec
+
+
 def _parse_op_date(date_str: str) -> date | None:
     """Парсит ISO-строку даты операции в date."""
     if not date_str:
@@ -236,8 +251,14 @@ class KvalTracker:
     фильтрует, считает оборот и агрегирует прогресс к квал-цели.
     """
 
-    def __init__(self, client: ReadOnlyClient | None = None) -> None:
+    def __init__(self, client: ReadOnlyClient | None = None, resolver=None) -> None:
         self.client = client or ReadOnlyClient()
+        if resolver is None and hasattr(self.client, "instrument_resolver"):
+            try:
+                resolver = self.client.instrument_resolver()
+            except Exception:  # noqa: BLE001
+                resolver = None
+        self.resolver = resolver
 
     def analyze(self, as_of: date | None = None) -> KvalProgress:
         """
@@ -264,6 +285,7 @@ class KvalTracker:
         account_results: list[AccountProgress] = []
         all_trades: list[TradeRecord] = []
         warnings: list[str] = []
+        raw_operations: list[dict] = []
         grand_total = Decimal("0")
 
         for acc in accounts_raw:
@@ -287,7 +309,8 @@ class KvalTracker:
                 if not is_qualifying_operation(op):
                     continue
 
-                result = calculate_operation_turnover(op, account_id)
+                raw_operations.append(_mask_raw_operation(op, account_id))
+                result = calculate_operation_turnover(op, account_id, resolver=self.resolver)
                 op_turnover = (
                     result.turnover_approximate
                     if result.is_approximate
@@ -361,6 +384,7 @@ class KvalTracker:
             generated_at=datetime.now(timezone.utc).isoformat(),
             months=[month_checks[lbl] for lbl in _period_months(period)],
             quarter_checks=[quarter_checks[q.label] for q in period.quarters],
+            raw_operations=raw_operations,
         )
 
         logger.info(

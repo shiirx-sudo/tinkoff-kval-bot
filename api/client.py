@@ -42,6 +42,11 @@ class ReadOnlyClient:
         """Все счета по токену (без фильтра по типу) — для команды accounts."""
         return self._rest.get_accounts()
 
+    def instrument_resolver(self):
+        """Резолвер инструментов, привязанный к этому REST-клиенту."""
+        from brokers.tinkoff.instruments import InstrumentResolver
+        return InstrumentResolver(self._rest)
+
     def get_operations(
         self,
         account_id: str,

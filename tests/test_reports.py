@@ -95,3 +95,23 @@ def test_kval_progress_json_has_status_lists(tmp_path):
     assert "monthly_status" in data and len(data["monthly_status"]) == 12
     assert "quarterly_status" in data and len(data["quarterly_status"]) == 4
     assert "qualification_ready" in data
+
+
+def test_kval_trades_has_instrument_columns(tmp_path):
+    from reports import kval_reports
+    p = KvalTracker(client=FakeClient()).analyze(as_of=date(2026, 6, 11))
+    kval_reports.write_all(p, tmp_path)
+    header = (tmp_path / "kval_trades.csv").read_text(encoding="utf-8-sig").splitlines()[0].split(";")
+    assert "instrument_uid" in header
+    assert "instrument_name" in header
+    assert "instrument_type" in header
+
+
+def test_raw_operations_jsonl_written_and_masked(tmp_path):
+    from reports import kval_reports
+    p = KvalTracker(client=FakeClient()).analyze(as_of=date(2026, 6, 11))
+    written = kval_reports.write_all(p, tmp_path)
+    assert "kval_operations_raw.jsonl" in written
+    content = (tmp_path / "kval_operations_raw.jsonl").read_text(encoding="utf-8")
+    assert "account_id_masked" in content
+    assert content.strip()  # есть хотя бы одна строка

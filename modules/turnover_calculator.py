@@ -1,10 +1,13 @@
 """
-Подсчёт оборота по операциям (REST-контракт).
+Подсчёт оборота по операциям (REST-контракт) + резолв инструмента.
 
 Правила:
   1. Есть trades → оборот = sum(abs(price * quantity)) по сделкам (точный).
   2. Нет trades → оборот = abs(payment), помечаем как approximate (нужна сверка).
   3. Сделки считаем по количеству trades.
+
+instrument_uid (UUID) НИКОГДА не попадает в ticker. ticker — это настоящий тикер
+из резолвера, либо пустая строка, если резолв не удался.
 """
 from __future__ import annotations
 
@@ -23,8 +26,11 @@ class TradeRecord:
     operation_id: str
     account_id: str
     date: str
+    instrument_uid: str
     ticker: str
+    instrument_name: str
     figi: str
+    instrument_type: str
     direction: str            # BUY / SELL
     price: Decimal
     quantity: int
@@ -38,7 +44,10 @@ class OperationTurnoverResult:
     operation_id: str
     account_id: str
     figi: str
+    instrument_uid: str
     ticker: str
+    instrument_name: str
+    instrument_type: str
     direction: str
     date: str
     trade_count: int
@@ -54,12 +63,8 @@ def _round(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-def _ticker(operation: dict[str, Any]) -> str:
-    for key in ("instrumentUid", "figi", "ticker"):
-        val = operation.get(key)
-        if val:
-            return str(val)
-    return "UNKNOWN"
+def _instrument_uid(operation: dict[str, Any]) -> str:
+    return str(operation.get("instrumentUid") or operation.get("instrument_uid") or "")
 
 
 def _int(value: Any) -> int:
@@ -72,16 +77,43 @@ def _int(value: Any) -> int:
             return 0
 
 
+def _resolve(resolver, figi: str, instrument_uid: str, op: dict[str, Any]):
+    """Безопасный резолв: при любой ошибке возвращает пустые ticker/name."""
+    ticker, name = "", ""
+    instr_type = str(op.get("instrumentType") or "")
+    if resolver is not None:
+        try:
+            info = resolver.resolve(figi=figi, instrument_uid=instrument_uid)
+            ticker = info.ticker or ""
+            name = info.name or ""
+            instr_type = info.instrument_type or instr_type
+        except Exception as exc:  # noqa: BLE001 — резолв не ломает расчёт
+            logger.warning(f"Резолв инструмента не удался (op {op.get('id')}): {exc}")
+    return ticker, name, instr_type
+
+
 def calculate_operation_turnover(
     operation: dict[str, Any],
     account_id: str,
+    resolver=None,
 ) -> OperationTurnoverResult:
     """Оборот по одной операции (JSON-словарь GetOperationsByCursor)."""
     op_id = str(operation.get("id") or "")
     figi = str(operation.get("figi") or "")
-    ticker = _ticker(operation)
+    instrument_uid = _instrument_uid(operation)
     date_str = str(operation.get("date") or "")
     direction = "BUY" if is_buy(operation) else "SELL"
+
+    ticker, name, instr_type = _resolve(resolver, figi, instrument_uid, operation)
+
+    def _mk(price, qty, turnover, is_approx, raw_payment=Decimal("0")) -> TradeRecord:
+        return TradeRecord(
+            operation_id=op_id, account_id=account_id, date=date_str,
+            instrument_uid=instrument_uid, ticker=ticker, instrument_name=name,
+            figi=figi, instrument_type=instr_type, direction=direction,
+            price=price, quantity=qty, turnover=turnover,
+            is_approximate=is_approx, raw_payment=raw_payment,
+        )
 
     payment = quotation_to_decimal(operation.get("payment"))
     turnover_approximate = abs(payment)
@@ -95,36 +127,30 @@ def calculate_operation_turnover(
         qty = _int(t.get("quantity", 0))
         trade_turnover = _round(abs(price * qty))
         turnover_exact += trade_turnover
-        trade_records.append(TradeRecord(
-            operation_id=op_id, account_id=account_id, date=date_str,
-            ticker=ticker, figi=figi, direction=direction,
-            price=price, quantity=qty, turnover=trade_turnover,
-            is_approximate=False, raw_payment=Decimal("0"),
-        ))
+        trade_records.append(_mk(price, qty, trade_turnover, False))
 
     is_approximate = len(trade_records) == 0
     warning = ""
 
     if is_approximate:
+        label = ticker or name or instrument_uid[:8] or op_id
         warning = (
-            f"[APPROXIMATE] Операция {op_id} не содержит trades. "
-            f"Оборот = abs(payment) = {turnover_approximate} ₽. Требуется сверка."
+            f"[APPROXIMATE] op {op_id} ({label}"
+            f"{' ' + name if name and label != name else ''}): нет trades, "
+            f"оборот = abs(payment) = {turnover_approximate} ₽. Требуется сверка."
         )
         logger.warning(warning)
-        trade_records.append(TradeRecord(
-            operation_id=op_id, account_id=account_id, date=date_str,
-            ticker=ticker, figi=figi, direction=direction,
-            price=Decimal("0"), quantity=0, turnover=turnover_approximate,
-            is_approximate=True, raw_payment=payment,
-        ))
+        trade_records.append(_mk(Decimal("0"), 0, turnover_approximate, True, payment))
 
     discrepancy = Decimal("0")
     if not is_approximate and turnover_approximate > 0:
         discrepancy = _round(abs(turnover_exact - turnover_approximate))
 
     return OperationTurnoverResult(
-        operation_id=op_id, account_id=account_id, figi=figi, ticker=ticker,
-        direction=direction, date=date_str, trade_count=len(trade_records),
+        operation_id=op_id, account_id=account_id, figi=figi,
+        instrument_uid=instrument_uid, ticker=ticker, instrument_name=name,
+        instrument_type=instr_type, direction=direction, date=date_str,
+        trade_count=len(trade_records),
         turnover_exact=_round(turnover_exact),
         turnover_approximate=_round(turnover_approximate),
         is_approximate=is_approximate, discrepancy=discrepancy,
