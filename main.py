@@ -80,6 +80,26 @@ def cmd_kval_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_kval_plan(args: argparse.Namespace) -> int:
+    from modules.kval_planner import KvalPlanner
+    from reports import console_plan, kval_plan_reports
+    try:
+        plan = KvalPlanner().plan(
+            as_of=args.as_of,
+            horizon_quarters=args.horizon_quarters,
+            target_mode=args.target_mode,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка при планировании: {exc}")
+        return 1
+
+    console_plan.render(plan)
+    written = kval_plan_reports.write_all(plan, args.reports_dir)
+    for name, path in written.items():
+        logger.info(f"Отчёт: {path}")
+    return 0
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="main.py", description="T-Invest Kval Bot (read-only)")
     parser.add_argument("-v", "--verbose", action="store_true", help="DEBUG-логирование")
@@ -93,6 +113,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                         metavar="YYYY-MM-DD", help="Дата расчёта (по умолчанию сегодня)")
     p_kval.add_argument("--reports-dir", default="data/reports", metavar="DIR",
                         help="Каталог для выходных отчётов (по умолчанию data/reports/)")
+
+    p_plan = sub.add_parser("kval-plan", help="Календарь выхода на квал-статус (планировщик)")
+    p_plan.add_argument("--as-of", type=lambda s: date.fromisoformat(s), default=None,
+                        metavar="YYYY-MM-DD", help="Дата расчёта (по умолчанию сегодня)")
+    p_plan.add_argument("--horizon-quarters", type=int, default=8, metavar="N",
+                        help="Сколько будущих квартальных окон анализировать (по умолчанию 8)")
+    p_plan.add_argument("--reports-dir", default="data/reports", metavar="DIR",
+                        help="Каталог для выходных отчётов (по умолчанию data/reports/)")
+    p_plan.add_argument("--target-mode", choices=("effective", "bare"), default="effective",
+                        help="Считать до цели с буфером (effective) или без (bare)")
     return parser.parse_args(argv)
 
 
@@ -100,6 +130,7 @@ _HANDLERS = {
     "doctor": cmd_doctor,
     "accounts": cmd_accounts,
     "kval-status": cmd_kval_status,
+    "kval-plan": cmd_kval_plan,
 }
 
 

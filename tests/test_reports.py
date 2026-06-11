@@ -32,8 +32,23 @@ def test_write_all_creates_files(tmp_path):
         assert written[name].exists()
 
 
+def _write_planner_reports(tmp_path):
+    from modules.kval_planner import KvalPlanner
+    from reports import kval_plan_reports
+
+    class _FC:
+        def get_broker_accounts(self):
+            return [{"id": "acc-1", "name": "A", "type": "ACCOUNT_TYPE_TINKOFF"}]
+        def get_operations(self, account_id, from_dt, to_dt):
+            return []
+
+    plan = KvalPlanner(client=_FC()).plan(as_of=date(2026, 7, 1))
+    return kval_plan_reports.write_all(plan, tmp_path)
+
+
 def test_csv_headers_match_contract(tmp_path):
     kval_reports.write_all(_progress(), tmp_path)
+    _write_planner_reports(tmp_path)
     for name, columns in REPORT_COLUMN_ORDER.items():
         path = tmp_path / f"{name}.csv"
         header = path.read_text(encoding="utf-8-sig").splitlines()[0].split(";")
@@ -42,6 +57,7 @@ def test_csv_headers_match_contract(tmp_path):
 
 def test_validate_existing_reports_ok(tmp_path):
     kval_reports.write_all(_progress(), tmp_path)
+    _write_planner_reports(tmp_path)
     results = dict(validate_existing_reports(tmp_path))
     assert all(status == "ok" for status in results.values()), results
 

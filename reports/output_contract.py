@@ -56,6 +56,20 @@ REPORT_COLUMN_ORDER: dict[str, list[str]] = {
         "accounts_count", "operations_count", "trade_count", "sync_status",
         "error_message", "synced_at_utc",
     ],
+    "kval_candidate_windows": [
+        "check_date", "period_start", "period_end", "included_quarters",
+        "total_turnover", "remaining_turnover_to_target",
+        "months_ok", "quarters_ok", "turnover_ok", "qualification_ready",
+        "impossible_due_to_past_gaps",
+    ],
+    "kval_plan_months": [
+        "month", "status", "current_trade_count", "required_min_trade_count",
+        "missing_trade_count", "current_turnover", "suggested_turnover",
+    ],
+    "kval_plan_quarters": [
+        "quarter", "current_trade_count", "required_min_trade_count",
+        "missing_trade_count", "current_turnover", "suggested_turnover", "status",
+    ],
 }
 
 REQUIRED_COLUMNS = {name: set(cols) for name, cols in REPORT_COLUMN_ORDER.items()}
