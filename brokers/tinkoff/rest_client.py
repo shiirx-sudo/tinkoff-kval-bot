@@ -24,9 +24,39 @@ _USERS = "tinkoff.public.invest.api.contract.v1.UsersService"
 _OPERATIONS = "tinkoff.public.invest.api.contract.v1.OperationsService"
 _INSTRUMENTS = "tinkoff.public.invest.api.contract.v1.InstrumentsService"
 
-# Брокерский счёт Т-Инвестиций
-ACCOUNT_TYPE_TINKOFF = "ACCOUNT_TYPE_TINKOFF"
+# Типы счетов Т-Инвестиций
+ACCOUNT_TYPE_TINKOFF = "ACCOUNT_TYPE_TINKOFF"          # обычный брокерский
+ACCOUNT_TYPE_TINKOFF_IIS = "ACCOUNT_TYPE_TINKOFF_IIS"  # ИИС
+ACCOUNT_TYPE_INVEST_BOX = "ACCOUNT_TYPE_INVEST_BOX"    # Инвесткопилка
+ACCOUNT_TYPE_UNSPECIFIED = "ACCOUNT_TYPE_UNSPECIFIED"
+
+# Типы счетов, оборот по которым УЧИТЫВАЕТСЯ в квалификационном расчёте.
+# И обычный брокерский, и ИИС — это самостоятельные брокерские счета, сделки
+# по которым идут в оборот. Инвесткопилка и UNSPECIFIED не учитываются.
+TURNOVER_ACCOUNT_TYPES: frozenset[str] = frozenset({
+    ACCOUNT_TYPE_TINKOFF,
+    ACCOUNT_TYPE_TINKOFF_IIS,
+})
+
+# Человекочитаемые метки типов счетов
+ACCOUNT_TYPE_LABELS: dict[str, str] = {
+    ACCOUNT_TYPE_TINKOFF: "broker",
+    ACCOUNT_TYPE_TINKOFF_IIS: "iis",
+    ACCOUNT_TYPE_INVEST_BOX: "invest_box",
+    ACCOUNT_TYPE_UNSPECIFIED: "unspecified",
+}
+
 OPERATION_STATE_EXECUTED = "OPERATION_STATE_EXECUTED"
+
+
+def account_type_label(acc_type: str) -> str:
+    """Короткая метка типа счёта (broker / iis / invest_box / …)."""
+    return ACCOUNT_TYPE_LABELS.get(acc_type, (acc_type or "").lower())
+
+
+def is_turnover_account(account: dict[str, Any]) -> bool:
+    """True, если оборот по счёту учитывается в квалификационном расчёте."""
+    return account.get("type") in TURNOVER_ACCOUNT_TYPES
 
 
 class TinkoffReadOnlyClient:
@@ -80,12 +110,12 @@ class TinkoffReadOnlyClient:
         return resp.get("accounts", []) or []
 
     def get_broker_accounts(self) -> list[dict[str, Any]]:
-        """Только брокерские счета Т-Инвестиций (ACCOUNT_TYPE_TINKOFF)."""
-        accounts = [
-            acc for acc in self.get_accounts()
-            if acc.get("type") == ACCOUNT_TYPE_TINKOFF
-        ]
-        logger.info(f"Найдено брокерских счетов: {len(accounts)}")
+        """
+        Счета, оборот по которым учитывается в квал-расчёте: обычный брокерский
+        (ACCOUNT_TYPE_TINKOFF) и ИИС (ACCOUNT_TYPE_TINKOFF_IIS).
+        """
+        accounts = [acc for acc in self.get_accounts() if is_turnover_account(acc)]
+        logger.info(f"Счетов, учитываемых в обороте: {len(accounts)}")
         return accounts
 
     # ─── Операции ───────────────────────────────────────────────────────────

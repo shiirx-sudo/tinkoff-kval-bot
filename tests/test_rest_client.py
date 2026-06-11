@@ -4,15 +4,26 @@ from __future__ import annotations
 from brokers.tinkoff.rest_client import TinkoffReadOnlyClient
 
 
-def test_get_broker_accounts_filters_type():
+def test_get_broker_accounts_includes_broker_and_iis():
     c = TinkoffReadOnlyClient(token="t")
     c._post = lambda s, m, p: {"accounts": [  # type: ignore[assignment]
         {"id": "1", "name": "Брокерский", "type": "ACCOUNT_TYPE_TINKOFF"},
         {"id": "2", "name": "ИИС", "type": "ACCOUNT_TYPE_TINKOFF_IIS"},
+        {"id": "3", "name": "Копилка", "type": "ACCOUNT_TYPE_INVEST_BOX"},
+        {"id": "4", "name": "?", "type": "ACCOUNT_TYPE_UNSPECIFIED"},
     ]}
     accs = c.get_broker_accounts()
-    assert len(accs) == 1
-    assert accs[0]["id"] == "1"
+    ids = {a["id"] for a in accs}
+    assert ids == {"1", "2"}  # брокерский + ИИС учитываются, копилка/unspecified — нет
+
+
+def test_is_turnover_account_and_label():
+    from brokers.tinkoff.rest_client import account_type_label, is_turnover_account
+    assert is_turnover_account({"type": "ACCOUNT_TYPE_TINKOFF"}) is True
+    assert is_turnover_account({"type": "ACCOUNT_TYPE_TINKOFF_IIS"}) is True
+    assert is_turnover_account({"type": "ACCOUNT_TYPE_INVEST_BOX"}) is False
+    assert account_type_label("ACCOUNT_TYPE_TINKOFF") == "broker"
+    assert account_type_label("ACCOUNT_TYPE_TINKOFF_IIS") == "iis"
 
 
 def test_iter_operations_paginates():

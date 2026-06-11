@@ -76,3 +76,19 @@ def test_no_accounts():
     p = KvalTracker(client=FakeClient([], {})).analyze(as_of=date(2026, 6, 11))
     assert p.total_turnover == Decimal("0")
     assert p.accounts == []
+
+
+def test_broker_plus_iis_both_counted():
+    accounts = [
+        make_account("acc-1", "Брокерский", "ACCOUNT_TYPE_TINKOFF"),
+        make_account("acc-2", "ИИС", "ACCOUNT_TYPE_TINKOFF_IIS"),
+    ]
+    ops = {
+        "acc-1": [_op("OPERATION_TYPE_BUY", "2025-05-10T10:00:00Z", [make_trade("100", 10)])],   # 1000
+        "acc-2": [_op("OPERATION_TYPE_SELL", "2025-07-10T10:00:00Z", [make_trade("100", 30)])],  # 3000
+    }
+    p = KvalTracker(client=FakeClient(accounts, ops)).analyze(as_of=date(2026, 6, 11))
+    assert p.total_turnover == Decimal("4000.00")  # оборот ИИС учтён наравне с брокерским
+    assert len(p.accounts) == 2
+    by_type = {a.account_id: a.account_type for a in p.accounts}
+    assert by_type == {"acc-1": "broker", "acc-2": "iis"}

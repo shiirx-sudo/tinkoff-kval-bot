@@ -10,6 +10,7 @@ from decimal import Decimal
 from loguru import logger
 
 from api.client import ReadOnlyClient
+from brokers.tinkoff.rest_client import account_type_label
 from config.settings import settings
 from modules.operation_filter import is_qualifying_operation
 from modules.period_calculator import KvalPeriod, Quarter, calculate_kval_period
@@ -34,9 +35,10 @@ class QuarterTurnover:
 
 @dataclass
 class AccountProgress:
-    """Агрегированный оборот по одному брокерскому счёту."""
+    """Агрегированный оборот по одному брокерскому счёту (включая ИИС)."""
     account_id: str
     account_name: str
+    account_type: str = "broker"
     total_turnover: Decimal = Decimal("0")
     trade_count: int = 0
     operation_count: int = 0
@@ -175,10 +177,12 @@ class KvalTracker:
         for acc in accounts_raw:
             account_id = str(acc.get("id", ""))
             account_name = str(acc.get("name", "") or account_id)
+            account_type = account_type_label(str(acc.get("type", "")))
 
             ap = AccountProgress(
                 account_id=account_id,
                 account_name=account_name,
+                account_type=account_type,
                 by_quarter={
                     q.label: QuarterTurnover(label=q.label)
                     for q in period.quarters

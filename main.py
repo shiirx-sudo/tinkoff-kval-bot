@@ -39,18 +39,28 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
 def cmd_accounts(_args: argparse.Namespace) -> int:
     from common.helpers import mask_identifier
     from api.client import ReadOnlyClient
+    from brokers.tinkoff.rest_client import account_type_label, is_turnover_account
     try:
-        accounts = ReadOnlyClient().get_broker_accounts()
+        accounts = ReadOnlyClient().get_all_accounts()
     except Exception as exc:  # noqa: BLE001
         logger.error(f"Не удалось получить счета: {exc}")
         return 1
     if not accounts:
-        print("Брокерских счетов не найдено.")
+        print("Счетов по токену не найдено.")
         return 0
-    print(f"Брокерские счета ({len(accounts)}):")
+
+    included = 0
+    print(f"Доступные счета ({len(accounts)}):")
     for acc in accounts:
-        print(f"  {mask_identifier(acc.get('id'))}  {acc.get('name', '')}  "
-              f"[{acc.get('status', '')}]")
+        in_turnover = is_turnover_account(acc)
+        included += int(in_turnover)
+        mark = "✅ учитывается" if in_turnover else "➖ не учитывается"
+        print(f"  {mask_identifier(acc.get('id'))}  "
+              f"{acc.get('name', '') or '—':<24}  "
+              f"{account_type_label(acc.get('type', '')):<11}  "
+              f"[{acc.get('status', '')}]  {mark}")
+    print(f"\nВ обороте учитывается счетов: {included} из {len(accounts)} "
+          f"(брокерский + ИИС).")
     return 0
 
 

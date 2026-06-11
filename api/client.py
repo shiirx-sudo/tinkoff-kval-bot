@@ -1,8 +1,9 @@
 """
 Read-only фасад над REST-коннектором Tinkoff.
 
-Только GET-методы. Токен берётся из настроек (read-only). Методы записи
-не реализованы намеренно.
+Только read-only REST-вызовы (по факту HTTP POST к Tinkoff Invest API — это
+особенность gRPC-over-REST у Т-Инвестиций, а не запись). Токен берётся из
+настроек (read-only). Методы записи (postOrder/cancelOrder) не реализованы.
 """
 from __future__ import annotations
 
@@ -36,6 +37,10 @@ class ReadOnlyClient:
 
     def get_broker_accounts(self) -> list[dict[str, Any]]:
         return self._rest.get_broker_accounts()
+
+    def get_all_accounts(self) -> list[dict[str, Any]]:
+        """Все счета по токену (без фильтра по типу) — для команды accounts."""
+        return self._rest.get_accounts()
 
     def get_operations(
         self,

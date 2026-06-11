@@ -49,7 +49,7 @@ def _accounts_rows(p: KvalProgress) -> list[dict[str, Any]]:
         "broker": BROKER,
         "account_id_masked": mask_identifier(a.account_id),
         "account_name": a.account_name,
-        "account_type": "broker",
+        "account_type": a.account_type,
         "total_turnover": a.total_turnover,
         "operation_count": a.operation_count,
         "trade_count": a.trade_count,
