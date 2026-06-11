@@ -1,14 +1,12 @@
 """
-Точка входа: расчёт прогресса к статусу квалифицированного инвестора
-по обороту в Т-Инвестициях.
+T-Invest Kval Bot — точка входа (read-only).
+
+Команды:
+    python main.py accounts        Список брокерских счетов (масками).
+    python main.py kval-status     Прогресс к квал-статусу по обороту + отчёты.
+    python main.py doctor          Проверка окружения/конфигурации.
 
 Только чтение. Торговые операции не выполняются (LIVE_ENABLED=false).
-
-Примеры
--------
-    python main.py
-    python main.py --as-of 2026-03-31
-    python main.py --json out/report.json --csv out/trades.csv
 """
 from __future__ import annotations
 
@@ -18,57 +16,47 @@ from datetime import date
 
 from loguru import logger
 
-from reports import console_report, csv_report, json_report
 
-
-def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="T-Invest Qualification Tracker (read-only)",
-    )
-    parser.add_argument(
-        "--as-of",
-        type=lambda s: date.fromisoformat(s),
-        default=None,
-        metavar="YYYY-MM-DD",
-        help="Дата расчёта (по умолчанию — сегодня).",
-    )
-    parser.add_argument(
-        "--json",
-        default=None,
-        metavar="PATH",
-        help="Сохранить JSON-отчёт по указанному пути.",
-    )
-    parser.add_argument(
-        "--csv",
-        default=None,
-        metavar="PATH",
-        help="Сохранить CSV со сделками по указанному пути.",
-    )
-    parser.add_argument(
-        "-v", "--verbose",
-        action="store_true",
-        help="Подробное логирование (DEBUG).",
-    )
-    return parser.parse_args(argv)
-
-
-def main(argv: list[str] | None = None) -> int:
-    args = _parse_args(argv)
-
+def _setup_logging(verbose: bool) -> None:
     logger.remove()
     logger.add(
         sys.stderr,
-        level="DEBUG" if args.verbose else "INFO",
+        level="DEBUG" if verbose else "INFO",
         format="<dim>{time:HH:mm:ss}</dim> | <level>{level:<7}</level> | {message}",
     )
 
-    # Импортируем здесь, чтобы ошибка конфигурации (.env) выводилась дружелюбно
-    try:
-        from modules.kval_tracker import KvalTracker
-    except EnvironmentError as exc:
-        logger.error(str(exc))
-        return 2
 
+def cmd_doctor(_args: argparse.Namespace) -> int:
+    from reports.runtime_doctor import run_doctor
+    rep = run_doctor()
+    print("Runtime doctor:")
+    for name, status, detail in rep.checks:
+        mark = "✅" if status == "ok" else "❌"
+        print(f"  {mark} {name}: {detail}" if detail else f"  {mark} {name}")
+    return 0 if rep.ok else 1
+
+
+def cmd_accounts(_args: argparse.Namespace) -> int:
+    from common.helpers import mask_identifier
+    from api.client import ReadOnlyClient
+    try:
+        accounts = ReadOnlyClient().get_broker_accounts()
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Не удалось получить счета: {exc}")
+        return 1
+    if not accounts:
+        print("Брокерских счетов не найдено.")
+        return 0
+    print(f"Брокерские счета ({len(accounts)}):")
+    for acc in accounts:
+        print(f"  {mask_identifier(acc.get('id'))}  {acc.get('name', '')}  "
+              f"[{acc.get('status', '')}]")
+    return 0
+
+
+def cmd_kval_status(args: argparse.Namespace) -> int:
+    from modules.kval_tracker import KvalTracker
+    from reports import console_report, kval_reports
     try:
         progress = KvalTracker().analyze(args.as_of)
     except Exception as exc:  # noqa: BLE001
@@ -76,17 +64,39 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     console_report.render(progress)
-
-    if args.json:
-        path = json_report.render(progress, args.json)
-        logger.info(f"JSON-отчёт сохранён: {path}")
-    if args.csv:
-        path = csv_report.render(progress, args.csv)
-        logger.info(f"CSV-отчёт сохранён: {path}")
-
-    # Код возврата 0 если цель (с буфером) достигнута, иначе 0 всё равно —
-    # это информационный инструмент, не gate. Меняйте при необходимости.
+    written = kval_reports.write_all(progress, args.reports_dir)
+    for name, path in written.items():
+        logger.info(f"Отчёт: {path}")
     return 0
+
+
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="main.py", description="T-Invest Kval Bot (read-only)")
+    parser.add_argument("-v", "--verbose", action="store_true", help="DEBUG-логирование")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("doctor", help="Проверка окружения/конфигурации")
+    sub.add_parser("accounts", help="Список брокерских счетов")
+
+    p_kval = sub.add_parser("kval-status", help="Прогресс к квал-статусу + отчёты")
+    p_kval.add_argument("--as-of", type=lambda s: date.fromisoformat(s), default=None,
+                        metavar="YYYY-MM-DD", help="Дата расчёта (по умолчанию сегодня)")
+    p_kval.add_argument("--reports-dir", default="data/reports", metavar="DIR",
+                        help="Каталог для выходных отчётов (по умолчанию data/reports/)")
+    return parser.parse_args(argv)
+
+
+_HANDLERS = {
+    "doctor": cmd_doctor,
+    "accounts": cmd_accounts,
+    "kval-status": cmd_kval_status,
+}
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    _setup_logging(getattr(args, "verbose", False))
+    return _HANDLERS[args.command](args)
 
 
 if __name__ == "__main__":

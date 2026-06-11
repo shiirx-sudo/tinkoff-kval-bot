@@ -173,8 +173,8 @@ class KvalTracker:
         grand_total = Decimal("0")
 
         for acc in accounts_raw:
-            account_id = str(getattr(acc, "id", ""))
-            account_name = str(getattr(acc, "name", "") or account_id)
+            account_id = str(acc.get("id", ""))
+            account_name = str(acc.get("name", "") or account_id)
 
             ap = AccountProgress(
                 account_id=account_id,

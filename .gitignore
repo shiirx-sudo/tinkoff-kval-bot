@@ -3,7 +3,16 @@
 .env.local
 *.token
 
-# ─── Артефакты отчётов ───────────────────────────────────────
+# ─── Данные и артефакты отчётов (не коммитим) ────────────────
+data/manual/
+data/reports/
+data/
+kval_progress.json
+kval_progress.csv
+kval_accounts.csv
+kval_trades.csv
+kval_quarters.csv
+broker_sync_status.csv
 kval_report.json
 kval_trades.csv
 out/

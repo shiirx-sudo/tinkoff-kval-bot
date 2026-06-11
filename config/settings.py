@@ -30,9 +30,12 @@ def _optional_env(key: str, default: str = "") -> str:
 
 @dataclass(frozen=True)
 class Settings:
-    # Токен — только чтение
+    # Токен — только чтение (основной ключ + совместимый фолбэк)
     read_token: str = field(
-        default_factory=lambda: _require_env("TINKOFF_READ_TOKEN")
+        default_factory=lambda: (
+            os.getenv("TINKOFF_READ_TOKEN", "").strip()
+            or _require_env("TINKOFF_TOKEN")
+        )
     )
 
     # Режим: торговые заявки запрещены пока False

@@ -1,121 +1,83 @@
 """
-Фильтрация операций T-Invest API для расчёта квалификационного оборота.
+Фильтрация операций T-Invest для квалификационного оборота.
+
+Контракт: операция — JSON-словарь из GetOperationsByCursor (REST), ключи camelCase.
+Тип операции — строка 'OPERATION_TYPE_*', тип инструмента — строка (lowercase).
 
 Правила (Т-Инвестиции, 2026):
-  УЧИТЫВАЕМ:
-    - Покупки ценных бумаг  (BUY, BUY_CARD)
-    - Продажи ценных бумаг  (SELL)
-    - Операции с фьючерсами (учитываются как ЦБ в API)
-    - Опционы               (аналогично)
-
-  НЕ УЧИТЫВАЕМ:
-    - Валюта (OPERATION_TYPE_BUY_CURRENCY, SELL_CURRENCY)
-    - Драгоценные металлы
-    - Комиссии, налоги
-    - Дивиденды, купоны
-    - Ввод/вывод средств
-    - Операции РЕПО (Т-Банк исключает вторые сделки РЕПО)
-    - Овернайты, маржинальные комиссии
+  УЧИТЫВАЕМ: покупки/продажи ЦБ (BUY, SELL, BUY_CARD), фьючерсы, опционы.
+  НЕ УЧИТЫВАЕМ: валюту, драгметаллы, комиссии, налоги, дивиденды, купоны,
+                ввод/вывод, РЕПО, овернайты, маржинальные комиссии.
 """
 from __future__ import annotations
 
-from tinkoff.invest.schemas import (  # type: ignore[import]
-    OperationType,
-    InstrumentType,
-)
+from typing import Any
 
-# Типы операций, которые УЧИТЫВАЕМ в обороте
-QUALIFYING_OPERATION_TYPES: frozenset[OperationType] = frozenset({
-    OperationType.OPERATION_TYPE_BUY,
-    OperationType.OPERATION_TYPE_SELL,
-    OperationType.OPERATION_TYPE_BUY_CARD,
+# Типы операций, которые УЧИТЫВАЕМ
+QUALIFYING_OPERATION_TYPES: frozenset[str] = frozenset({
+    "OPERATION_TYPE_BUY",
+    "OPERATION_TYPE_SELL",
+    "OPERATION_TYPE_BUY_CARD",
 })
 
-# Типы операций, которые ЯВНО исключаем (для логирования)
-EXCLUDED_OPERATION_TYPES: frozenset[OperationType] = frozenset({
-    OperationType.OPERATION_TYPE_BUY_CURRENCY,
-    OperationType.OPERATION_TYPE_SELL_CURRENCY,
-    OperationType.OPERATION_TYPE_COUPON,
-    OperationType.OPERATION_TYPE_DIVIDEND,
-    OperationType.OPERATION_TYPE_TAX,
-    OperationType.OPERATION_TYPE_BROKER_FEE,
-    OperationType.OPERATION_TYPE_SERVICE_FEE,
-    OperationType.OPERATION_TYPE_MARGIN_FEE,
-    OperationType.OPERATION_TYPE_INPUT,
-    OperationType.OPERATION_TYPE_OUTPUT,
-    OperationType.OPERATION_TYPE_INPUT_SECURITIES,
-    OperationType.OPERATION_TYPE_OUTPUT_SECURITIES,
-    OperationType.OPERATION_TYPE_OVERNIGHT,
-    OperationType.OPERATION_TYPE_BOND_REPAYMENT,
-    OperationType.OPERATION_TYPE_BOND_REPAYMENT_FULL,
-    OperationType.OPERATION_TYPE_TRACK_MFEE,
-    OperationType.OPERATION_TYPE_TRACK_FFEE,
-    OperationType.OPERATION_TYPE_BENEFIT_TAX,
-    OperationType.OPERATION_TYPE_TAX_PROGRESSIVE,
-    OperationType.OPERATION_TYPE_ACCRUING_VARMARGIN,
-    OperationType.OPERATION_TYPE_WRITING_OFF_VARMARGIN,
-    OperationType.OPERATION_TYPE_DELIVERY_BUY,
-    OperationType.OPERATION_TYPE_DELIVERY_SELL,
+# Типы инструментов, которые НЕ учитываем (строки REST, lowercase)
+EXCLUDED_INSTRUMENT_TYPES: frozenset[str] = frozenset({
+    "currency",
+    "commodity",   # драгметаллы
+    "",
 })
 
-# Типы инструментов, которые НЕ учитываем
-EXCLUDED_INSTRUMENT_TYPES: frozenset[InstrumentType] = frozenset({
-    InstrumentType.INSTRUMENT_TYPE_CURRENCY,
-    InstrumentType.INSTRUMENT_TYPE_COMMODITY,  # драгметаллы
-    InstrumentType.INSTRUMENT_TYPE_UNSPECIFIED,
-})
-
-# Ключевые слова в описании РЕПО-операций
+# Ключевые слова РЕПО в описании
 REPO_KEYWORDS: tuple[str, ...] = (
-    "репо",
-    "repo",
-    "обратный выкуп",
-    "overnight repo",
+    "репо", "repo", "обратный выкуп", "overnight repo",
 )
 
+_BUY_TYPES = frozenset({"OPERATION_TYPE_BUY", "OPERATION_TYPE_BUY_CARD"})
 
-def is_qualifying_operation(operation) -> bool:
-    """
-    Возвращает True, если операция должна учитываться в квалификационном обороте.
+_TYPE_LABELS = {
+    "OPERATION_TYPE_BUY": "Покупка",
+    "OPERATION_TYPE_SELL": "Продажа",
+    "OPERATION_TYPE_BUY_CARD": "Покупка (карта)",
+    "OPERATION_TYPE_BUY_CURRENCY": "Покупка валюты",
+    "OPERATION_TYPE_SELL_CURRENCY": "Продажа валюты",
+    "OPERATION_TYPE_BROKER_FEE": "Брокерская комиссия",
+    "OPERATION_TYPE_DIVIDEND": "Дивиденд",
+    "OPERATION_TYPE_COUPON": "Купон",
+    "OPERATION_TYPE_TAX": "Налог",
+    "OPERATION_TYPE_INPUT": "Ввод средств",
+    "OPERATION_TYPE_OUTPUT": "Вывод средств",
+    "OPERATION_TYPE_OVERNIGHT": "Овернайт",
+}
 
-    Parameters
-    ----------
-    operation : OperationItem
-        Операция из T-Invest API (GetOperationsByCursor).
-    """
-    # Тип операции должен быть в whitelist
-    if operation.type not in QUALIFYING_OPERATION_TYPES:
+
+def operation_type(operation: dict[str, Any]) -> str:
+    """Извлекает строковый тип операции (терпимо к именованию ключа)."""
+    return str(operation.get("operationType") or operation.get("type") or "")
+
+
+def instrument_type(operation: dict[str, Any]) -> str:
+    return str(operation.get("instrumentType") or "").lower()
+
+
+def is_buy(operation: dict[str, Any]) -> bool:
+    return operation_type(operation) in _BUY_TYPES
+
+
+def is_qualifying_operation(operation: dict[str, Any]) -> bool:
+    """True, если операция учитывается в квалификационном обороте."""
+    if operation_type(operation) not in QUALIFYING_OPERATION_TYPES:
         return False
 
-    # Исключаем нежелательные типы инструментов
-    if hasattr(operation, "instrument_type"):
-        if operation.instrument_type in EXCLUDED_INSTRUMENT_TYPES:
-            return False
+    if instrument_type(operation) in EXCLUDED_INSTRUMENT_TYPES:
+        return False
 
-    # Исключаем РЕПО по ключевым словам в описании
-    description = getattr(operation, "description", "") or ""
-    description_lower = description.lower()
-    for keyword in REPO_KEYWORDS:
-        if keyword in description_lower:
-            return False
+    description = str(operation.get("description") or operation.get("name") or "").lower()
+    if any(kw in description for kw in REPO_KEYWORDS):
+        return False
 
     return True
 
 
-def classify_operation(operation) -> str:
-    """Возвращает человекочитаемое описание типа операции."""
-    type_labels = {
-        OperationType.OPERATION_TYPE_BUY: "Покупка",
-        OperationType.OPERATION_TYPE_SELL: "Продажа",
-        OperationType.OPERATION_TYPE_BUY_CARD: "Покупка (карта)",
-        OperationType.OPERATION_TYPE_BUY_CURRENCY: "Покупка валюты",
-        OperationType.OPERATION_TYPE_SELL_CURRENCY: "Продажа валюты",
-        OperationType.OPERATION_TYPE_BROKER_FEE: "Брокерская комиссия",
-        OperationType.OPERATION_TYPE_DIVIDEND: "Дивиденд",
-        OperationType.OPERATION_TYPE_COUPON: "Купон",
-        OperationType.OPERATION_TYPE_TAX: "Налог",
-        OperationType.OPERATION_TYPE_INPUT: "Ввод средств",
-        OperationType.OPERATION_TYPE_OUTPUT: "Вывод средств",
-        OperationType.OPERATION_TYPE_OVERNIGHT: "Овернайт",
-    }
-    return type_labels.get(operation.type, f"Прочее ({operation.type})")
+def classify_operation(operation: dict[str, Any]) -> str:
+    op_type = operation_type(operation)
+    return _TYPE_LABELS.get(op_type, f"Прочее ({op_type})")

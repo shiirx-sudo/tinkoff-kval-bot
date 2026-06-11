@@ -1,184 +1,132 @@
 """
-Подсчёт оборота по операциям T-Invest API.
+Подсчёт оборота по операциям (REST-контракт).
 
 Правила:
-  1. Если у операции есть trades → оборот = sum(abs(price * quantity))
-  2. Если trades отсутствуют → оборот = abs(payment), помечаем как approximate
-  3. Сделки считаем по количеству trades, не по количеству операций
+  1. Есть trades → оборот = sum(abs(price * quantity)) по сделкам (точный).
+  2. Нет trades → оборот = abs(payment), помечаем как approximate (нужна сверка).
+  3. Сделки считаем по количеству trades.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
+from typing import Any
 
-from tinkoff.invest.utils import quotation_to_decimal  # type: ignore[import]
 from loguru import logger
+
+from common.helpers import quotation_to_decimal
+from modules.operation_filter import is_buy
 
 
 @dataclass
 class TradeRecord:
-    """Запись об одной сделке (одном trade внутри операции)."""
     operation_id: str
     account_id: str
-    date: str                   # ISO-строка для сериализации
+    date: str
     ticker: str
     figi: str
-    direction: str              # BUY / SELL
+    direction: str            # BUY / SELL
     price: Decimal
     quantity: int
-    turnover: Decimal           # abs(price * quantity)
+    turnover: Decimal
     is_approximate: bool = False
-    raw_payment: Decimal = Decimal("0")  # для сверки
+    raw_payment: Decimal = Decimal("0")
 
 
 @dataclass
 class OperationTurnoverResult:
-    """Результат обработки одной операции."""
     operation_id: str
     account_id: str
     figi: str
     ticker: str
     direction: str
     date: str
-    trade_count: int            # количество фактических trades
-    turnover_exact: Decimal     # trade-based (точный)
-    turnover_approximate: Decimal  # payment-based (приближённый)
-    is_approximate: bool        # True если использовался fallback
-    discrepancy: Decimal        # abs(exact - approximate)
+    trade_count: int
+    turnover_exact: Decimal
+    turnover_approximate: Decimal
+    is_approximate: bool
+    discrepancy: Decimal
     trades: list[TradeRecord] = field(default_factory=list)
     warning: str = ""
-
-
-def _to_decimal(quotation) -> Decimal:
-    """Безопасное преобразование Quotation → Decimal."""
-    if quotation is None:
-        return Decimal("0")
-    try:
-        return quotation_to_decimal(quotation)
-    except Exception:
-        return Decimal("0")
 
 
 def _round(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-def _get_ticker(operation) -> str:
-    """Пытаемся извлечь тикер из операции."""
-    # В разных версиях SDK поле может называться по-разному
-    for attr in ("instrument_uid", "figi", "ticker"):
-        val = getattr(operation, attr, "")
+def _ticker(operation: dict[str, Any]) -> str:
+    for key in ("instrumentUid", "figi", "ticker"):
+        val = operation.get(key)
         if val:
             return str(val)
     return "UNKNOWN"
 
 
+def _int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return 0
+
+
 def calculate_operation_turnover(
-    operation,
+    operation: dict[str, Any],
     account_id: str,
 ) -> OperationTurnoverResult:
-    """
-    Рассчитывает оборот по одной операции.
+    """Оборот по одной операции (JSON-словарь GetOperationsByCursor)."""
+    op_id = str(operation.get("id") or "")
+    figi = str(operation.get("figi") or "")
+    ticker = _ticker(operation)
+    date_str = str(operation.get("date") or "")
+    direction = "BUY" if is_buy(operation) else "SELL"
 
-    Parameters
-    ----------
-    operation : OperationItem
-        Объект операции из T-Invest API.
-    account_id : str
-        ID счёта (для маркировки записей).
-    """
-    op_id = str(getattr(operation, "id", ""))
-    figi = str(getattr(operation, "figi", "") or "")
-    ticker = _get_ticker(operation)
-    op_date = getattr(operation, "date", None)
-    date_str = op_date.isoformat() if op_date else ""
-
-    # Направление операции
-    from tinkoff.invest.schemas import OperationType  # type: ignore[import]
-    op_type = getattr(operation, "type", None)
-    direction = "BUY" if op_type in (
-        OperationType.OPERATION_TYPE_BUY,
-        OperationType.OPERATION_TYPE_BUY_CARD,
-    ) else "SELL"
-
-    # Payment-based (fallback)
-    payment = _to_decimal(getattr(operation, "payment", None))
+    payment = quotation_to_decimal(operation.get("payment"))
     turnover_approximate = abs(payment)
 
-    # Trades-based (точный)
-    raw_trades = getattr(operation, "trades", None) or []
-
+    raw_trades = operation.get("trades") or []
     trade_records: list[TradeRecord] = []
     turnover_exact = Decimal("0")
 
-    if raw_trades:
-        for t in raw_trades:
-            price = _to_decimal(getattr(t, "price", None))
-            qty_raw = getattr(t, "quantity", 0)
-            try:
-                qty = int(qty_raw)
-            except (TypeError, ValueError):
-                qty = 0
-            trade_turnover = _round(abs(price * qty))
-            turnover_exact += trade_turnover
-
-            trade_records.append(TradeRecord(
-                operation_id=op_id,
-                account_id=account_id,
-                date=date_str,
-                ticker=ticker,
-                figi=figi,
-                direction=direction,
-                price=price,
-                quantity=qty,
-                turnover=trade_turnover,
-                is_approximate=False,
-                raw_payment=Decimal("0"),
-            ))
+    for t in raw_trades:
+        price = quotation_to_decimal(t.get("price"))
+        qty = _int(t.get("quantity", 0))
+        trade_turnover = _round(abs(price * qty))
+        turnover_exact += trade_turnover
+        trade_records.append(TradeRecord(
+            operation_id=op_id, account_id=account_id, date=date_str,
+            ticker=ticker, figi=figi, direction=direction,
+            price=price, quantity=qty, turnover=trade_turnover,
+            is_approximate=False, raw_payment=Decimal("0"),
+        ))
 
     is_approximate = len(trade_records) == 0
     warning = ""
 
     if is_approximate:
-        # Fallback: нет trades → используем payment
         warning = (
             f"[APPROXIMATE] Операция {op_id} не содержит trades. "
-            f"Оборот = abs(payment) = {turnover_approximate} ₽. "
-            f"Требуется сверка с брокерским отчётом."
+            f"Оборот = abs(payment) = {turnover_approximate} ₽. Требуется сверка."
         )
         logger.warning(warning)
-        # Создаём одну синтетическую запись
         trade_records.append(TradeRecord(
-            operation_id=op_id,
-            account_id=account_id,
-            date=date_str,
-            ticker=ticker,
-            figi=figi,
-            direction=direction,
-            price=Decimal("0"),
-            quantity=0,
-            turnover=turnover_approximate,
-            is_approximate=True,
-            raw_payment=payment,
+            operation_id=op_id, account_id=account_id, date=date_str,
+            ticker=ticker, figi=figi, direction=direction,
+            price=Decimal("0"), quantity=0, turnover=turnover_approximate,
+            is_approximate=True, raw_payment=payment,
         ))
 
-    # Расхождение (только если есть оба значения)
     discrepancy = Decimal("0")
     if not is_approximate and turnover_approximate > 0:
         discrepancy = _round(abs(turnover_exact - turnover_approximate))
 
     return OperationTurnoverResult(
-        operation_id=op_id,
-        account_id=account_id,
-        figi=figi,
-        ticker=ticker,
-        direction=direction,
-        date=date_str,
-        trade_count=len(trade_records),
+        operation_id=op_id, account_id=account_id, figi=figi, ticker=ticker,
+        direction=direction, date=date_str, trade_count=len(trade_records),
         turnover_exact=_round(turnover_exact),
         turnover_approximate=_round(turnover_approximate),
-        is_approximate=is_approximate,
-        discrepancy=discrepancy,
-        trades=trade_records,
-        warning=warning,
+        is_approximate=is_approximate, discrepancy=discrepancy,
+        trades=trade_records, warning=warning,
     )

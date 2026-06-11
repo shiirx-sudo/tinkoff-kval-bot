@@ -1,10 +1,10 @@
-# T-Invest API — актуальный SDK
-tinkoff-investments==0.2.0b65
+# T-Invest Invest API — обращение по REST напрямую (без SDK)
+requests==2.32.3
 
 # Работа с датами
 python-dateutil==2.9.0
 
-# Часовые пояса (нужно для Windows и некоторых Linux-окружений)
+# Часовые пояса (Windows и часть Linux-окружений)
 tzdata==2024.1
 
 # Переменные окружения
@@ -15,9 +15,3 @@ loguru==0.7.2
 
 # Форматированный вывод в консоль
 rich==13.7.0
-
-# Типизация и утилиты (входит в stdlib 3.10+, но явно указываем)
-# dataclasses — stdlib
-# decimal    — stdlib
-# csv        — stdlib
-# json       — stdlib
