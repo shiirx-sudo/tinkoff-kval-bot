@@ -40,11 +40,21 @@ class AccountProgress:
     account_name: str
     account_type: str = "broker"
     total_turnover: Decimal = Decimal("0")
-    trade_count: int = 0
     operation_count: int = 0
-    approximate_count: int = 0
+    exact_trade_count: int = 0          # сделки из операций с детализацией trades
+    approximate_trade_count: int = 0    # операции без trades, каждая считается за 1
     by_quarter: dict[str, QuarterTurnover] = field(default_factory=dict)
     operations: list[OperationTurnoverResult] = field(default_factory=list)
+
+    @property
+    def trade_count(self) -> int:
+        """Всего сделок (точные + приближённые)."""
+        return self.exact_trade_count + self.approximate_trade_count
+
+    @property
+    def approximate_count(self) -> int:
+        """Совместимость: число приближённых операций."""
+        return self.approximate_trade_count
 
 
 MONTH_MIN_TRADES = 1     # каждый месяц периода: минимум сделок
@@ -53,9 +63,11 @@ QUARTER_MIN_TRADES = 10  # каждый квартал периода: мини�
 
 @dataclass
 class MonthCheck:
-    """Проверка месяца на минимальную активность."""
+    """Активность за месяц периода."""
     label: str            # 'YYYY-MM'
+    operation_count: int = 0
     trade_count: int = 0
+    turnover: Decimal = Decimal("0")
 
     @property
     def ok(self) -> bool:
@@ -64,9 +76,11 @@ class MonthCheck:
 
 @dataclass
 class QuarterCheck:
-    """Проверка квартала на минимальную активность."""
+    """Активность за квартал периода."""
     label: str            # 'YYYYQn'
+    operation_count: int = 0
     trade_count: int = 0
+    turnover: Decimal = Decimal("0")
 
     @property
     def ok(self) -> bool:
@@ -130,6 +144,18 @@ class KvalProgress:
     @property
     def total_trade_count(self) -> int:
         return sum(a.trade_count for a in self.accounts)
+
+    @property
+    def total_exact_trade_count(self) -> int:
+        return sum(a.exact_trade_count for a in self.accounts)
+
+    @property
+    def total_approximate_trade_count(self) -> int:
+        return sum(a.approximate_trade_count for a in self.accounts)
+
+    @property
+    def approximate_warning_count(self) -> int:
+        return len(self.approximate_warnings)
 
     @property
     def total_operation_count(self) -> int:
@@ -271,17 +297,17 @@ class KvalTracker:
                 ap.operations.append(result)
                 ap.total_turnover += op_turnover
                 ap.operation_count += 1
-                ap.trade_count += sum(
-                    1 for t in result.trades if not t.is_approximate
-                ) or result.trade_count
-                all_trades.extend(result.trades)
-
                 if result.is_approximate:
-                    ap.approximate_count += 1
+                    ap.approximate_trade_count += 1
                     if result.warning:
                         warnings.append(result.warning)
+                else:
+                    ap.exact_trade_count += sum(
+                        1 for t in result.trades if not t.is_approximate
+                    )
+                all_trades.extend(result.trades)
 
-                # Разнос по кварталам
+                # Разнос по кварталам (per-account, для kval_quarters.csv)
                 op_date = _parse_op_date(result.date)
                 if op_date is not None:
                     q = _quarter_for(op_date, period)
@@ -303,6 +329,8 @@ class KvalTracker:
         # Помесячная и поквартальная активность (по фактическим сделкам)
         month_checks = {lbl: MonthCheck(lbl) for lbl in _period_months(period)}
         quarter_checks = {q.label: QuarterCheck(q.label) for q in period.quarters}
+        month_ops: dict[str, set[str]] = {lbl: set() for lbl in month_checks}
+        quarter_ops: dict[str, set[str]] = {lbl: set() for lbl in quarter_checks}
         for t in all_trades:
             d = _parse_op_date(t.date)
             if d is None:
@@ -310,9 +338,17 @@ class KvalTracker:
             mk = f"{d.year:04d}-{d.month:02d}"
             if mk in month_checks:
                 month_checks[mk].trade_count += 1
+                month_checks[mk].turnover += t.turnover
+                month_ops[mk].add(t.operation_id)
             q = _quarter_for(d, period)
             if q is not None:
                 quarter_checks[q.label].trade_count += 1
+                quarter_checks[q.label].turnover += t.turnover
+                quarter_ops[q.label].add(t.operation_id)
+        for mk, mc in month_checks.items():
+            mc.operation_count = len(month_ops[mk])
+        for qk, qc in quarter_checks.items():
+            qc.operation_count = len(quarter_ops[qk])
 
         progress = KvalProgress(
             period=period,

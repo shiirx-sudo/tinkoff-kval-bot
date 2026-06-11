@@ -64,7 +64,8 @@ def render(progress: KvalProgress) -> None:
     acc_table.add_column("ID", style="dim")
     acc_table.add_column("Оборот", justify="right")
     acc_table.add_column("Операций", justify="right")
-    acc_table.add_column("Прибл.", justify="right", style="yellow")
+    acc_table.add_column("Сделок точн.", justify="right")
+    acc_table.add_column("Сделок прибл.", justify="right", style="yellow")
 
     for a in p.accounts:
         acc_table.add_row(
@@ -72,7 +73,8 @@ def render(progress: KvalProgress) -> None:
             mask_identifier(a.account_id),
             _fmt_money(a.total_turnover),
             str(a.operation_count),
-            str(a.approximate_count) if a.approximate_count else "—",
+            str(a.exact_trade_count),
+            str(a.approximate_trade_count) if a.approximate_trade_count else "—",
         )
     _console.print(acc_table)
 
@@ -81,30 +83,35 @@ def render(progress: KvalProgress) -> None:
     q_table.add_column("Квартал", style="cyan")
     q_table.add_column("Оборот", justify="right")
     q_table.add_column("Операций", justify="right")
-
-    quarter_totals: dict[str, Decimal] = {}
-    quarter_ops: dict[str, int] = {}
-    for a in p.accounts:
-        for label, qt in a.by_quarter.items():
-            quarter_totals[label] = quarter_totals.get(label, Decimal("0")) + qt.turnover
-            quarter_ops[label] = quarter_ops.get(label, 0) + qt.operation_count
-
-    for q in p.period.quarters:
+    q_table.add_column("Сделок", justify="right")
+    q_table.add_column("Статус", justify="center")
+    for q in p.quarter_checks:
+        status_cell = "[green]OK[/green]" if q.ok else "[red]FAIL[/red]"
         q_table.add_row(
             q.label,
-            _fmt_money(quarter_totals.get(q.label, Decimal("0"))),
-            str(quarter_ops.get(q.label, 0)),
+            _fmt_money(q.turnover),
+            str(q.operation_count),
+            str(q.trade_count),
+            status_cell,
         )
     _console.print(q_table)
 
     # ─── Разбивка по месяцам ────────────────────────────────────────────────
     m_table = Table(title="\nПо месяцам", show_lines=False)
     m_table.add_column("Месяц", style="cyan")
+    m_table.add_column("Операций", justify="right")
     m_table.add_column("Сделок", justify="right")
+    m_table.add_column("Оборот", justify="right")
     m_table.add_column("Статус", justify="center")
     for m in p.months:
         status_cell = "[green]OK[/green]" if m.ok else "[red]FAIL[/red]"
-        m_table.add_row(m.label, str(m.trade_count), status_cell)
+        m_table.add_row(
+            m.label,
+            str(m.operation_count),
+            str(m.trade_count),
+            _fmt_money(m.turnover),
+            status_cell,
+        )
     _console.print(m_table)
 
     # ─── Готовность к квал-статусу ──────────────────────────────────────────

@@ -83,7 +83,7 @@ def test_kval_months_csv_written(tmp_path):
     assert "kval_months.csv" in written
     assert written["kval_months.csv"].exists()
     header = (tmp_path / "kval_months.csv").read_text(encoding="utf-8-sig").splitlines()[0]
-    assert header.split(";") == ["date", "month", "trade_count", "status"]
+    assert header.split(";") == ["date", "month", "operation_count", "trade_count", "turnover", "status"]
 
 
 def test_kval_progress_json_has_status_lists(tmp_path):

@@ -153,3 +153,25 @@ def test_full_eligibility_ready():
     assert p.quarters_ok is True            # каждый квартал >= 10 (по 12)
     assert p.qualification_ready is True
     assert all(q.trade_count >= 10 for q in p.quarter_checks)
+
+
+def test_twelve_ops_one_quarter_only_that_quarter_ok():
+    from tests.conftest import quotation
+    # 12 приближённых операций (без trades) в одном квартале 2025Q3 (август).
+    ops = [
+        make_operation("OPERATION_TYPE_BUY", id=f"ap-{i}",
+                       date="2025-08-15T10:00:00Z", trades=[],
+                       payment=quotation("-1500"))
+        for i in range(12)
+    ]
+    accounts = [make_account("acc-1", "Основной")]
+    p = KvalTracker(client=FakeClient(accounts, {"acc-1": ops})).analyze(as_of=AS_OF)
+
+    by_q = {q.label: q for q in p.quarter_checks}
+    assert by_q["2025Q3"].trade_count == 12      # приближённые считаются как сделки
+    assert by_q["2025Q3"].ok is True             # >= 10
+    assert all(q.ok is False for lbl, q in by_q.items() if lbl != "2025Q3")
+    assert p.quarters_ok is False                # остальные кварталы пустые
+    assert p.total_approximate_trade_count == 12
+    assert p.total_exact_trade_count == 0
+    assert p.qualification_ready is False
