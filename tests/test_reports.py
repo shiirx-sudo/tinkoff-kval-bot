@@ -115,3 +115,27 @@ def test_raw_operations_jsonl_written_and_masked(tmp_path):
     content = (tmp_path / "kval_operations_raw.jsonl").read_text(encoding="utf-8")
     assert "account_id_masked" in content
     assert content.strip()  # есть хотя бы одна строка
+
+
+def test_raw_export_masks_broker_account_id(tmp_path):
+    from reports import kval_reports
+
+    class FCBroker:
+        def get_broker_accounts(self):
+            return [make_account("2000123456", "Основной")]
+        def get_operations(self, account_id, from_dt, to_dt):
+            return [{
+                "id": "a", "operationType": "OPERATION_TYPE_BUY",
+                "figi": "BBG1", "instrumentUid": "uid-1", "instrumentType": "share",
+                "date": "2025-05-10T10:00:00Z", "brokerAccountId": "2000123456",
+                "tradesInfo": {"trades": [
+                    {"num": "1", "quantity": "1", "price": {"units": "100", "nano": 0}},
+                ]},
+            }]
+
+    p = KvalTracker(client=FCBroker()).analyze(as_of=date(2026, 6, 11))
+    kval_reports.write_all(p, tmp_path)
+    content = (tmp_path / "kval_operations_raw.jsonl").read_text(encoding="utf-8")
+    assert "2000123456" not in content          # полный brokerAccountId не утёк
+    assert "account_id_masked" in content
+    assert "***3456" in content                 # маскированное значение присутствует

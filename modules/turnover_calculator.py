@@ -17,7 +17,7 @@ from typing import Any
 
 from loguru import logger
 
-from common.helpers import quotation_to_decimal
+from common.helpers import as_decimal, quotation_to_decimal
 from modules.operation_filter import is_buy
 
 
@@ -37,6 +37,7 @@ class TradeRecord:
     turnover: Decimal
     is_approximate: bool = False
     raw_payment: Decimal = Decimal("0")
+    trade_id: str = ""        # num из tradesInfo.trades
 
 
 @dataclass
@@ -67,14 +68,16 @@ def _instrument_uid(operation: dict[str, Any]) -> str:
     return str(operation.get("instrumentUid") or operation.get("instrument_uid") or "")
 
 
-def _int(value: Any) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        try:
-            return int(float(value))
-        except (TypeError, ValueError):
-            return 0
+def _extract_trades(operation: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Источник сделок: сначала operation['trades'], затем
+    operation['tradesInfo']['trades'] (фактический формат GetOperationsByCursor).
+    """
+    trades = operation.get("trades")
+    if trades:
+        return trades
+    info = operation.get("tradesInfo") or {}
+    return info.get("trades") or []
 
 
 def _resolve(resolver, figi: str, instrument_uid: str, op: dict[str, Any]):
@@ -106,28 +109,34 @@ def calculate_operation_turnover(
 
     ticker, name, instr_type = _resolve(resolver, figi, instrument_uid, operation)
 
-    def _mk(price, qty, turnover, is_approx, raw_payment=Decimal("0")) -> TradeRecord:
+    def _mk(price, qty, turnover, is_approx, raw_payment=Decimal("0"),
+            trade_date=None, trade_id="") -> TradeRecord:
         return TradeRecord(
-            operation_id=op_id, account_id=account_id, date=date_str,
+            operation_id=op_id, account_id=account_id,
+            date=trade_date or date_str,
             instrument_uid=instrument_uid, ticker=ticker, instrument_name=name,
             figi=figi, instrument_type=instr_type, direction=direction,
             price=price, quantity=qty, turnover=turnover,
-            is_approximate=is_approx, raw_payment=raw_payment,
+            is_approximate=is_approx, raw_payment=raw_payment, trade_id=trade_id,
         )
 
     payment = quotation_to_decimal(operation.get("payment"))
     turnover_approximate = abs(payment)
 
-    raw_trades = operation.get("trades") or []
+    raw_trades = _extract_trades(operation)
     trade_records: list[TradeRecord] = []
     turnover_exact = Decimal("0")
 
     for t in raw_trades:
         price = quotation_to_decimal(t.get("price"))
-        qty = _int(t.get("quantity", 0))
-        trade_turnover = _round(abs(price * qty))
+        qty_dec = as_decimal(t.get("quantity", 0))
+        trade_turnover = _round(abs(price * qty_dec))
         turnover_exact += trade_turnover
-        trade_records.append(_mk(price, qty, trade_turnover, False))
+        trade_records.append(_mk(
+            price, int(qty_dec), trade_turnover, False,
+            trade_date=str(t.get("date") or "") or date_str,
+            trade_id=str(t.get("num") or ""),
+        ))
 
     is_approximate = len(trade_records) == 0
     warning = ""

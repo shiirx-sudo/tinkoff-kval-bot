@@ -82,3 +82,54 @@ def test_resolver_fills_ticker(operation, trade):
     assert res.ticker == "GAZP"
     assert res.instrument_name == "Газпром"
     assert res.trades[0].ticker == "GAZP"
+
+
+# ─── tradesInfo.trades (фактический формат GetOperationsByCursor) ────────────
+
+def _op_with_tradesinfo(trades, payment=None, **extra):
+    op = {
+        "id": "80125186351", "operationType": "OPERATION_TYPE_BUY",
+        "figi": "BBG004731489", "instrumentUid": "uuid-gmkn",
+        "instrumentType": "share", "date": "2026-01-15T10:00:00Z",
+        "tradesInfo": {"trades": trades},
+    }
+    if payment is not None:
+        op["payment"] = payment
+    op.update(extra)
+    return op
+
+
+def test_tradesinfo_counts_as_exact():
+    from tests.conftest import quotation
+    op = _op_with_tradesinfo([
+        {"num": "16763866946", "date": "2026-01-15T10:00:00Z",
+         "quantity": "10", "price": quotation("128.04")},
+    ], payment=quotation("-1280.4"))
+    res = calculate_operation_turnover(op, "acc-1")
+    assert res.is_approximate is False
+    assert res.turnover_exact == Decimal("1280.40")
+    t0 = res.trades[0]
+    assert t0.price == Decimal("128.04")
+    assert t0.quantity == 10
+    assert t0.turnover == Decimal("1280.40")
+    assert t0.is_approximate is False
+    assert t0.trade_id == "16763866946"
+
+
+def test_fallback_only_without_tradesinfo():
+    from tests.conftest import quotation
+    # есть tradesInfo.trades → payment НЕ используется, не approximate
+    op = _op_with_tradesinfo(
+        [{"num": "1", "quantity": "10", "price": quotation("128.04")}],
+        payment=quotation("-999999"),
+    )
+    res = calculate_operation_turnover(op, "acc-1")
+    assert res.is_approximate is False
+    assert res.turnover_exact == Decimal("1280.40")
+
+    # пустой tradesInfo → fallback на payment, approximate
+    op2 = _op_with_tradesinfo([], payment=quotation("-1280.4"))
+    res2 = calculate_operation_turnover(op2, "acc-1")
+    assert res2.is_approximate is True
+    assert res2.turnover_approximate == Decimal("1280.40")
+    assert res2.warning.startswith("[APPROXIMATE]")

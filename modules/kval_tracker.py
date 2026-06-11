@@ -225,7 +225,7 @@ def _mask_raw_operation(op: dict, account_id: str) -> dict:
     любые account-поля внутри тоже. Токенов в операции нет.
     """
     rec = dict(op)
-    for key in ("accountId", "account_id"):
+    for key in ("accountId", "account_id", "brokerAccountId"):
         if key in rec:
             rec[key] = mask_identifier(rec[key])
     rec["account_id_masked"] = mask_identifier(account_id)
