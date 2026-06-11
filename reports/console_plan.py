@@ -74,15 +74,15 @@ def render(plan: KvalPlan) -> None:
         m_table = Table(title="\nПлан по месяцам (до ближайшего окна)", show_lines=False)
         m_table.add_column("Месяц", style="cyan")
         m_table.add_column("Статус")
-        m_table.add_column("Сделок", justify="right")
+        m_table.add_column("Требуется сделок", justify="right")
+        m_table.add_column("Есть сделок", justify="right")
         m_table.add_column("Не хватает", justify="right")
-        m_table.add_column("Оборот", justify="right")
         m_table.add_column("Рекоменд. оборот", justify="right")
         for m in p.monthly_plan:
             m_table.add_row(
                 m.month, _status_cell(m.status),
+                str(m.planned_required_trade_count),
                 str(m.current_trade_count), str(m.missing_trade_count),
-                _money(m.current_turnover),
                 _money(m.suggested_turnover) if m.suggested_turnover else "—",
             )
         _console.print(m_table)

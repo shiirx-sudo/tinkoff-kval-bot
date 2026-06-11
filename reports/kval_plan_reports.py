@@ -38,7 +38,7 @@ def _month_row(m: MonthPlan) -> dict[str, Any]:
         "month": m.month,
         "status": m.status,
         "current_trade_count": m.current_trade_count,
-        "required_min_trade_count": m.required_min_trade_count,
+        "planned_required_trade_count": m.planned_required_trade_count,
         "missing_trade_count": m.missing_trade_count,
         "current_turnover": m.current_turnover,
         "suggested_turnover": m.suggested_turnover,

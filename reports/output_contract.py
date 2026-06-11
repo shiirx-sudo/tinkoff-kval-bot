@@ -63,7 +63,7 @@ REPORT_COLUMN_ORDER: dict[str, list[str]] = {
         "impossible_due_to_past_gaps",
     ],
     "kval_plan_months": [
-        "month", "status", "current_trade_count", "required_min_trade_count",
+        "month", "status", "current_trade_count", "planned_required_trade_count",
         "missing_trade_count", "current_turnover", "suggested_turnover",
     ],
     "kval_plan_quarters": [

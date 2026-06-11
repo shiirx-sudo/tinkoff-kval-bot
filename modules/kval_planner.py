@@ -59,7 +59,7 @@ class MonthPlan:
     month: str
     status: str               # done_ok | done_fail | future_required
     current_trade_count: int
-    required_min_trade_count: int
+    planned_required_trade_count: int
     missing_trade_count: int
     current_turnover: Decimal
     suggested_turnover: Decimal
@@ -288,33 +288,66 @@ class KvalPlanner:
             return "done_fail"
         return "future_required"
 
+    @staticmethod
+    def _distribute(total: int, n: int) -> list[int]:
+        """Front-loaded раскладка total по n частям (10,3 → [4,3,3])."""
+        if n <= 0 or total <= 0:
+            return [0] * max(n, 0)
+        base, rem = divmod(total, n)
+        return [base + (1 if i < rem else 0) for i in range(n)]
+
     def _monthly_plan(
         self, w: CandidateWindow, as_of: date, goal: Decimal
     ) -> list[MonthPlan]:
-        labels = list(w.month_counts.keys())
-        plannable = [
-            lbl for lbl in labels
+        all_labels = list(w.month_counts.keys())
+        plannable_all = [
+            lbl for lbl in all_labels
             if _month_end(int(lbl[:4]), int(lbl[5:7])) >= as_of
         ]
         remaining = max(Decimal("0"), goal - w.total_turnover)
-        per_month = (remaining / len(plannable)) if plannable else Decimal("0")
+        per_month_turnover = (
+            remaining / len(plannable_all)) if plannable_all else Decimal("0")
 
         plan: list[MonthPlan] = []
-        for lbl in labels:
-            y, m = int(lbl[:4]), int(lbl[5:7])
-            locked = _month_end(y, m) < as_of
-            count, turnover = w.month_counts[lbl]
-            missing = max(0, MONTH_MIN_TRADES - count)
-            suggested = Decimal("0") if locked else per_month
-            plan.append(MonthPlan(
-                month=lbl,
-                status=self._status(count, MONTH_MIN_TRADES, locked),
-                current_trade_count=count,
-                required_min_trade_count=MONTH_MIN_TRADES,
-                missing_trade_count=missing,
-                current_turnover=turnover,
-                suggested_turnover=suggested,
-            ))
+        # Помесячный минимум считаем поквартально: квартал требует >= 10 сделок,
+        # шаблон пустого квартала — 4/3/3, недостающее раскидываем только по
+        # планируемым (не прошедшим) месяцам, с учётом уже сделанных сделок.
+        for qlabel in w.included_quarters:
+            q = Quarter(int(qlabel[:4]), int(qlabel[5:]))
+            q_months = _months_between(q.start, q.end)
+            locked = {
+                lbl: _month_end(int(lbl[:4]), int(lbl[5:7])) < as_of
+                for lbl in q_months
+            }
+            current = {lbl: w.month_counts[lbl][0] for lbl in q_months}
+            past_count = sum(current[lbl] for lbl in q_months if locked[lbl])
+            plannable = [lbl for lbl in q_months if not locked[lbl]]
+            baseline = {lbl: max(MONTH_MIN_TRADES, current[lbl]) for lbl in plannable}
+            deficit = max(0, QUARTER_MIN_TRADES - past_count - sum(baseline.values()))
+            empty = [lbl for lbl in plannable if current[lbl] == 0]
+            receivers = empty if empty else plannable
+            adds = self._distribute(deficit, len(receivers))
+            extra = {lbl: adds[i] for i, lbl in enumerate(receivers)}
+
+            for lbl in q_months:
+                cur = current[lbl]
+                turnover = w.month_counts[lbl][1]
+                if locked[lbl]:
+                    planned = cur                       # задним числом не планируем
+                    suggested = Decimal("0")
+                else:
+                    planned = baseline[lbl] + extra.get(lbl, 0)
+                    suggested = per_month_turnover
+                missing = max(0, planned - cur)
+                plan.append(MonthPlan(
+                    month=lbl,
+                    status=self._status(cur, max(1, planned), locked[lbl]),
+                    current_trade_count=cur,
+                    planned_required_trade_count=planned,
+                    missing_trade_count=missing,
+                    current_turnover=turnover,
+                    suggested_turnover=suggested,
+                ))
         return plan
 
     def _quarterly_plan(
