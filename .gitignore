@@ -1,0 +1,38 @@
+# ─── Секреты / окружение ─────────────────────────────────────
+.env
+.env.local
+*.token
+
+# ─── Артефакты отчётов ───────────────────────────────────────
+kval_report.json
+kval_trades.csv
+out/
+*.log
+
+# ─── Python ──────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.Python
+
+# ─── Тесты / линтеры ─────────────────────────────────────────
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ─── IDE / ОС ────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
