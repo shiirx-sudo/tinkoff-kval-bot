@@ -73,12 +73,14 @@ REPORT_COLUMN_ORDER: dict[str, list[str]] = {
         "missing_trade_count", "current_turnover", "suggested_turnover", "status",
     ],
     "instrument_scan": [
-        "ticker", "name", "figi", "instrument_uid", "class_code", "lot",
-        "currency", "trading_status", "bid_best", "ask_best", "mid_price",
+        "ticker", "name", "figi", "instrument_uid", "class_code",
+        "requested_class_code", "resolved_class_code", "resolution_method",
+        "lot", "currency", "trading_status", "bid_best", "ask_best", "mid_price",
         "last_price", "spread_abs", "spread_bps", "bid_top_depth_rub",
         "ask_top_depth_rub", "min_side_top_depth_rub",
         "estimated_roundtrip_cost_bps", "estimated_monthly_cost_rub",
-        "score", "verdict", "suitable_for_turnover", "warnings",
+        "score", "verdict", "suitable_for_turnover",
+        "resolution_warning", "trading_status_warning", "warnings",
     ],
 }
 

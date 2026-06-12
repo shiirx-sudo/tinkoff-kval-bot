@@ -242,3 +242,25 @@ class TinkoffReadOnlyClient:
             {"instrumentId": instrument_id, "from": from_iso,
              "to": to_iso, "interval": interval},
         )
+
+    def find_instruments(self, query: str) -> dict[str, Any]:
+        """InstrumentsService/FindInstrument — поиск инструментов по строке."""
+        return self._post(_INSTRUMENTS, "FindInstrument", {"query": query})
+
+    def _list_instruments(self, method: str) -> dict[str, Any]:
+        return self._post(
+            _INSTRUMENTS, method,
+            {"instrumentStatus": "INSTRUMENT_STATUS_BASE"},
+        )
+
+    def get_etfs(self) -> dict[str, Any]:
+        return self._list_instruments("Etfs")
+
+    def get_shares(self) -> dict[str, Any]:
+        return self._list_instruments("Shares")
+
+    def get_bonds(self) -> dict[str, Any]:
+        return self._list_instruments("Bonds")
+
+    def get_currencies(self) -> dict[str, Any]:
+        return self._list_instruments("Currencies")

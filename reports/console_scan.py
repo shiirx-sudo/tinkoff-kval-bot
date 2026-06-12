@@ -15,6 +15,9 @@ _VERDICT = {
     "WATCH": "[yellow]WATCH[/yellow]",
     "BAD": "[red]BAD[/red]",
     "NO_DATA": "[dim]NO_DATA[/dim]",
+    "NO_ORDERBOOK": "[dim]NO_ORDERBOOK[/dim]",
+    "NOT_FOUND": "[red]NOT_FOUND[/red]",
+    "RESOLVED_NOT_TRADING": "[yellow]RESOLVED_NOT_TRADING[/yellow]",
 }
 
 
@@ -57,6 +60,27 @@ def render(report: ScanReport) -> None:
             _VERDICT.get(x.verdict, x.verdict),
         )
     _console.print(table)
+
+    # Заметки по инструментам: причины not_found / закрытых торгов / резолва
+    notes: list[str] = []
+    for x in r.results:
+        if x.verdict == "NOT_FOUND":
+            notes.append(
+                f"[red]{x.ticker}[/red]: не найден по ticker/class_code; "
+                "попробуйте другой class_code или проверьте доступность у брокера."
+            )
+        elif x.verdict == "RESOLVED_NOT_TRADING":
+            notes.append(
+                f"[yellow]{x.ticker}[/yellow] ({x.name or '—'}): найден, но "
+                f"trading_status={x.trading_status or 'UNKNOWN'} — сейчас не торгуется."
+            )
+        if x.resolution_warning:
+            notes.append(f"[dim]{x.ticker}: {x.resolution_warning}[/dim]")
+    for n in notes:
+        _console.print(n)
+
+    if r.session_hint:
+        _console.print(f"\n[yellow]⏰ {r.session_hint}[/yellow]")
 
     if r.commission_bps == 0:
         _console.print(

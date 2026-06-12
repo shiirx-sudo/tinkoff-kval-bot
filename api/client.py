@@ -68,6 +68,28 @@ class ReadOnlyClient:
     def get_trading_status(self, instrument_id: str) -> dict[str, Any]:
         return self._rest.get_trading_status(instrument_id)
 
+    def find_instruments(self, query: str) -> list[dict[str, Any]]:
+        """FindInstrument: список инструментов-кандидатов по строке (или [])."""
+        resp = self._rest.find_instruments(query)
+        return (resp or {}).get("instruments") or []
+
+    def get_instrument_by_figi(self, figi: str) -> dict[str, Any] | None:
+        from brokers.tinkoff.rest_client import INSTRUMENT_ID_TYPE_FIGI
+        resp = self._rest.get_instrument_by(INSTRUMENT_ID_TYPE_FIGI, figi)
+        return (resp or {}).get("instrument")
+
+    def instruments_catalog(self) -> list[dict[str, Any]]:
+        """Объединённый каталог Etfs/Shares/Bonds/Currencies (read-only fallback)."""
+        out: list[dict[str, Any]] = []
+        for getter in (self._rest.get_etfs, self._rest.get_shares,
+                       self._rest.get_bonds, self._rest.get_currencies):
+            try:
+                resp = getter()
+                out.extend((resp or {}).get("instruments") or [])
+            except Exception:  # noqa: BLE001 — каталог опционален
+                continue
+        return out
+
     def get_operations(
         self,
         account_id: str,

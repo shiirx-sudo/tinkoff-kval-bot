@@ -80,8 +80,15 @@ class ScanResult:
     trading_status_ok: bool = False
     data_ok: bool = False
     suitable_for_turnover: bool = False
+    requested_class_code: str = ""
+    resolved_class_code: str = ""
+    resolution_method: str = "not_found"   # get_instrument_by|find_instrument|catalog_fallback|not_found
+    resolution_warning: str = ""
+    trading_status_warning: str = ""
+    alternatives: list[dict] = field(default_factory=list)
+    orderbook_empty: bool = False
     score: int = 0
-    verdict: str = "NO_DATA"
+    verdict: str = "NO_DATA"               # GOOD|WATCH|BAD|NOT_FOUND|RESOLVED_NOT_TRADING|NO_ORDERBOOK|NO_DATA
     warnings: list[str] = field(default_factory=list)
 
 
@@ -95,6 +102,7 @@ class ScanReport:
     results: list[ScanResult]
     warnings: list[str]
     generated_at: str
+    session_hint: str = ""
     disclaimer: str = DISCLAIMER
 
 
@@ -209,11 +217,8 @@ def _levels_rub(levels: list[dict], lot: int, n: int) -> Decimal:
     return total
 
 
-def _score_and_verdict(r: ScanResult, f: ScanFilters) -> None:
-    if not r.data_ok or r.spread_bps is None:
-        r.score = 0
-        r.verdict = "NO_DATA"
-        return
+def _score_liquidity(r: ScanResult, f: ScanFilters) -> None:
+    """Считает score 0-100 и verdict GOOD/WATCH/BAD (только при наличии данных)."""
     max_spread = f.max_spread_bps if f.max_spread_bps > 0 else Decimal("20")
     min_depth = f.min_top_depth_rub if f.min_top_depth_rub > 0 else Decimal("1")
 
@@ -223,10 +228,7 @@ def _score_and_verdict(r: ScanResult, f: ScanFilters) -> None:
     depth_ratio = r.min_side_top_depth_rub / min_depth
     depth_score = max(Decimal("0"), min(Decimal("30"), Decimal("30") * depth_ratio))
 
-    if r.trading_status_ok:
-        quality_score = Decimal("20")
-    else:
-        quality_score = Decimal("10")
+    quality_score = Decimal("20") if r.trading_status_ok else Decimal("10")
 
     penalties = Decimal("0")
     if not r.spread_ok:
@@ -245,6 +247,26 @@ def _score_and_verdict(r: ScanResult, f: ScanFilters) -> None:
         r.verdict = "BAD"
 
 
+def _finalize(r: ScanResult, f: ScanFilters) -> None:
+    """
+    Назначает финальный verdict по приоритету состояний:
+    NOT_FOUND > RESOLVED_NOT_TRADING > NO_ORDERBOOK > NO_DATA > GOOD/WATCH/BAD.
+    """
+    if r.resolution_method == "not_found":
+        r.verdict = "NOT_FOUND"
+        r.score = 0
+        return
+    if not r.trading_status_ok:
+        r.verdict = "RESOLVED_NOT_TRADING"
+        r.score = 0
+        return
+    if not r.data_ok:
+        r.verdict = "NO_ORDERBOOK" if r.orderbook_empty else "NO_DATA"
+        r.score = 0
+        return
+    _score_liquidity(r, f)
+
+
 # ─── Сканер ──────────────────────────────────────────────────────────────────
 
 
@@ -254,23 +276,107 @@ class InstrumentScanner:
     def __init__(self, client: ReadOnlyClient | None = None) -> None:
         self.client = client or ReadOnlyClient()
 
+    @staticmethod
+    def _pick(matches: list[dict]) -> dict:
+        """Из совпадений по тикеру предпочитаем торгуемый через API."""
+        for m in matches:
+            if m.get("apiTradeAvailableFlag"):
+                return m
+        return matches[0]
+
+    def _resolve(self, cand: Candidate) -> tuple[dict | None, str, str, str, list[dict]]:
+        """
+        Резолвит инструмент. Возвращает
+        (instrument, method, resolved_class_code, warning, alternatives).
+        method ∈ get_instrument_by | find_instrument | catalog_fallback | not_found.
+        """
+        ticker = cand.ticker.upper()
+        requested = cand.class_code
+
+        # 1) Прямой справочник по ticker+class_code
+        try:
+            instr = self.client.find_instrument(cand.ticker, requested)
+            if instr:
+                rcc = str(instr.get("classCode") or requested)
+                return instr, "get_instrument_by", rcc, "", []
+        except Exception:  # noqa: BLE001 — 404/ошибка → fallback
+            pass
+
+        # 2) FindInstrument
+        matches: list[dict] = []
+        try:
+            found = self.client.find_instruments(cand.ticker)
+            matches = [i for i in found
+                       if str(i.get("ticker", "")).upper() == ticker]
+        except Exception:  # noqa: BLE001
+            matches = []
+        if matches:
+            best = self._pick(matches)
+            full = None
+            try:
+                full = self.client.get_instrument_by_figi(best.get("figi", ""))
+            except Exception:  # noqa: BLE001
+                full = None
+            instr = full or best
+            rcc = str(instr.get("classCode") or best.get("classCode") or requested)
+            warning = (f"requested_class_code={requested}, resolved_class_code={rcc}"
+                       if rcc != requested else "")
+            alts = ([{"ticker": str(m.get("ticker", "")),
+                      "class_code": str(m.get("classCode", "")),
+                      "figi": str(m.get("figi", ""))} for m in matches]
+                    if len(matches) > 1 else [])
+            return instr, "find_instrument", rcc, warning, alts
+
+        # 3) Каталог (Etfs/Shares/Bonds/Currencies)
+        try:
+            catalog = self.client.instruments_catalog()
+            cmatches = [i for i in catalog
+                        if str(i.get("ticker", "")).upper() == ticker]
+        except Exception:  # noqa: BLE001
+            cmatches = []
+        if cmatches:
+            best = self._pick(cmatches)
+            rcc = str(best.get("classCode") or requested)
+            warning = (f"requested_class_code={requested}, resolved_class_code={rcc}"
+                       if rcc != requested else "")
+            alts = ([{"ticker": str(m.get("ticker", "")),
+                      "class_code": str(m.get("classCode", "")),
+                      "figi": str(m.get("figi", ""))} for m in cmatches]
+                    if len(cmatches) > 1 else [])
+            return best, "catalog_fallback", rcc, warning, alts
+
+        # 4) Не найден
+        return None, "not_found", "", "", []
+
     def _build_result(
         self, cand: Candidate, commission_bps: Decimal,
         target_monthly_turnover: Decimal, f: ScanFilters,
     ) -> ScanResult:
         r = ScanResult(ticker=cand.ticker, class_code=cand.class_code)
+        r.requested_class_code = cand.class_code
 
-        instr = self.client.find_instrument(cand.ticker, cand.class_code)
+        instr, method, rcc, res_warning, alts = self._resolve(cand)
+        r.resolution_method = method
+        r.alternatives = alts
+        if res_warning:
+            r.resolution_warning = res_warning
+            r.warnings.append(res_warning)
+
         if not instr:
-            r.warnings.append("инструмент не найден по ticker/class_code")
-            _score_and_verdict(r, f)
+            r.warnings.append(
+                "Не найден по ticker/class_code; попробуйте другой class_code "
+                "или проверьте доступность у брокера."
+            )
+            _finalize(r, f)
             return r
 
+        # Идентификация (всегда заполняем, даже если торгов нет)
         r.figi = str(instr.get("figi") or "")
         r.instrument_uid = str(instr.get("uid") or "")
         r.name = str(instr.get("name") or "")
         r.instrument_type = str(instr.get("instrumentType") or "")
-        r.class_code = str(instr.get("classCode") or cand.class_code)
+        r.class_code = str(instr.get("classCode") or rcc or cand.class_code)
+        r.resolved_class_code = r.class_code
         r.lot = int(instr.get("lot") or 1)
         r.currency = str(instr.get("currency") or "")
         if instr.get("nominal"):
@@ -278,13 +384,20 @@ class InstrumentScanner:
 
         instrument_id = r.instrument_uid or r.figi
 
-        # Режим торгов (не критично для расчёта)
+        # Режим торгов
         try:
             ts = self.client.get_trading_status(instrument_id)
             r.trading_status = str(ts.get("tradingStatus") or "")
         except Exception as exc:  # noqa: BLE001
             r.warnings.append(f"trading_status недоступен: {exc}")
         r.trading_status_ok = r.trading_status == SECURITY_TRADING_STATUS_NORMAL
+        if not r.trading_status_ok:
+            r.trading_status_warning = (
+                f"Инструмент найден, но сейчас trading_status="
+                f"{r.trading_status or 'UNKNOWN'}; запустите скан во время основной "
+                "торговой сессии или проверьте доступность инструмента у брокера."
+            )
+            r.warnings.append(r.trading_status_warning)
 
         # Последняя цена (не критично)
         try:
@@ -294,19 +407,20 @@ class InstrumentScanner:
         except Exception as exc:  # noqa: BLE001
             r.warnings.append(f"last_price недоступен: {exc}")
 
-        # Стакан (критично)
+        # Стакан
         try:
             ob = self.client.get_order_book(instrument_id, f.depth)
         except Exception as exc:  # noqa: BLE001
             r.warnings.append(f"order_book недоступен: {exc}")
-            _score_and_verdict(r, f)
+            _finalize(r, f)
             return r
 
         bids = ob.get("bids") or []
         asks = ob.get("asks") or []
         if not bids or not asks:
+            r.orderbook_empty = True
             r.warnings.append("пустой стакан (нет bid/ask)")
-            _score_and_verdict(r, f)
+            _finalize(r, f)
             return r
 
         r.data_ok = True
@@ -341,7 +455,7 @@ class InstrumentScanner:
         r.suitable_for_turnover = (
             r.spread_ok and r.depth_ok and r.trading_status_ok and r.data_ok)
 
-        _score_and_verdict(r, f)
+        _finalize(r, f)
         return r
 
     def scan(
@@ -368,6 +482,19 @@ class InstrumentScanner:
                 results.append(r)
                 warnings.append(f"{cand.ticker}: {exc}")
 
+        # Подсказка про торговую сессию: если все НАЙДЕННЫЕ инструменты не торгуются
+        # или с пустым стаканом — вероятно, скан вне активной сессии.
+        resolved = [r for r in results if r.resolution_method != "not_found"]
+        session_hint = ""
+        if resolved and all(
+            r.verdict in ("RESOLVED_NOT_TRADING", "NO_ORDERBOOK") for r in resolved
+        ):
+            session_hint = (
+                "Похоже, скан запущен вне активной торговой сессии или инструменты "
+                "сейчас недоступны. Для оценки спреда/глубины запускайте во время торгов."
+            )
+            warnings.append(session_hint)
+
         logger.info(
             f"Сканер: кандидатов={len(candidates)}, "
             f"commission_bps={commission_bps}, "
@@ -379,4 +506,5 @@ class InstrumentScanner:
             target_monthly_turnover=target_monthly_turnover, filters=f,
             candidates=candidates, results=results, warnings=warnings,
             generated_at=datetime.now(timezone.utc).isoformat(),
+            session_hint=session_hint,
         )

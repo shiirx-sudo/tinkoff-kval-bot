@@ -33,16 +33,29 @@ def _book(bid, ask, bid_qty, ask_qty):
 
 
 class FakeClient:
-    def __init__(self, instruments, books, statuses=None, fail_find=None):
+    def __init__(self, instruments, books, statuses=None, fail_find=None,
+                 find_results=None, by_figi=None, catalog=None):
         self._instruments = instruments      # ticker -> instr | None
         self._books = books                  # uid -> book
-        self._statuses = statuses or {}
+        self._statuses = statuses or {}      # instrument_id -> trading_status
         self._fail_find = set(fail_find or [])
+        self._find_results = find_results or {}   # TICKER -> [short instr]
+        self._by_figi = by_figi or {}             # figi -> full instr
+        self._catalog = catalog or []
 
     def find_instrument(self, ticker, class_code):
         if ticker in self._fail_find:
-            raise RuntimeError("api down")
+            raise RuntimeError("404 GetInstrumentBy")
         return self._instruments.get(ticker)
+
+    def find_instruments(self, query):
+        return self._find_results.get(query.upper(), [])
+
+    def get_instrument_by_figi(self, figi):
+        return self._by_figi.get(figi)
+
+    def instruments_catalog(self):
+        return self._catalog
 
     def get_trading_status(self, instrument_id):
         return {"tradingStatus": self._statuses.get(instrument_id, NORMAL)}
@@ -88,14 +101,14 @@ def test_wide_spread_not_good():
     assert r.verdict != "GOOD"
 
 
-def test_empty_book_no_data():
+def test_empty_book_no_orderbook():
     client = FakeClient(
         {"EMPT": _instr("EMPT", "u-empt")},
         {"u-empt": {"bids": [], "asks": []}},
     )
     r = _scan(client, ["EMPT"]).results[0]
     assert r.data_ok is False
-    assert r.verdict == "NO_DATA"
+    assert r.verdict == "NO_ORDERBOOK"     # найден и торгуется, но стакан пуст
     assert r.score == 0
 
 
@@ -107,7 +120,7 @@ def test_one_failing_instrument_does_not_break_scan():
     )
     rep = _scan(client, ["BAD", "OK"])
     assert len(rep.results) == 2
-    assert rep.results[0].verdict == "NO_DATA"
+    assert rep.results[0].verdict == "NOT_FOUND"
     assert rep.results[0].warnings
     assert rep.results[1].verdict == "GOOD"
 
@@ -186,3 +199,99 @@ def test_scanner_is_read_only_no_orders():
     # REST-клиент/фасад не обращаются к endpoint OrdersService
     for mod in ("brokers/tinkoff/rest_client.py", "api/client.py"):
         assert "OrdersService" not in Path(mod).read_text(encoding="utf-8")
+
+
+# ─── Резолвер и статусы (0012) ───────────────────────────────────────────────
+
+NOT_TRADING = "SECURITY_TRADING_STATUS_NOT_AVAILABLE_FOR_TRADING"
+
+
+def test_tmon_resolved_but_not_trading():
+    instr = _instr("TMON", "u-tmon")
+    instr["name"] = "Денежный рынок"
+    client = FakeClient(
+        {"TMON": instr},
+        {"u-tmon": {"bids": [], "asks": []}},
+        statuses={"u-tmon": NOT_TRADING},
+    )
+    r = _scan(client, ["TMON"]).results[0]
+    assert r.verdict == "RESOLVED_NOT_TRADING"
+    assert r.name == "Денежный рынок"
+    assert r.figi and r.instrument_uid and r.class_code
+    assert r.trading_status == NOT_TRADING
+    assert "NOT_AVAILABLE_FOR_TRADING" in r.trading_status_warning
+
+
+def test_lqdt_fallback_via_find_instruments():
+    # GetInstrumentBy 404 → FindInstrument находит точный тикер
+    short = {"ticker": "LQDT", "figi": "FG-LQDT", "classCode": "TQTF",
+             "uid": "u-lqdt", "name": "Ликвидность", "apiTradeAvailableFlag": True}
+    full = {"figi": "FG-LQDT", "uid": "u-lqdt", "name": "Ликвидность",
+            "instrumentType": "etf", "classCode": "TQTF", "lot": 1, "currency": "rub"}
+    client = FakeClient(
+        instruments={},                      # прямой справочник пуст
+        books={"u-lqdt": _book("100.00", "100.02", 2000, 2000)},
+        fail_find=["LQDT"],                  # GetInstrumentBy кидает 404
+        find_results={"LQDT": [short]},
+        by_figi={"FG-LQDT": full},
+    )
+    r = _scan(client, ["LQDT"]).results[0]
+    assert r.resolution_method == "find_instrument"
+    assert r.figi == "FG-LQDT"
+    assert r.verdict == "GOOD"
+
+
+def test_class_code_mismatch_warns():
+    short = {"ticker": "LQDT", "figi": "FG-LQDT", "classCode": "TQBR",
+             "uid": "u-lqdt", "apiTradeAvailableFlag": True}
+    full = {"figi": "FG-LQDT", "uid": "u-lqdt", "name": "Ликвидность",
+            "instrumentType": "etf", "classCode": "TQBR", "lot": 1, "currency": "rub"}
+    client = FakeClient(
+        instruments={}, books={"u-lqdt": _book("100.00", "100.02", 2000, 2000)},
+        fail_find=["LQDT"], find_results={"LQDT": [short]}, by_figi={"FG-LQDT": full},
+    )
+    cand = [Candidate(ticker="LQDT", class_code="TQTF")]
+    r = InstrumentScanner(client=client).scan(cand, as_of=date(2026, 7, 1)).results[0]
+    assert r.requested_class_code == "TQTF"
+    assert r.resolved_class_code == "TQBR"
+    assert "requested_class_code=TQTF" in r.resolution_warning
+    assert "resolved_class_code=TQBR" in r.resolution_warning
+
+
+def test_not_found_is_distinct_and_isolated():
+    client = FakeClient(
+        {"OK": _instr("OK", "u-ok")},
+        {"u-ok": _book("100.00", "100.02", 2000, 2000)},
+        fail_find=["GHOST"],                 # нет ни прямого, ни fallback
+    )
+    rep = _scan(client, ["GHOST", "OK"])
+    g = rep.results[0]
+    assert g.verdict == "NOT_FOUND"
+    assert g.resolution_method == "not_found"
+    assert rep.results[1].verdict == "GOOD"   # остальные считаются
+
+
+def test_session_hint_when_all_not_trading():
+    instr = _instr("TMON", "u-tmon")
+    client = FakeClient(
+        {"TMON": instr}, {"u-tmon": {"bids": [], "asks": []}},
+        statuses={"u-tmon": NOT_TRADING},
+    )
+    rep = _scan(client, ["TMON"])
+    assert rep.session_hint
+    assert "торговой сессии" in rep.session_hint
+
+
+def test_reports_have_resolution_columns(tmp_path):
+    from reports import instrument_scan_reports
+    client = FakeClient(
+        {"TMON": _instr("TMON", "u-tmon")},
+        {"u-tmon": _book("100.00", "100.02", 2000, 2000)},
+    )
+    rep = _scan(client, ["TMON"])
+    instrument_scan_reports.write_all(rep, tmp_path)
+    header = (tmp_path / "instrument_scan.csv").read_text(
+        encoding="utf-8-sig").splitlines()[0].split(";")
+    for col in ("requested_class_code", "resolved_class_code", "resolution_method",
+                "resolution_warning", "trading_status_warning"):
+        assert col in header

@@ -20,6 +20,9 @@ def _result_row(r: ScanResult) -> dict[str, Any]:
         "figi": r.figi,
         "instrument_uid": r.instrument_uid,
         "class_code": r.class_code,
+        "requested_class_code": r.requested_class_code,
+        "resolved_class_code": r.resolved_class_code,
+        "resolution_method": r.resolution_method,
         "lot": r.lot,
         "currency": r.currency,
         "trading_status": r.trading_status,
@@ -37,6 +40,8 @@ def _result_row(r: ScanResult) -> dict[str, Any]:
         "score": r.score,
         "verdict": r.verdict,
         "suitable_for_turnover": r.suitable_for_turnover,
+        "resolution_warning": r.resolution_warning,
+        "trading_status_warning": r.trading_status_warning,
         "warnings": "|".join(r.warnings),
     }
 
