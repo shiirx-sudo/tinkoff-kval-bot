@@ -22,8 +22,14 @@ BROKER = "tinkoff_invest"
 
 
 def _progress_row(p: KvalProgress) -> dict[str, Any]:
+    from modules.period_calculator import PERIOD_POLICY, PERIOD_POLICY_NOTE
     return {
         "date": date.today().isoformat(),
+        "period_policy": PERIOD_POLICY,
+        "period_kind": "official_fact",
+        "as_of": p.period.as_of_date.isoformat(),
+        "current_quarter_included": False,
+        "note": PERIOD_POLICY_NOTE,
         "period_start": p.period.start.isoformat(),
         "period_end": p.period.end.isoformat(),
         "quarters": ",".join(q.label for q in p.period.quarters),

@@ -30,6 +30,7 @@ def _window_row(w: CandidateWindow) -> dict[str, Any]:
         "turnover_ok": w.turnover_ok,
         "qualification_ready": w.qualification_ready,
         "impossible_due_to_past_gaps": w.impossible_due_to_past_gaps,
+        "window_kind": w.window_kind,
     }
 
 
@@ -77,6 +78,10 @@ def write_all(p: KvalPlan, reports_dir: str | Path = "data/reports") -> dict[str
 
     payload = {
         "as_of": p.as_of.isoformat(),
+        "period_policy": p.period_policy,
+        "period_kind": p.period_kind,
+        "official_status_command_hint":
+            "python main.py kval-status --as-of YYYY-MM-DD",
         "target": p.target,
         "effective_target": p.effective_target,
         "goal": p.goal,

@@ -45,6 +45,12 @@ def render(progress: KvalProgress) -> None:
     )
     _console.print(Panel(header, title="T-Invest Qualification Tracker"))
 
+    from modules.period_calculator import PERIOD_POLICY, PERIOD_POLICY_DESCRIPTION
+    _console.print(
+        f"[bold]Режим периода:[/bold] {PERIOD_POLICY}\n"
+        f"[dim]{PERIOD_POLICY_DESCRIPTION}[/dim]"
+    )
+
     # ─── Общий прогресс ─────────────────────────────────────────────────────
     ratio = float(p.progress_ratio)
     _console.print(

@@ -108,13 +108,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     sub.add_parser("doctor", help="Проверка окружения/конфигурации")
     sub.add_parser("accounts", help="Список брокерских счетов")
 
-    p_kval = sub.add_parser("kval-status", help="Прогресс к квал-статусу + отчёты")
+    p_kval = sub.add_parser("kval-status", help="Официальный факт по 4 завершённым календарным кварталам")
     p_kval.add_argument("--as-of", type=lambda s: date.fromisoformat(s), default=None,
                         metavar="YYYY-MM-DD", help="Дата расчёта (по умолчанию сегодня)")
     p_kval.add_argument("--reports-dir", default="data/reports", metavar="DIR",
                         help="Каталог для выходных отчётов (по умолчанию data/reports/)")
 
-    p_plan = sub.add_parser("kval-plan", help="Календарь выхода на квал-статус (планировщик)")
+    p_plan = sub.add_parser("kval-plan", help="Прогноз будущих окон и календарь выполнения условий")
     p_plan.add_argument("--as-of", type=lambda s: date.fromisoformat(s), default=None,
                         metavar="YYYY-MM-DD", help="Дата расчёта (по умолчанию сегодня)")
     p_plan.add_argument("--horizon-quarters", type=int, default=8, metavar="N",

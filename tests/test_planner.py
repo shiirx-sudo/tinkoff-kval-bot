@@ -172,3 +172,32 @@ def test_no_retroactive_planning_for_locked_month():
     assert jul.planned_required_trade_count == jul.current_trade_count
     assert jul.missing_trade_count == 0
     assert jul.suggested_turnover == 0                   # задним числом не планируем
+
+
+def test_plan_reports_have_forecast_kind(tmp_path):
+    import json
+    from reports import kval_plan_reports
+    ops = [_op("2026-05-15T10:00:00Z"), _op("2026-06-15T10:00:00Z")]
+    plan = KvalPlanner(client=FakeClient(ops)).plan(as_of=AS_OF)
+    kval_plan_reports.write_all(plan, tmp_path)
+    data = json.loads((tmp_path / "kval_plan.json").read_text(encoding="utf-8"))
+    assert data["period_kind"] == "forecast_plan"
+    assert data["period_policy"] == "official_completed_quarters"
+    assert data["official_status_command_hint"].startswith(
+        "python main.py kval-status")
+
+
+def test_candidate_window_kinds():
+    ops = [_op("2026-05-15T10:00:00Z"), _op("2026-06-15T10:00:00Z")]
+    plan = KvalPlanner(client=FakeClient(ops)).plan(as_of=AS_OF)
+    assert plan.windows[0].window_kind == "official_current"
+    assert all(w.window_kind == "forecast_future" for w in plan.windows[1:])
+    # колонка попадает в CSV
+    from reports import kval_plan_reports
+    import tempfile
+    import pathlib
+    d = pathlib.Path(tempfile.mkdtemp())
+    kval_plan_reports.write_all(plan, d)
+    header = (d / "kval_candidate_windows.csv").read_text(
+        encoding="utf-8-sig").splitlines()[0].split(";")
+    assert "window_kind" in header

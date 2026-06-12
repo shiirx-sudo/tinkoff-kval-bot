@@ -21,7 +21,7 @@ from api.client import ReadOnlyClient
 from config.settings import settings
 from modules.kval_tracker import MONTH_MIN_TRADES, QUARTER_MIN_TRADES
 from modules.operation_filter import is_qualifying_operation
-from modules.period_calculator import Quarter, calculate_kval_period
+from modules.period_calculator import PERIOD_POLICY, Quarter, calculate_kval_period
 from modules.turnover_calculator import calculate_operation_turnover
 
 DISCLAIMER = (
@@ -49,6 +49,7 @@ class CandidateWindow:
     turnover_ok: bool
     qualification_ready: bool
     impossible_due_to_past_gaps: bool
+    window_kind: str = "forecast_future"   # official_current | forecast_future
     # внутреннее: label -> (trade_count, turnover)
     month_counts: dict[str, tuple[int, Decimal]] = field(default_factory=dict)
     quarter_counts: dict[str, tuple[int, Decimal]] = field(default_factory=dict)
@@ -89,6 +90,8 @@ class KvalPlan:
     monthly_plan: list[MonthPlan]
     quarterly_plan: list[QuarterPlan]
     generated_at: str
+    period_policy: str = PERIOD_POLICY
+    period_kind: str = "forecast_plan"
     disclaimer: str = DISCLAIMER
 
 
@@ -251,6 +254,7 @@ class KvalPlanner:
                 months_ok=months_ok, quarters_ok=quarters_ok, turnover_ok=turnover_ok,
                 qualification_ready=qualification_ready,
                 impossible_due_to_past_gaps=impossible,
+                window_kind="official_current" if k == 0 else "forecast_future",
                 month_counts=month_counts, quarter_counts=quarter_counts,
             ))
 

@@ -43,11 +43,18 @@ def render(plan: KvalPlan) -> None:
     else:
         head = f"[bold red]Достижимого окна нет.[/bold red]\n{p.earliest_reason}"
     _console.print(Panel(head, title="Ближайшая возможная готовность"))
+    _console.print(
+        f"[bold]Режим периода:[/bold] {p.period_policy}  "
+        f"([dim]{p.period_kind}[/dim])\n"
+        "[yellow]Это прогноз по будущим окнам.[/yellow] Фактическая готовность "
+        "проверяется через kval-status после закрытия соответствующего квартала."
+    )
 
     # ─── Кандидатные окна ───────────────────────────────────────────────────
     w_table = Table(title="\nКандидатные окна", show_lines=False)
     w_table.add_column("Проверка", style="cyan")
     w_table.add_column("Период")
+    w_table.add_column("Тип")
     w_table.add_column("Оборот", justify="right")
     w_table.add_column("Мес.", justify="center")
     w_table.add_column("Кварт.", justify="center")
@@ -60,9 +67,12 @@ def render(plan: KvalPlan) -> None:
             result = "[bold green]READY[/bold green]"
         else:
             result = "[yellow]NOT READY[/yellow]"
+        kind = ("[cyan]official_current[/cyan]" if w.window_kind == "official_current"
+                else "[dim]forecast_future[/dim]")
         w_table.add_row(
             str(w.check_date),
             f"{w.period_start} … {w.period_end}",
+            kind,
             _money(w.total_turnover),
             _flag(w.months_ok), _flag(w.quarters_ok), _flag(w.turnover_ok),
             result,

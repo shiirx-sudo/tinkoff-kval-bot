@@ -24,7 +24,9 @@ OUTPUT_CONTRACT_VERSION = "2026-06.kval.v1"
 # Стабильный порядок колонок по каждому отчёту этапа 1.
 REPORT_COLUMN_ORDER: dict[str, list[str]] = {
     "kval_progress": [
-        "date", "period_start", "period_end", "quarters", "current_quarter",
+        "date", "period_policy", "period_kind", "as_of",
+        "current_quarter_included", "note",
+        "period_start", "period_end", "quarters", "current_quarter",
         "total_turnover", "target", "effective_target", "progress_pct",
         "remaining_to_target", "remaining_to_effective",
         "achieved", "achieved_bare",
@@ -60,7 +62,7 @@ REPORT_COLUMN_ORDER: dict[str, list[str]] = {
         "check_date", "period_start", "period_end", "included_quarters",
         "total_turnover", "remaining_turnover_to_target",
         "months_ok", "quarters_ok", "turnover_ok", "qualification_ready",
-        "impossible_due_to_past_gaps",
+        "impossible_due_to_past_gaps", "window_kind",
     ],
     "kval_plan_months": [
         "month", "status", "current_trade_count", "planned_required_trade_count",

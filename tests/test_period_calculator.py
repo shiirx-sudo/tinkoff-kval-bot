@@ -50,13 +50,14 @@ class TestCalculateKvalPeriod:
         "as_of, start, end, current",
         [
             # ВНИМАНИЕ: значения отражают ФАКТИЧЕСКОЕ поведение кода
-            # (правило «4 квартала, предшествующие текущему незавершённому»).
-            # Примеры в docstring period_calculator.py с этим расходятся —
-            # см. README / открытый вопрос по правилу периода.
+            # Правило периода зафиксировано: вариант A —
+            # official_completed_quarters (4 завершённых квартала,
+            # предшествующих текущему незавершённому).
             (date(2026, 6, 11), date(2025, 4, 1), date(2026, 3, 31), "2026Q2"),
             (date(2026, 1, 15), date(2025, 1, 1), date(2025, 12, 31), "2026Q1"),
             (date(2026, 3, 31), date(2025, 1, 1), date(2025, 12, 31), "2026Q1"),
             (date(2026, 4, 1), date(2025, 4, 1), date(2026, 3, 31), "2026Q2"),
+            (date(2026, 7, 1), date(2025, 7, 1), date(2026, 6, 30), "2026Q3"),
         ],
     )
     def test_actual_behavior(self, as_of, start, end, current):
@@ -64,6 +65,21 @@ class TestCalculateKvalPeriod:
         assert p.start == start
         assert p.end == end
         assert p.current_quarter.label == current
+
+    def test_just_closed_quarter_enters_next_day(self):
+        # 2026-06-30: 2026Q2 ещё идёт; 2026-07-01: уже закрылся и вошёл
+        assert calculate_kval_period(date(2026, 6, 30)).quarters[-1].label == "2026Q1"
+        assert calculate_kval_period(date(2026, 7, 1)).quarters[-1].label == "2026Q2"
+
+    def test_current_quarter_excluded_2026_06_11(self):
+        p = calculate_kval_period(date(2026, 6, 11))
+        assert "2026Q2" not in [q.label for q in p.quarters]
+        assert p.current_quarter.label == "2026Q2"
+
+    def test_just_closed_quarter_included_2026_07_01(self):
+        p = calculate_kval_period(date(2026, 7, 1))
+        assert "2026Q2" in [q.label for q in p.quarters]
+        assert (p.start, p.end) == (date(2025, 7, 1), date(2026, 6, 30))
 
     def test_always_four_quarters(self):
         p = calculate_kval_period(date(2026, 6, 11))

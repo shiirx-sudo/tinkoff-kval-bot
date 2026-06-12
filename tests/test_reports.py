@@ -155,3 +155,17 @@ def test_raw_export_masks_broker_account_id(tmp_path):
     assert "2000123456" not in content          # полный brokerAccountId не утёк
     assert "account_id_masked" in content
     assert "***3456" in content                 # маскированное значение присутствует
+
+
+def test_progress_reports_have_period_policy(tmp_path):
+    import json
+    kval_reports.write_all(_progress(), tmp_path)
+    data = json.loads((tmp_path / "kval_progress.json").read_text(encoding="utf-8"))
+    assert data["period_policy"] == "official_completed_quarters"
+    assert data["period_kind"] == "official_fact"
+    assert data["current_quarter_included"] is False
+    assert data["note"] == "Only four completed calendar quarters are included."
+    assert "as_of" in data
+    header = (tmp_path / "kval_progress.csv").read_text(
+        encoding="utf-8-sig").splitlines()[0].split(";")
+    assert "period_policy" in header and "period_kind" in header
