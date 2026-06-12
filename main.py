@@ -100,6 +100,62 @@ def cmd_kval_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_instrument_scan(args: argparse.Namespace) -> int:
+    from decimal import Decimal
+    from config.settings import settings
+    from modules.instrument_scanner import (
+        InstrumentScanner, ScanFilters, load_candidates, target_from_kval_plan,
+    )
+    from reports import console_scan, instrument_scan_reports
+
+    candidates = load_candidates(args.symbols, args.class_code)
+    if not candidates:
+        logger.error(
+            "Нет кандидатов: создайте config/instrument_candidates.yaml "
+            "или передайте --symbols TMON,LQDT"
+        )
+        return 1
+
+    # Комиссия: CLI → env/настройки → 0 + warning
+    if args.commission_bps is not None:
+        commission_bps = Decimal(str(args.commission_bps))
+    elif settings.commission_bps is not None:
+        commission_bps = settings.commission_bps
+    else:
+        commission_bps = Decimal("0")
+        logger.warning(
+            "commission_bps не задан (нет --commission-bps и TINKOFF_COMMISSION_BPS) "
+            "— издержки учитывают только спред."
+        )
+
+    # Целевой месячный оборот: CLI → kval_plan.json → 0
+    if args.target_monthly_turnover is not None:
+        target = Decimal(str(args.target_monthly_turnover))
+    else:
+        target = target_from_kval_plan(args.reports_dir) or Decimal("0")
+
+    filters = ScanFilters(
+        max_spread_bps=Decimal(str(args.max_spread_bps)),
+        min_top_depth_rub=Decimal(str(args.min_top_depth_rub)),
+        depth=args.depth,
+    )
+
+    try:
+        report = InstrumentScanner().scan(
+            candidates, as_of=args.as_of, commission_bps=commission_bps,
+            target_monthly_turnover=target, filters=filters,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка сканирования: {exc}")
+        return 1
+
+    console_scan.render(report)
+    written = instrument_scan_reports.write_all(report, args.reports_dir)
+    for name, path in written.items():
+        logger.info(f"Отчёт: {path}")
+    return 0
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="main.py", description="T-Invest Kval Bot (read-only)")
     parser.add_argument("-v", "--verbose", action="store_true", help="DEBUG-логирование")
@@ -123,6 +179,28 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                         help="Каталог для выходных отчётов (по умолчанию data/reports/)")
     p_plan.add_argument("--target-mode", choices=("effective", "bare"), default="effective",
                         help="Считать до цели с буфером (effective) или без (bare)")
+
+    p_scan = sub.add_parser(
+        "instrument-scan",
+        help="Read-only оценка ликвидности/издержек инструментов под набор оборота")
+    p_scan.add_argument("--as-of", type=lambda s: date.fromisoformat(s), default=None,
+                        metavar="YYYY-MM-DD", help="Дата расчёта (по умолчанию сегодня)")
+    p_scan.add_argument("--symbols", default=None, metavar="T1,T2",
+                        help="Список тикеров через запятую (иначе config/instrument_candidates.yaml)")
+    p_scan.add_argument("--class-code", default="TQBR",
+                        help="Режим/класс торгов (по умолчанию TQBR)")
+    p_scan.add_argument("--reports-dir", default="data/reports", metavar="DIR",
+                        help="Каталог отчётов (по умолчанию data/reports/)")
+    p_scan.add_argument("--depth", type=int, default=20, help="Глубина стакана (по умолчанию 20)")
+    p_scan.add_argument("--commission-bps", type=float, default=None,
+                        help="Комиссия в б.п. (иначе из окружения, иначе 0 + warning)")
+    p_scan.add_argument("--target-monthly-turnover", type=float, default=None,
+                        metavar="RUB",
+                        help="Целевой месячный оборот (иначе из kval_plan.json, иначе 0)")
+    p_scan.add_argument("--max-spread-bps", type=float, default=20,
+                        help="Порог спреда для spread_ok (по умолчанию 20)")
+    p_scan.add_argument("--min-top-depth-rub", type=float, default=100000,
+                        help="Порог глубины топ-уровня для depth_ok (по умолчанию 100000)")
     return parser.parse_args(argv)
 
 
@@ -131,6 +209,7 @@ _HANDLERS = {
     "accounts": cmd_accounts,
     "kval-status": cmd_kval_status,
     "kval-plan": cmd_kval_plan,
+    "instrument-scan": cmd_instrument_scan,
 }
 
 

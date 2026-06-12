@@ -46,9 +46,32 @@ def _write_planner_reports(tmp_path):
     return kval_plan_reports.write_all(plan, tmp_path)
 
 
+def _write_scanner_reports(tmp_path):
+    from datetime import date
+    from modules.instrument_scanner import Candidate, InstrumentScanner
+    from reports import instrument_scan_reports
+
+    class _SC:
+        def find_instrument(self, ticker, class_code):
+            return {"figi": "FG", "uid": "u", "name": ticker, "lot": 1,
+                    "currency": "rub", "instrumentType": "share", "classCode": "TQBR"}
+        def get_trading_status(self, instrument_id):
+            return {"tradingStatus": "SECURITY_TRADING_STATUS_NORMAL_TRADING"}
+        def get_last_price(self, instrument_id):
+            return None
+        def get_order_book(self, instrument_id, depth):
+            return {"bids": [{"price": {"units": "100", "nano": 0}, "quantity": "2000"}],
+                    "asks": [{"price": {"units": "100", "nano": 20000000}, "quantity": "2000"}]}
+
+    rep = InstrumentScanner(client=_SC()).scan(
+        [Candidate("TMON", "TQBR")], as_of=date(2026, 7, 1))
+    return instrument_scan_reports.write_all(rep, tmp_path)
+
+
 def test_csv_headers_match_contract(tmp_path):
     kval_reports.write_all(_progress(), tmp_path)
     _write_planner_reports(tmp_path)
+    _write_scanner_reports(tmp_path)
     for name, columns in REPORT_COLUMN_ORDER.items():
         path = tmp_path / f"{name}.csv"
         header = path.read_text(encoding="utf-8-sig").splitlines()[0].split(";")
@@ -58,6 +81,7 @@ def test_csv_headers_match_contract(tmp_path):
 def test_validate_existing_reports_ok(tmp_path):
     kval_reports.write_all(_progress(), tmp_path)
     _write_planner_reports(tmp_path)
+    _write_scanner_reports(tmp_path)
     results = dict(validate_existing_reports(tmp_path))
     assert all(status == "ok" for status in results.values()), results
 

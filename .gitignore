@@ -45,3 +45,6 @@ htmlcov/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Личный список кандидатов сканера (пример — *.example.yaml в репозитории)
+config/instrument_candidates.yaml

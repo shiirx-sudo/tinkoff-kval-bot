@@ -1,0 +1,13 @@
+# Кандидаты инструментов для оценки под набор оборота (read-only).
+# Скопируйте в config/instrument_candidates.yaml и отредактируйте под себя,
+# либо передавайте список через CLI: --symbols TMON,LQDT
+#
+# Это НЕ инвестиционная рекомендация: сканер лишь оценивает ликвидность и
+# издержки по рыночным данным. Решение и сверка с брокером — на вас.
+candidates:
+  - ticker: TMON
+    class_code: TQBR
+    note: "candidate for turnover"
+  - ticker: LQDT
+    class_code: TQBR
+    note: "candidate for turnover"

@@ -23,6 +23,7 @@ _RATE_LIMIT_SLEEP = 1.0
 _USERS = "tinkoff.public.invest.api.contract.v1.UsersService"
 _OPERATIONS = "tinkoff.public.invest.api.contract.v1.OperationsService"
 _INSTRUMENTS = "tinkoff.public.invest.api.contract.v1.InstrumentsService"
+_MARKETDATA = "tinkoff.public.invest.api.contract.v1.MarketDataService"
 
 # Типы счетов Т-Инвестиций
 ACCOUNT_TYPE_TINKOFF = "ACCOUNT_TYPE_TINKOFF"          # обычный брокерский
@@ -51,6 +52,10 @@ OPERATION_STATE_EXECUTED = "OPERATION_STATE_EXECUTED"
 # Типы идентификаторов инструмента для GetInstrumentBy
 INSTRUMENT_ID_TYPE_FIGI = "INSTRUMENT_ID_TYPE_FIGI"
 INSTRUMENT_ID_TYPE_UID = "INSTRUMENT_ID_TYPE_UID"
+INSTRUMENT_ID_TYPE_TICKER = "INSTRUMENT_ID_TYPE_TICKER"
+
+# Нормальный режим торгов (для trading_status_ok)
+SECURITY_TRADING_STATUS_NORMAL = "SECURITY_TRADING_STATUS_NORMAL_TRADING"
 
 
 def account_type_label(acc_type: str) -> str:
@@ -194,12 +199,46 @@ class TinkoffReadOnlyClient:
 
     # ─── Инструменты ────────────────────────────────────────────────────────
 
-    def get_instrument_by(self, id_type: str, id_value: str) -> dict[str, Any]:
+    def get_instrument_by(
+        self, id_type: str, id_value: str, class_code: str | None = None
+    ) -> dict[str, Any]:
         """
-        InstrumentsService/GetInstrumentBy — справочник по figi или uid.
-        Возвращает сырой ответ {'instrument': {...}}.
+        InstrumentsService/GetInstrumentBy — справочник по figi/uid/ticker.
+        Для idType=TICKER нужен class_code. Возвращает {'instrument': {...}}.
         """
+        payload: dict[str, Any] = {"idType": id_type, "id": id_value}
+        if class_code:
+            payload["classCode"] = class_code
+        return self._post(_INSTRUMENTS, "GetInstrumentBy", payload)
+
+    # ─── Рыночные данные (read-only, MarketDataService) ──────────────────────
+
+    def get_order_book(self, instrument_id: str, depth: int = 20) -> dict[str, Any]:
+        """MarketDataService/GetOrderBook — стакан по instrument_uid/figi."""
         return self._post(
-            _INSTRUMENTS, "GetInstrumentBy",
-            {"idType": id_type, "id": id_value},
+            _MARKETDATA, "GetOrderBook",
+            {"instrumentId": instrument_id, "depth": depth},
+        )
+
+    def get_last_prices(self, instrument_ids: list[str]) -> dict[str, Any]:
+        """MarketDataService/GetLastPrices — последние цены по списку id."""
+        return self._post(
+            _MARKETDATA, "GetLastPrices", {"instrumentId": instrument_ids},
+        )
+
+    def get_trading_status(self, instrument_id: str) -> dict[str, Any]:
+        """MarketDataService/GetTradingStatus — режим торгов инструмента."""
+        return self._post(
+            _MARKETDATA, "GetTradingStatus", {"instrumentId": instrument_id},
+        )
+
+    def get_candles(
+        self, instrument_id: str, from_iso: str, to_iso: str,
+        interval: str = "CANDLE_INTERVAL_DAY",
+    ) -> dict[str, Any]:
+        """MarketDataService/GetCandles — свечи для оценки активности (опц.)."""
+        return self._post(
+            _MARKETDATA, "GetCandles",
+            {"instrumentId": instrument_id, "from": from_iso,
+             "to": to_iso, "interval": interval},
         )

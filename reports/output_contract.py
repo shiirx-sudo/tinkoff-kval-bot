@@ -72,6 +72,14 @@ REPORT_COLUMN_ORDER: dict[str, list[str]] = {
         "quarter", "current_trade_count", "required_min_trade_count",
         "missing_trade_count", "current_turnover", "suggested_turnover", "status",
     ],
+    "instrument_scan": [
+        "ticker", "name", "figi", "instrument_uid", "class_code", "lot",
+        "currency", "trading_status", "bid_best", "ask_best", "mid_price",
+        "last_price", "spread_abs", "spread_bps", "bid_top_depth_rub",
+        "ask_top_depth_rub", "min_side_top_depth_rub",
+        "estimated_roundtrip_cost_bps", "estimated_monthly_cost_rub",
+        "score", "verdict", "suitable_for_turnover", "warnings",
+    ],
 }
 
 REQUIRED_COLUMNS = {name: set(cols) for name, cols in REPORT_COLUMN_ORDER.items()}

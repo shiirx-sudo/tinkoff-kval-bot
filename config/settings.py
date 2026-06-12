@@ -62,6 +62,14 @@ class Settings:
         )
     )
 
+    # Комиссия брокера в б.п. (1 б.п. = 0.01%). Опционально из env.
+    commission_bps: Decimal | None = field(
+        default_factory=lambda: (
+            Decimal(_optional_env("TINKOFF_COMMISSION_BPS"))
+            if _optional_env("TINKOFF_COMMISSION_BPS") else None
+        )
+    )
+
     @property
     def effective_target(self) -> Decimal:
         """Цель с учётом буфера безопасности."""
