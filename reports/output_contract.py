@@ -90,6 +90,10 @@ REPORT_COLUMN_ORDER: dict[str, list[str]] = {
         "selected_instrument_name", "estimated_roundtrip_cost_bps",
         "estimated_cost_rub", "warning",
     ],
+    "execution_plan": [
+        "seq", "side", "ticker", "class_code", "notional_rub", "estimated_lots",
+        "estimated_price", "expected_turnover_contribution", "dry_run",
+    ],
 }
 
 REQUIRED_COLUMNS = {name: set(cols) for name, cols in REPORT_COLUMN_ORDER.items()}

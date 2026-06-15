@@ -12,6 +12,7 @@ import json
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
+from math import ceil
 from pathlib import Path
 
 from loguru import logger
@@ -87,6 +88,16 @@ class Recommendations:
     recommended_roundtrip_side_notional: Decimal = Decimal("0")
     recommended_side_lots: int | None = None
     trade_plan_closed: bool = False
+    # Явное разделение для автоматического исполнения (execution-plan)
+    broker_trade_count_required: int = 0
+    broker_trade_count_current: int = 0
+    broker_trade_count_missing: int = 0
+    roundtrip_cycle_count_required: int = 0
+    side_notional: Decimal = Decimal("0")
+    cycle_turnover: Decimal = Decimal("0")
+    total_planned_turnover: Decimal = Decimal("0")
+    expected_broker_trades_after_execution: int = 0
+    expected_turnover_after_execution: Decimal = Decimal("0")
     note: str = ""
     disclaimer: str = DISCLAIMER
 
@@ -240,17 +251,29 @@ def _month_plan_from(entry: dict, mode: str, min_rub: Decimal,
     )
     mp.remaining_turnover = max(Decimal("0"), mp.suggested_turnover - mp.current_turnover)
 
-    if mp.missing_trade_count > 0:
-        per_trade = mp.remaining_turnover / mp.missing_trade_count
+    missing = mp.missing_trade_count
+    per_trade = mp.remaining_turnover / missing if missing > 0 else Decimal("0")
+
+    # Корректный roundtrip-номинал на сторону: оборот делится на ВСЕ стороны
+    # (cycles*2), а не per_trade/2 — иначе появляются лишние циклы.
+    if mode == "roundtrip" and missing > 0:
+        cycles = ceil(missing / 2)
+        side = mp.remaining_turnover / (cycles * 2)
     else:
-        per_trade = Decimal("0")
+        side = Decimal("0")
+
     if min_rub > 0:
         per_trade = max(per_trade, min_rub)
-    if max_rub > 0 and per_trade > 0:
-        per_trade = min(per_trade, max_rub)
+        if side > 0:
+            side = max(side, min_rub)
+    if max_rub > 0:
+        if per_trade > 0:
+            per_trade = min(per_trade, max_rub)
+        if side > 0:
+            side = min(side, max_rub)
 
     mp.recommended_turnover_per_missing_trade = _round(per_trade)
-    mp.recommended_roundtrip_side_notional = _round(per_trade / 2)
+    mp.recommended_roundtrip_side_notional = _round(side)
     return mp
 
 
@@ -338,28 +361,47 @@ def build(
 
     # Рекомендации (по выбранному режиму)
     recs = Recommendations(mode=mode, disclaimer=DISCLAIMER)
-    if current_month.missing_trade_count <= 0:
+    m = current_month
+    recs.broker_trade_count_required = m.planned_required_trade_count
+    recs.broker_trade_count_current = m.current_trade_count
+    recs.broker_trade_count_missing = m.missing_trade_count
+
+    if m.missing_trade_count <= 0:
         recs.trade_plan_closed = True
         recs.note = "Месячный trade-план закрыт: недостающих сделок нет."
+        recs.total_planned_turnover = Decimal("0")
+        recs.expected_broker_trades_after_execution = m.current_trade_count
     else:
-        recs.recommended_trade_turnover = current_month.recommended_turnover_per_missing_trade
+        recs.recommended_trade_turnover = m.recommended_turnover_per_missing_trade
         if mode == "roundtrip":
-            recs.recommended_roundtrip_side_notional = (
-                current_month.recommended_roundtrip_side_notional)
-            recs.note = ("roundtrip buy+sell: ориентировочный номинал на сторону = "
-                         "оборот на сделку / 2")
+            cycles = ceil(m.missing_trade_count / 2)
+            recs.roundtrip_cycle_count_required = cycles
+            recs.side_notional = _round(m.remaining_turnover / (cycles * 2))
+            recs.cycle_turnover = _round(recs.side_notional * 2)
+            recs.recommended_roundtrip_side_notional = recs.side_notional
+            recs.note = ("roundtrip BUY+SELL: 1 цикл = 2 broker trades; "
+                         "номинал на сторону = оборот / (циклы*2)")
+            sides = cycles * 2
         else:
+            recs.roundtrip_cycle_count_required = 0
+            recs.side_notional = recs.recommended_trade_turnover
             recs.recommended_roundtrip_side_notional = Decimal("0")
-            recs.note = "gross: каждая ручная сделка считается отдельным turnover-событием"
+            recs.note = "gross: каждая ручная сделка — отдельное turnover-событие"
+            sides = m.missing_trade_count
+        recs.total_planned_turnover = m.remaining_turnover
+        recs.expected_broker_trades_after_execution = m.current_trade_count + sides
 
         if round_lots:
             price = selected.ask_best or selected.bid_best
             lot_value = (price * selected.lot) if price else None
-            side = (recs.recommended_roundtrip_side_notional
-                    if mode == "roundtrip" else recs.recommended_trade_turnover)
+            side = (recs.side_notional if mode == "roundtrip"
+                    else recs.recommended_trade_turnover)
             if lot_value and lot_value > 0 and side > 0:
                 recs.recommended_side_lots = max(
                     1, int((side / lot_value).to_integral_value(rounding=ROUND_HALF_UP)))
+
+    recs.expected_turnover_after_execution = _round(
+        m.current_turnover + recs.total_planned_turnover)
 
     months_csv = [
         _month_plan_from(m, mode, min_trade_rub, max_trade_rub) for m in monthly

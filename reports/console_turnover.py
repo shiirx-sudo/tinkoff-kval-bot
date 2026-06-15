@@ -55,14 +55,27 @@ def render(p: ManualTurnoverPlan) -> None:
         _console.print(f"[green]{r.note}[/green]")
     else:
         _console.print(
-            f"Оборот ориентировочно на 1 недостающую сделку: "
+            f"Оборот ориентировочно на 1 недостающую broker-сделку: "
             f"{_money(r.recommended_trade_turnover)}")
         if p.mode == "roundtrip":
             lots = (f" (≈ {r.recommended_side_lots} лот.)"
                     if r.recommended_side_lots else "")
             _console.print(
-                f"Если делать roundtrip buy+sell: ориентировочно "
-                f"{_money(r.recommended_roundtrip_side_notional)} на сторону{lots}")
+                "[bold]Для автоматического исполнения (execution-plan):[/bold]")
+            _console.print(
+                f"  broker trades: {r.broker_trade_count_required} "
+                f"(есть {r.broker_trade_count_current}, "
+                f"не хватает {r.broker_trade_count_missing})")
+            _console.print(
+                f"  roundtrip циклов (BUY+SELL): {r.roundtrip_cycle_count_required}")
+            _console.print(
+                f"  номинал на сторону BUY/SELL: {_money(r.side_notional)}{lots}")
+            _console.print(f"  оборот на цикл: {_money(r.cycle_turnover)}")
+            _console.print(
+                f"  ожидаемый оборот после исполнения: "
+                f"{_money(r.expected_turnover_after_execution)}")
+            _console.print(
+                "[dim]Подробный план BUY/SELL: python main.py execution-plan[/dim]")
 
     _console.print("\n[bold]Оценочные издержки:[/bold]")
     _console.print(f"Roundtrip bps: {_num(si.estimated_roundtrip_cost_bps)}")

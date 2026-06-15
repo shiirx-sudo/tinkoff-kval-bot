@@ -186,6 +186,37 @@ def cmd_turnover_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_execution_plan(args: argparse.Namespace) -> int:
+    from decimal import Decimal
+    from modules.execution_planner import ExecutionPlanError, build
+    from reports import console_execution, execution_plan_reports
+
+    commission = (Decimal(str(args.commission_bps))
+                  if args.commission_bps is not None else None)
+    try:
+        plan = build(
+            reports_dir=args.reports_dir, as_of=args.as_of,
+            instrument=args.instrument, mode=args.mode,
+            commission_bps=commission,
+            max_side_notional_rub=Decimal(str(args.max_side_notional_rub)),
+            min_side_notional_rub=Decimal(str(args.min_side_notional_rub)),
+            spread_bps_limit=Decimal(str(args.spread_bps_limit)),
+            dry_run=args.dry_run,
+        )
+    except ExecutionPlanError as exc:
+        logger.error(str(exc))
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка построения execution-plan: {exc}")
+        return 1
+
+    console_execution.render(plan)
+    written = execution_plan_reports.write_all(plan, args.reports_dir)
+    for name, path in written.items():
+        logger.info(f"Отчёт: {path}")
+    return 0
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="main.py", description="T-Invest Kval Bot (read-only)")
     parser.add_argument("-v", "--verbose", action="store_true", help="DEBUG-логирование")
@@ -254,6 +285,28 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                         help="Максимальный ориентировочный номинал сделки (0 = без ограничения)")
     p_turn.add_argument("--round-lots", type=_boolish, default=True,
                         metavar="true|false", help="Округлять до целых лотов (по умолчанию true)")
+
+    p_exec = sub.add_parser(
+        "execution-plan",
+        help="DRY-RUN план будущих BUY/SELL действий (реальные заявки НЕ отправляются)")
+    p_exec.add_argument("--as-of", type=lambda s: date.fromisoformat(s), default=None,
+                        metavar="YYYY-MM-DD", help="Дата расчёта (по умолчанию сегодня)")
+    p_exec.add_argument("--reports-dir", default="data/reports", metavar="DIR",
+                        help="Каталог отчётов (по умолчанию data/reports/)")
+    p_exec.add_argument("--instrument", default="LQDT",
+                        help="Тикер из instrument_scan.json (по умолчанию LQDT)")
+    p_exec.add_argument("--mode", choices=("gross", "roundtrip"), default="roundtrip",
+                        help="roundtrip: пары BUY+SELL; gross: отдельные сделки")
+    p_exec.add_argument("--commission-bps", type=float, default=None,
+                        help="Комиссия в б.п. (иначе из instrument_scan.json, иначе 0+warning)")
+    p_exec.add_argument("--max-side-notional-rub", type=float, default=0,
+                        help="Лимит номинала одной стороны (0 = без лимита, но warning)")
+    p_exec.add_argument("--min-side-notional-rub", type=float, default=0,
+                        help="Минимальный номинал одной стороны (0 = без ограничения)")
+    p_exec.add_argument("--spread-bps-limit", type=float, default=5,
+                        help="Максимальный spread_bps для исполнения (по умолчанию 5)")
+    p_exec.add_argument("--dry-run", type=_boolish, default=True, metavar="true|false",
+                        help="Только dry-run (по умолчанию true; live не реализован)")
     return parser.parse_args(argv)
 
 
@@ -264,6 +317,7 @@ _HANDLERS = {
     "kval-plan": cmd_kval_plan,
     "instrument-scan": cmd_instrument_scan,
     "turnover-plan": cmd_turnover_plan,
+    "execution-plan": cmd_execution_plan,
 }
 
 

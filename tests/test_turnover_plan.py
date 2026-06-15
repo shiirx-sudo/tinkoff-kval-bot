@@ -111,7 +111,10 @@ def test_roundtrip_mode_splits_side(tmp_path):
     _setup(tmp_path)
     p = build(tmp_path, as_of=AS_OF, mode="roundtrip", round_lots=False)
     assert p.recommendations.recommended_trade_turnover == Decimal("127083.25")
-    assert p.recommendations.recommended_roundtrip_side_notional == Decimal("63541.63")
+    # corrected: remaining / (cycles*2) = 508333 / 4 = 127083.25 (не per_trade/2)
+    assert p.recommendations.recommended_roundtrip_side_notional == Decimal("127083.25")
+    assert p.recommendations.roundtrip_cycle_count_required == 2
+    assert p.recommendations.side_notional == Decimal("127083.25")
 
 
 def test_current_turnover_reduces_remaining(tmp_path):
