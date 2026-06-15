@@ -48,11 +48,20 @@ LIVE_ENABLED=false
 ```bash
 python main.py doctor          # проверка окружения/конфигурации
 python main.py accounts        # список брокерских счетов (масками)
-python main.py kval-status     # прогресс + отчёты в data/reports/
+python main.py kval-status     # официальный факт по 4 завершённым кварталам + отчёты
 python main.py kval-status --as-of 2026-03-31
-python main.py kval-status --reports-dir out/reports
+python main.py kval-plan       # прогноз будущих окон и календарь выполнения условий
+python main.py instrument-scan --symbols LQDT --commission-bps 5   # read-only оценка ликвидности/издержек
+python main.py turnover-plan   # read-only расчётный план ручного набора оборота (ничего не покупает)
+python main.py turnover-plan --instrument LQDT --mode roundtrip
 python main.py -v kval-status  # DEBUG-логирование
 ```
+
+`turnover-plan` синтезирует уже готовые отчёты (`kval_plan.json`, `instrument_scan.json`)
+и считает, сколько оборота/сделок ориентировочно нужно добрать вручную в текущем
+месяце/квартале и какой номинал одной операции (для `gross`) или на сторону
+(`roundtrip` buy+sell). Это только расчёт для ручных действий: команда ничего не
+покупает и не меняет портфель; фактический зачёт оборота сверяйте с брокером.
 
 ## Структура
 

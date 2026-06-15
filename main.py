@@ -156,6 +156,36 @@ def cmd_instrument_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_turnover_plan(args: argparse.Namespace) -> int:
+    from decimal import Decimal
+    from modules.turnover_planner import TurnoverPlanError, build
+    from reports import console_turnover, turnover_plan_reports
+
+    commission = (Decimal(str(args.commission_bps))
+                  if args.commission_bps is not None else None)
+    try:
+        plan = build(
+            reports_dir=args.reports_dir, as_of=args.as_of,
+            instrument=args.instrument, mode=args.mode,
+            commission_bps_cli=commission,
+            min_trade_rub=Decimal(str(args.min_trade_rub)),
+            max_trade_rub=Decimal(str(args.max_trade_rub)),
+            round_lots=args.round_lots,
+        )
+    except TurnoverPlanError as exc:
+        logger.error(str(exc))
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка построения плана: {exc}")
+        return 1
+
+    console_turnover.render(plan)
+    written = turnover_plan_reports.write_all(plan, args.reports_dir)
+    for name, path in written.items():
+        logger.info(f"Отчёт: {path}")
+    return 0
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="main.py", description="T-Invest Kval Bot (read-only)")
     parser.add_argument("-v", "--verbose", action="store_true", help="DEBUG-логирование")
@@ -201,6 +231,29 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                         help="Порог спреда для spread_ok (по умолчанию 20)")
     p_scan.add_argument("--min-top-depth-rub", type=float, default=100000,
                         help="Порог глубины топ-уровня для depth_ok (по умолчанию 100000)")
+
+    def _boolish(s: str) -> bool:
+        return str(s).strip().lower() in ("1", "true", "yes", "y", "да")
+
+    p_turn = sub.add_parser(
+        "turnover-plan",
+        help="Read-only расчётный план ручного набора оборота (без сделок)")
+    p_turn.add_argument("--as-of", type=lambda s: date.fromisoformat(s), default=None,
+                        metavar="YYYY-MM-DD", help="Дата расчёта (по умолчанию сегодня)")
+    p_turn.add_argument("--reports-dir", default="data/reports", metavar="DIR",
+                        help="Каталог отчётов (по умолчанию data/reports/)")
+    p_turn.add_argument("--instrument", default=None,
+                        help="Тикер из instrument_scan.json (иначе лучший GOOD)")
+    p_turn.add_argument("--mode", choices=("gross", "roundtrip"), default="roundtrip",
+                        help="gross: каждая сделка — отдельный оборот; roundtrip: buy+sell")
+    p_turn.add_argument("--commission-bps", type=float, default=None,
+                        help="Комиссия в б.п. (иначе из instrument_scan.json, иначе 0+warning)")
+    p_turn.add_argument("--min-trade-rub", type=float, default=0,
+                        help="Минимальный ориентировочный номинал сделки (0 = без ограничения)")
+    p_turn.add_argument("--max-trade-rub", type=float, default=0,
+                        help="Максимальный ориентировочный номинал сделки (0 = без ограничения)")
+    p_turn.add_argument("--round-lots", type=_boolish, default=True,
+                        metavar="true|false", help="Округлять до целых лотов (по умолчанию true)")
     return parser.parse_args(argv)
 
 
@@ -210,6 +263,7 @@ _HANDLERS = {
     "kval-status": cmd_kval_status,
     "kval-plan": cmd_kval_plan,
     "instrument-scan": cmd_instrument_scan,
+    "turnover-plan": cmd_turnover_plan,
 }
 
 

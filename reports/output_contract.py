@@ -82,6 +82,14 @@ REPORT_COLUMN_ORDER: dict[str, list[str]] = {
         "score", "verdict", "suitable_for_turnover",
         "resolution_warning", "trading_status_warning", "warnings",
     ],
+    "manual_turnover_plan": [
+        "month", "status", "planned_required_trade_count", "current_trade_count",
+        "missing_trade_count", "suggested_turnover", "current_turnover",
+        "remaining_turnover", "recommended_trade_turnover",
+        "recommended_roundtrip_side_notional", "selected_ticker",
+        "selected_instrument_name", "estimated_roundtrip_cost_bps",
+        "estimated_cost_rub", "warning",
+    ],
 }
 
 REQUIRED_COLUMNS = {name: set(cols) for name, cols in REPORT_COLUMN_ORDER.items()}
