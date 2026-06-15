@@ -84,12 +84,23 @@ def _write_execution_reports(tmp_path):
     return execution_plan_reports.write_all(plan, tmp_path)
 
 
+def _write_preflight_reports(tmp_path):
+    from datetime import date
+    from decimal import Decimal
+    from modules.execution_preflight import run
+    from reports import execution_preflight_reports
+    result = run(tmp_path, as_of=date(2026, 7, 1), instrument="TMON",
+                 max_side_notional_rub=Decimal("130000"))
+    return execution_preflight_reports.write_all(result, tmp_path)
+
+
 def test_csv_headers_match_contract(tmp_path):
     kval_reports.write_all(_progress(), tmp_path)
     _write_planner_reports(tmp_path)
     _write_scanner_reports(tmp_path)
     _write_turnover_reports(tmp_path)
     _write_execution_reports(tmp_path)
+    _write_preflight_reports(tmp_path)
     for name, columns in REPORT_COLUMN_ORDER.items():
         path = tmp_path / f"{name}.csv"
         header = path.read_text(encoding="utf-8-sig").splitlines()[0].split(";")
@@ -102,6 +113,7 @@ def test_validate_existing_reports_ok(tmp_path):
     _write_scanner_reports(tmp_path)
     _write_turnover_reports(tmp_path)
     _write_execution_reports(tmp_path)
+    _write_preflight_reports(tmp_path)
     results = dict(validate_existing_reports(tmp_path))
     assert all(status == "ok" for status in results.values()), results
 

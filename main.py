@@ -217,6 +217,36 @@ def cmd_execution_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_execution_preflight(args: argparse.Namespace) -> int:
+    from decimal import Decimal
+    from modules.execution_preflight import PreflightError, run
+    from reports import console_preflight, execution_preflight_reports
+
+    commission = (Decimal(str(args.commission_bps))
+                  if args.commission_bps is not None else None)
+    try:
+        result = run(
+            reports_dir=args.reports_dir, as_of=args.as_of,
+            instrument=args.instrument, mode=args.mode, commission_bps=commission,
+            max_side_notional_rub=Decimal(str(args.max_side_notional_rub)),
+            spread_bps_limit=Decimal(str(args.spread_bps_limit)),
+            min_depth_multiplier=Decimal(str(args.min_depth_multiplier)),
+        )
+    except PreflightError as exc:
+        logger.error(str(exc))
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка preflight: {exc}")
+        return 1
+
+    console_preflight.render(result)
+    written = execution_preflight_reports.write_all(result, args.reports_dir)
+    for name, path in written.items():
+        logger.info(f"Отчёт: {path}")
+    # READY_DRY_RUN / STALE_REPORTS → 0; BLOCKED / MISSING_REPORTS → 2
+    return 0 if result.status in ("READY_DRY_RUN", "STALE_REPORTS") else 2
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="main.py", description="T-Invest Kval Bot (read-only)")
     parser.add_argument("-v", "--verbose", action="store_true", help="DEBUG-логирование")
@@ -307,6 +337,26 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                         help="Максимальный spread_bps для исполнения (по умолчанию 5)")
     p_exec.add_argument("--dry-run", type=_boolish, default=True, metavar="true|false",
                         help="Только dry-run (по умолчанию true; live не реализован)")
+
+    p_pre = sub.add_parser(
+        "execution-preflight",
+        help="READ-ONLY проверка готовности dry-run плана (заявки НЕ отправляются)")
+    p_pre.add_argument("--as-of", type=lambda s: date.fromisoformat(s), default=None,
+                       metavar="YYYY-MM-DD", help="Дата расчёта (по умолчанию сегодня)")
+    p_pre.add_argument("--reports-dir", default="data/reports", metavar="DIR",
+                       help="Каталог отчётов (по умолчанию data/reports/)")
+    p_pre.add_argument("--instrument", default="LQDT",
+                       help="Тикер из instrument_scan.json (по умолчанию LQDT)")
+    p_pre.add_argument("--mode", choices=("gross", "roundtrip"), default="roundtrip",
+                       help="roundtrip: пары BUY+SELL; gross: отдельные сделки")
+    p_pre.add_argument("--commission-bps", type=float, default=None,
+                       help="Комиссия в б.п. (иначе из instrument_scan.json, иначе 0+warning)")
+    p_pre.add_argument("--max-side-notional-rub", type=float, default=130000,
+                       help="Лимит номинала одной стороны (по умолчанию 130000)")
+    p_pre.add_argument("--spread-bps-limit", type=float, default=5,
+                       help="Максимальный spread_bps (по умолчанию 5)")
+    p_pre.add_argument("--min-depth-multiplier", type=float, default=1.2,
+                       help="Требуемый запас глубины к side_notional (по умолчанию 1.2)")
     return parser.parse_args(argv)
 
 
@@ -318,6 +368,7 @@ _HANDLERS = {
     "instrument-scan": cmd_instrument_scan,
     "turnover-plan": cmd_turnover_plan,
     "execution-plan": cmd_execution_plan,
+    "execution-preflight": cmd_execution_preflight,
 }
 
 
