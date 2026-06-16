@@ -29,6 +29,23 @@ def render(p: ExecutionPlan) -> None:
     )
     _console.print(Panel(head, title="Execution Plan — DRY RUN"))
 
+    s = p.sizing
+    if s and s.mode == "balance":
+        _console.print(
+            f"\n[bold]Sizing mode:[/bold] balance\n"
+            f"Available cash: {_money(s.available_cash_rub)}\n"
+            f"Cash reserve: {_money(s.cash_reserve_rub)}\n"
+            f"Utilization: {s.utilization_pct}\n"
+            f"Usable side cap: {_money(s.usable_side_cap_rub)}\n"
+            f"Monthly turnover needed: {_money(s.monthly_turnover_needed)}\n"
+            f"Actions by turnover: {s.actions_by_turnover}\n"
+            f"Actions by kval rules: {s.actions_by_rules}\n"
+            f"Planned actions: {s.planned_actions}\n"
+            f"Side notional: {_money(p.side_notional)}\n"
+            f"Сделок за год (план): {s.projected_total_trades} / "
+            f"{s.kval_min_total_trades} (target {s.kval_target_total_trades})"
+        )
+
     _console.print(
         f"\nНужно broker trades: {p.broker_trade_count_missing}\n"
         f"Нужно roundtrip cycles: {p.roundtrip_cycle_count_required}\n"

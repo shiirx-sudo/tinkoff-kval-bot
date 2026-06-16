@@ -68,6 +68,12 @@ class ReadOnlyClient:
     def get_trading_status(self, instrument_id: str) -> dict[str, Any]:
         return self._rest.get_trading_status(instrument_id)
 
+    def get_portfolio(self, account_id: str) -> dict[str, Any]:
+        return self._rest.get_portfolio(account_id)
+
+    def get_positions(self, account_id: str) -> dict[str, Any]:
+        return self._rest.get_positions(account_id)
+
     def find_instruments(self, query: str) -> list[dict[str, Any]]:
         """FindInstrument: список инструментов-кандидатов по строке (или [])."""
         resp = self._rest.find_instruments(query)

@@ -197,6 +197,12 @@ class TinkoffReadOnlyClient:
             raise ValueError("account_id must be a non-empty string")
         return self._post(_OPERATIONS, "GetPortfolio", {"accountId": account_id})
 
+    def get_positions(self, account_id: str) -> dict[str, Any]:
+        """OperationsService/GetPositions — свободные деньги/блокировки (read-only)."""
+        if not account_id:
+            raise ValueError("account_id must be a non-empty string")
+        return self._post(_OPERATIONS, "GetPositions", {"accountId": account_id})
+
     # ─── Инструменты ────────────────────────────────────────────────────────
 
     def get_instrument_by(

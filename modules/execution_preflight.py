@@ -141,6 +141,13 @@ def run(
     max_side_notional_rub: Decimal = Decimal("0"),
     spread_bps_limit: Decimal = Decimal("5"),
     min_depth_multiplier: Decimal = Decimal("1.2"),
+    size_mode: str = "fixed",
+    available_cash_rub: Decimal | None = None,
+    balance_utilization_pct: Decimal = Decimal("0.80"),
+    min_cash_reserve_rub: Decimal = Decimal("5000"),
+    min_monthly_actions: int = 4,
+    kval_min_total_trades: int = 41,
+    kval_target_total_trades: int = 48,
 ) -> PreflightResult:
     out = Path(reports_dir)
     as_of = as_of or date.today()
@@ -173,6 +180,13 @@ def run(
             commission_bps=commission_bps,
             max_side_notional_rub=max_side_notional_rub,
             spread_bps_limit=spread_bps_limit,
+            size_mode=size_mode, available_cash_rub=available_cash_rub,
+            balance_utilization_pct=balance_utilization_pct,
+            min_cash_reserve_rub=min_cash_reserve_rub,
+            min_monthly_actions=min_monthly_actions,
+            min_depth_multiplier=min_depth_multiplier,
+            kval_min_total_trades=kval_min_total_trades,
+            kval_target_total_trades=kval_target_total_trades,
         )
         scan = json.loads((out / "instrument_scan.json").read_text(encoding="utf-8"))
         sel, _ = select_instrument(scan, instrument)
@@ -217,6 +231,10 @@ def run(
     if max_side_notional_rub and max_side_notional_rub > 0:
         add("side_within_max", side <= max_side_notional_rub,
             f"side_notional={side}, max={max_side_notional_rub}")
+    elif size_mode == "balance":
+        # в balance-режиме верхний лимит задаёт сам баланс, max=0 допустим
+        add("side_within_max", True, "balance-режим: лимит задаётся балансом",
+            blocking=False)
     else:
         warnings.append("max-side-notional-rub=0 — лимит стороны не задан.")
         add("side_within_max", False, "max-side-notional-rub не задан")
@@ -225,6 +243,15 @@ def run(
         f"count={len(plan.planned_actions)}")
     add("actions_are_dry_run", all(a.dry_run for a in plan.planned_actions),
         "все planned_actions dry_run=true")
+
+    # Balance-чеки из пересобранного плана (available_cash_present и т.д.)
+    if size_mode == "balance":
+        _balance_names = {"available_cash_present", "side_notional_within_balance",
+                          "reserve_preserved", "min_monthly_actions_met",
+                          "min_total_trades_met"}
+        for rc in plan.risk_checks:
+            if rc.name in _balance_names:
+                add(rc.name, rc.ok, rc.detail)
 
     order_clean, adapter_clean, found = _scan_codebase()
     add("no_order_endpoints", order_clean,

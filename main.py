@@ -186,13 +186,60 @@ def cmd_turnover_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+_TARIFF_BPS = {"investor": "30", "trader": "5", "premium": "4"}
+
+
+def _resolve_execution_sizing(args) -> dict:
+    """Собирает balance-параметры из env/CLI и (read-only) свободный баланс."""
+    import os
+    from decimal import Decimal
+
+    size_mode = getattr(args, "size_mode", None) or os.getenv("EXECUTION_SIZE_MODE", "fixed")
+    size_mode = size_mode.strip().lower()
+
+    kwargs = {
+        "size_mode": size_mode,
+        "balance_utilization_pct": Decimal(os.getenv("EXECUTION_BALANCE_UTILIZATION_PCT", "0.80") or "0.80"),
+        "min_cash_reserve_rub": Decimal(os.getenv("EXECUTION_MIN_CASH_RESERVE_RUB", "5000") or "5000"),
+        "min_monthly_actions": int(os.getenv("EXECUTION_MIN_MONTHLY_ACTIONS", "4") or "4"),
+        "kval_min_total_trades": int(os.getenv("KVAL_MIN_TOTAL_TRADES", "41") or "41"),
+        "kval_target_total_trades": int(os.getenv("KVAL_TARGET_TOTAL_TRADES", "48") or "48"),
+    }
+
+    # available_cash: явный CLI-override → read-only чтение со счёта
+    cash = getattr(args, "available_cash_rub", None)
+    if cash is not None:
+        kwargs["available_cash_rub"] = Decimal(str(cash))
+    elif size_mode == "balance":
+        try:
+            from api.client import ReadOnlyClient
+            from modules.balance import available_cash_rub
+            kwargs["available_cash_rub"] = available_cash_rub(
+                ReadOnlyClient(), getattr(args, "account_id", None))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Не удалось прочитать баланс (read-only): {exc}")
+            kwargs["available_cash_rub"] = None
+    return kwargs
+
+
+def _resolve_commission(args):
+    import os
+    from decimal import Decimal
+    if args.commission_bps is not None:
+        return Decimal(str(args.commission_bps))
+    tariff = os.getenv("TINVEST_TARIFF", "").strip().lower()
+    if tariff in _TARIFF_BPS:
+        return Decimal(_TARIFF_BPS[tariff])
+    return None
+
+
 def cmd_execution_plan(args: argparse.Namespace) -> int:
     from decimal import Decimal
     from modules.execution_planner import ExecutionPlanError, build
     from reports import console_execution, execution_plan_reports
 
-    commission = (Decimal(str(args.commission_bps))
-                  if args.commission_bps is not None else None)
+    commission = _resolve_commission(args)
+    sizing = _resolve_execution_sizing(args)
     try:
         plan = build(
             reports_dir=args.reports_dir, as_of=args.as_of,
@@ -201,7 +248,8 @@ def cmd_execution_plan(args: argparse.Namespace) -> int:
             max_side_notional_rub=Decimal(str(args.max_side_notional_rub)),
             min_side_notional_rub=Decimal(str(args.min_side_notional_rub)),
             spread_bps_limit=Decimal(str(args.spread_bps_limit)),
-            dry_run=args.dry_run,
+            min_depth_multiplier=Decimal(str(args.min_depth_multiplier)),
+            dry_run=args.dry_run, **sizing,
         )
     except ExecutionPlanError as exc:
         logger.error(str(exc))
@@ -222,8 +270,8 @@ def cmd_execution_preflight(args: argparse.Namespace) -> int:
     from modules.execution_preflight import PreflightError, run
     from reports import console_preflight, execution_preflight_reports
 
-    commission = (Decimal(str(args.commission_bps))
-                  if args.commission_bps is not None else None)
+    commission = _resolve_commission(args)
+    sizing = _resolve_execution_sizing(args)
     try:
         result = run(
             reports_dir=args.reports_dir, as_of=args.as_of,
@@ -231,6 +279,7 @@ def cmd_execution_preflight(args: argparse.Namespace) -> int:
             max_side_notional_rub=Decimal(str(args.max_side_notional_rub)),
             spread_bps_limit=Decimal(str(args.spread_bps_limit)),
             min_depth_multiplier=Decimal(str(args.min_depth_multiplier)),
+            **sizing,
         )
     except PreflightError as exc:
         logger.error(str(exc))
@@ -245,6 +294,39 @@ def cmd_execution_preflight(args: argparse.Namespace) -> int:
         logger.info(f"Отчёт: {path}")
     # READY_DRY_RUN / STALE_REPORTS → 0; BLOCKED / MISSING_REPORTS → 2
     return 0 if result.status in ("READY_DRY_RUN", "STALE_REPORTS") else 2
+
+
+def cmd_passive_income_summary(args: argparse.Namespace) -> int:
+    from api.client import ReadOnlyClient
+    from modules.balance import portfolio_breakdown
+
+    def _m(v):
+        from decimal import Decimal as _D
+        return f"{_D(v):,.0f} ₽".replace(",", " ")
+
+    try:
+        b = portfolio_breakdown(ReadOnlyClient(), args.account_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка чтения портфеля (read-only): {exc}")
+        return 1
+
+    print("💰 Passive Income Summary — READ ONLY\n")
+    print(f"Счёт: {b.account_id_masked or '—'}")
+    print(f"Свободные рубли: {_m(b.free_rub)}")
+    print(f"Фонды денежного рынка: {_m(b.money_market_funds_rub)}")
+    print(f"Облигации: {_m(b.bonds_rub)}")
+    print(f"Акции (потенц. дивиденды): {_m(b.dividend_shares_rub)}")
+    print(f"Прочее: {_m(b.other_rub)}")
+    print(f"Ожидаемая доходность портфеля: {_m(b.expected_yield_rub)}")
+    print(f"Итого: {_m(b.total_rub)}")
+    not_turnover = b.total_rub - b.free_rub
+    if b.total_rub > 0:
+        share = (not_turnover / b.total_rub * 100)
+        print(f"Доля капитала вне kval-turnover: {share:.0f}%")
+    for w in b.warnings:
+        logger.warning(w)
+    print("\nЭто аналитика, не рекомендация. Покупок/продаж не выполняется.")
+    return 0
 
 
 def _telegram_write_reports(reports_dir: str, text: str, result: dict) -> None:
@@ -441,6 +523,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                         help="Максимальный spread_bps для исполнения (по умолчанию 5)")
     p_exec.add_argument("--dry-run", type=_boolish, default=True, metavar="true|false",
                         help="Только dry-run (по умолчанию true; live не реализован)")
+    p_exec.add_argument("--size-mode", choices=("fixed", "balance"), default=None,
+                        help="fixed или balance (иначе из EXECUTION_SIZE_MODE)")
+    p_exec.add_argument("--account-id", default=None,
+                        help="Счёт для чтения баланса (read-only; иначе первый)")
+    p_exec.add_argument("--available-cash-rub", type=float, default=None,
+                        help="Override свободного баланса (иначе читается со счёта)")
+    p_exec.add_argument("--min-depth-multiplier", type=float, default=1.2,
+                        help="Запас глубины к side_notional (по умолчанию 1.2)")
 
     p_pre = sub.add_parser(
         "execution-preflight",
@@ -461,6 +551,18 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                        help="Максимальный spread_bps (по умолчанию 5)")
     p_pre.add_argument("--min-depth-multiplier", type=float, default=1.2,
                        help="Требуемый запас глубины к side_notional (по умолчанию 1.2)")
+    p_pre.add_argument("--size-mode", choices=("fixed", "balance"), default=None,
+                       help="fixed или balance (иначе из EXECUTION_SIZE_MODE)")
+    p_pre.add_argument("--account-id", default=None,
+                       help="Счёт для чтения баланса (read-only; иначе первый)")
+    p_pre.add_argument("--available-cash-rub", type=float, default=None,
+                       help="Override свободного баланса (иначе читается со счёта)")
+
+    p_pis = sub.add_parser(
+        "passive-income-summary",
+        help="READ-ONLY аналитика портфеля (деньги/фонды/облигации/акции)")
+    p_pis.add_argument("--account-id", default=None,
+                       help="Счёт (read-only; иначе первый брокерский)")
 
     p_tgt = sub.add_parser(
         "telegram-test", help="Проверка Telegram bot_token/chat_id (read-only)")
@@ -496,6 +598,7 @@ _HANDLERS = {
     "turnover-plan": cmd_turnover_plan,
     "execution-plan": cmd_execution_plan,
     "execution-preflight": cmd_execution_preflight,
+    "passive-income-summary": cmd_passive_income_summary,
     "telegram-test": cmd_telegram_test,
     "telegram-summary": cmd_telegram_summary,
     "telegram-notify": cmd_telegram_notify,

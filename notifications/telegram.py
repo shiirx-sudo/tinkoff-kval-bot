@@ -150,6 +150,10 @@ def read_reports(reports_dir: str | Path) -> dict[str, Any]:
         if not c.get("ok") and c.get("blocking"):
             warnings.append(f"{c.get('name')}: {c.get('detail')}")
 
+    exec_plan = _load_json(d / "execution_plan.json") or {}
+    sizing = exec_plan.get("sizing") or {}
+    planned_actions = len(exec_plan.get("planned_actions") or []) or sizing.get("planned_actions", 0)
+
     return {
         "status": str(preflight.get("status", "")),
         "instrument": instr,
@@ -163,6 +167,11 @@ def read_reports(reports_dir: str | Path) -> dict[str, Any]:
         "side_notional": preflight.get("side_notional"),
         "broker_trade_count_missing": int(preflight.get("broker_trade_count_missing") or 0),
         "roundtrip_cycle_count_required": int(preflight.get("roundtrip_cycle_count_required") or 0),
+        "size_mode": str(sizing.get("mode", "")),
+        "available_cash_rub": sizing.get("available_cash_rub"),
+        "planned_actions": planned_actions,
+        "projected_total_trades": sizing.get("projected_total_trades", 0),
+        "kval_min_total_trades": sizing.get("kval_min_total_trades", 41),
         "warnings": warnings,
     }
 
@@ -189,6 +198,15 @@ def build_summary_message(data: dict[str, Any], today: date | None = None) -> st
             f"Side notional: {_money(data.get('side_notional'))}",
             f"Broker trades missing: {data.get('broker_trade_count_missing', 0)}",
             f"Roundtrip cycles: {data.get('roundtrip_cycle_count_required', 0)}",
+        ]
+    if data.get("size_mode") == "balance":
+        lines += [
+            "",
+            "Sizing: balance",
+            f"Свободный баланс: {_money(data.get('available_cash_rub'))}",
+            f"Планируемых действий: {data.get('planned_actions', 0)}",
+            f"Сделок за период: {data.get('projected_total_trades', 0)} / "
+            f"{data.get('kval_min_total_trades', 41)}",
         ]
     if data.get("warnings"):
         lines += ["", "⚠️ Причины:"]

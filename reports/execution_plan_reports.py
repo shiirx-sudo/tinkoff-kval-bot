@@ -51,6 +51,7 @@ def write_all(p: ExecutionPlan, reports_dir: str | Path = "data/reports") -> dic
         "total_turnover": p.total_turnover,
         "expected_broker_trades_after_execution": p.expected_broker_trades_after_execution,
         "expected_turnover_after_execution": p.expected_turnover_after_execution,
+        "sizing": asdict(p.sizing) if p.sizing else None,
         "planned_actions": [asdict(a) for a in p.planned_actions],
         "risk_checks": [asdict(c) for c in p.risk_checks],
         "status": p.status,

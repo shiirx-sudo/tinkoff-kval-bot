@@ -57,6 +57,108 @@ class RiskCheck:
 
 
 @dataclass
+class Sizing:
+    mode: str = "fixed"
+    available_cash_rub: Decimal | None = None
+    cash_reserve_rub: Decimal = Decimal("0")
+    utilization_pct: Decimal = Decimal("0")
+    usable_side_cap_rub: Decimal = Decimal("0")
+    monthly_turnover_needed: Decimal = Decimal("0")
+    actions_by_turnover: int = 0
+    actions_by_rules: int = 0
+    planned_actions: int = 0
+    projected_total_trades: int = 0
+    kval_min_total_trades: int = 41
+    kval_target_total_trades: int = 48
+
+
+def _compute_balance_sizing(
+    monthly_needed: Decimal, mode: str, *,
+    available_cash_rub: Decimal | None, reserve: Decimal, utilization: Decimal,
+    max_side: Decimal, min_side_depth: Decimal | None, min_depth_multiplier: Decimal,
+    min_monthly_actions: int, missing: int,
+    kval_min_total_trades: int, kval_target_total_trades: int,
+) -> tuple[int, int, Decimal, Sizing, list[RiskCheck]]:
+    """Balance-adaptive расчёт. Возвращает (sides, cycles, side_notional, sizing, checks)."""
+    sizing = Sizing(
+        mode="balance", available_cash_rub=available_cash_rub, cash_reserve_rub=reserve,
+        utilization_pct=utilization, monthly_turnover_needed=monthly_needed,
+        kval_min_total_trades=kval_min_total_trades,
+        kval_target_total_trades=kval_target_total_trades,
+    )
+    checks: list[RiskCheck] = []
+    present = available_cash_rub is not None
+    checks.append(RiskCheck("available_cash_present", present,
+                            f"available_cash={available_cash_rub}"))
+
+    def _fail(detail: str) -> tuple[int, int, Decimal, Sizing, list[RiskCheck]]:
+        checks.extend([
+            RiskCheck("side_notional_within_balance", False, detail),
+            RiskCheck("reserve_preserved", False, detail),
+            RiskCheck("min_monthly_actions_met", False, detail),
+            RiskCheck("min_total_trades_met", False, detail),
+        ])
+        return 0, 0, Decimal("0"), sizing, checks
+
+    if not present:
+        return _fail("нет данных о свободном балансе")
+
+    # Нечего исполнять — оборот уже набран
+    if monthly_needed <= 0:
+        checks.extend([
+            RiskCheck("side_notional_within_balance", True, "оборот набран"),
+            RiskCheck("reserve_preserved", True, "оборот набран"),
+            RiskCheck("min_monthly_actions_met", True, "оборот набран"),
+            RiskCheck("min_total_trades_met", True, "оборот набран"),
+        ])
+        return 0, 0, Decimal("0"), sizing, checks
+
+    usable = max(Decimal("0"), available_cash_rub - reserve)
+    cap_balance = usable * utilization
+    caps = [cap_balance]
+    if max_side and max_side > 0:
+        caps.append(max_side)
+    if min_side_depth is not None and min_depth_multiplier > 0:
+        caps.append(min_side_depth / min_depth_multiplier)
+    side_cap = min(caps)
+    sizing.usable_side_cap_rub = _round(side_cap if side_cap > 0 else Decimal("0"))
+
+    if side_cap <= 0:
+        return _fail(f"side_cap<=0 (usable={usable}, reserve={reserve})")
+
+    actions_by_turnover = ceil(monthly_needed / side_cap)
+    actions_by_rules = max(min_monthly_actions, missing)
+    planned = max(actions_by_turnover, actions_by_rules)
+    if mode == "roundtrip" and planned % 2 == 1:
+        planned += 1
+
+    side_notional = _round(monthly_needed / planned)
+    sides = planned
+    cycles = planned // 2 if mode == "roundtrip" else 0
+    projected_total = planned * 12
+
+    sizing.actions_by_turnover = actions_by_turnover
+    sizing.actions_by_rules = actions_by_rules
+    sizing.planned_actions = planned
+    sizing.projected_total_trades = projected_total
+
+    within = side_notional <= usable
+    reserve_ok = (available_cash_rub - side_notional) >= reserve
+    checks.extend([
+        RiskCheck("side_notional_within_balance", within,
+                  f"side={side_notional}, usable={usable}"),
+        RiskCheck("reserve_preserved", reserve_ok,
+                  f"available-side={available_cash_rub - side_notional}, reserve={reserve}"),
+        RiskCheck("min_monthly_actions_met", planned >= min_monthly_actions,
+                  f"planned={planned}, min={min_monthly_actions}"),
+        RiskCheck("min_total_trades_met", projected_total >= kval_min_total_trades,
+                  f"projected={projected_total}, min={kval_min_total_trades}, "
+                  f"target={kval_target_total_trades}"),
+    ])
+    return sides, cycles, side_notional, sizing, checks
+
+
+@dataclass
 class ExecutionPlan:
     as_of: date
     period: str
@@ -81,6 +183,7 @@ class ExecutionPlan:
     status: str             # OK | BLOCKED
     warnings: list[str]
     generated_at: str
+    sizing: Sizing | None = None
     dry_run: bool = True
     disclaimer: str = DISCLAIMER
 
@@ -95,6 +198,14 @@ def build(
     min_side_notional_rub: Decimal = Decimal("0"),
     spread_bps_limit: Decimal = Decimal("5"),
     dry_run: bool = True,
+    size_mode: str = "fixed",
+    available_cash_rub: Decimal | None = None,
+    balance_utilization_pct: Decimal = Decimal("0.80"),
+    min_cash_reserve_rub: Decimal = Decimal("5000"),
+    min_monthly_actions: int = 4,
+    min_depth_multiplier: Decimal = Decimal("1.2"),
+    kval_min_total_trades: int = 41,
+    kval_target_total_trades: int = 48,
 ) -> ExecutionPlan:
     out = Path(reports_dir)
     warnings: list[str] = []
@@ -156,22 +267,37 @@ def build(
     missing = month.missing_trade_count
     remaining = month.remaining_turnover
 
-    # Циклы и номинал стороны
-    if mode == "roundtrip":
-        cycles = ceil(missing / 2) if missing > 0 else 0
-        sides = cycles * 2
-        if missing > 0 and missing % 2 == 1:
-            warnings.append(
-                f"Не хватает {missing} broker trades (нечётное): roundtrip даёт "
-                f"{sides} сделок — на 1 больше минимума."
-            )
-    else:  # gross
-        cycles = 0
-        sides = missing
+    sizing: Sizing | None = None
+    balance_checks: list[RiskCheck] = []
 
-    side_notional = _round(remaining / sides) if sides > 0 else Decimal("0")
-    cycle_turnover = _round(side_notional * 2) if mode == "roundtrip" else Decimal("0")
-    total_turnover = _round(side_notional * sides) if sides > 0 else Decimal("0")
+    if size_mode == "balance":
+        sides, cycles, side_notional, sizing, balance_checks = _compute_balance_sizing(
+            remaining, mode,
+            available_cash_rub=available_cash_rub, reserve=min_cash_reserve_rub,
+            utilization=balance_utilization_pct, max_side=max_side_notional_rub,
+            min_side_depth=min_side_depth, min_depth_multiplier=min_depth_multiplier,
+            min_monthly_actions=min_monthly_actions, missing=missing,
+            kval_min_total_trades=kval_min_total_trades,
+            kval_target_total_trades=kval_target_total_trades,
+        )
+        cycle_turnover = _round(side_notional * 2) if mode == "roundtrip" else Decimal("0")
+        total_turnover = _round(side_notional * sides) if sides > 0 else Decimal("0")
+    else:
+        # Циклы и номинал стороны (fixed: от недостающих broker trades)
+        if mode == "roundtrip":
+            cycles = ceil(missing / 2) if missing > 0 else 0
+            sides = cycles * 2
+            if missing > 0 and missing % 2 == 1:
+                warnings.append(
+                    f"Не хватает {missing} broker trades (нечётное): roundtrip даёт "
+                    f"{sides} сделок — на 1 больше минимума."
+                )
+        else:  # gross
+            cycles = 0
+            sides = missing
+        side_notional = _round(remaining / sides) if sides > 0 else Decimal("0")
+        cycle_turnover = _round(side_notional * 2) if mode == "roundtrip" else Decimal("0")
+        total_turnover = _round(side_notional * sides) if sides > 0 else Decimal("0")
 
     # Planned actions (BUY/SELL чередуются, чтобы не накапливать позицию)
     price_buy = ask or bid
@@ -227,10 +353,14 @@ def build(
             "monthly_target_overshoot_ok", False,
             f"total={total_turnover} > 2x suggested={suggested}"))
 
+    checks.extend(balance_checks)
+
     hard_fail = any(not c.ok for c in checks)
-    if sides <= 0:
+    if sides <= 0 and remaining <= 0:
         status = "OK"
-        warnings.append("Недостающих broker trades нет — исполнять нечего.")
+        warnings.append("Недостающего оборота нет — исполнять нечего.")
+    elif sides <= 0:
+        status = "BLOCKED"
     else:
         status = "BLOCKED" if hard_fail else "OK"
 
@@ -256,5 +386,5 @@ def build(
         expected_turnover_after_execution=expected_after_turnover,
         planned_actions=actions, risk_checks=checks, status=status,
         warnings=warnings, generated_at=datetime.now(timezone.utc).isoformat(),
-        dry_run=True,
+        sizing=sizing, dry_run=True,
     )
