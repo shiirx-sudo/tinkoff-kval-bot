@@ -82,6 +82,52 @@ NORMAL_TRADING, спред ≤ лимита, запас глубины `--min-de
 строит план, `execution-preflight` проверяет его — реального исполнения нет ни там,
 ни там, заявки не отправляются.
 
+## Telegram-уведомления (read-only)
+
+Бот может слать короткий статус мониторинга в Telegram. Это только уведомления о
+содержимом отчётов — никаких заявок, order-endpoints или изменения портфеля; токен
+нигде не логируется.
+
+Создание бота: в Telegram откройте **@BotFather** → `/newbot` → получите
+`TELEGRAM_BOT_TOKEN`. Узнать `TELEGRAM_CHAT_ID` можно, написав боту и открыв
+`https://api.telegram.org/bot<token>/getUpdates` (поле `chat.id`).
+
+В `.env` укажите (по умолчанию всё выключено):
+
+```env
+TELEGRAM_ALERTS_ENABLED=false
+TELEGRAM_BOT_TOKEN=123456:ВАШ_ТОКЕН
+TELEGRAM_CHAT_ID=123456789
+TELEGRAM_ALERT_MIN_INTERVAL_MINUTES=60
+TELEGRAM_DAILY_SUMMARY_ENABLED=true
+TELEGRAM_DAILY_SUMMARY_HOUR=10
+TELEGRAM_STATUS_CHANGE_ONLY=true
+```
+
+Проверка и использование:
+
+```bash
+python main.py telegram-summary                 # печатает сводку, ничего не шлёт
+python main.py telegram-test --dry-run true      # проверка без отправки
+python main.py telegram-test --dry-run false     # реальная отправка (нужен ALERTS_ENABLED=true или --force true)
+python main.py telegram-notify --dry-run true    # авто-решение об отправке (для runner)
+```
+
+`telegram-notify` сам решает, слать ли: при смене статуса — сразу; при
+`BLOCKED`/`MISSING_REPORTS`/`STALE_REPORTS` — сразу, но не чаще
+`TELEGRAM_ALERT_MIN_INTERVAL_MINUTES`; при `READY_DRY_RUN` — раз в день (daily
+summary); плюс предупреждения о приближении конца месяца (10/5/3/1 дн.) и квартала
+(21/14/7/3/1 дн.). Состояние антиспама — в `data/alerts/telegram_alert_state.json`.
+
+В `run_kval_monitor.ps1` добавьте последней строкой после `execution-preflight`:
+
+```powershell
+python main.py telegram-notify --dry-run false
+```
+
+Уведомления полностью read-only: они сообщают о статусе, но ничего не покупают, не
+продают и не меняют портфель.
+
 ## Структура
 
 ```

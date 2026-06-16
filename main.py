@@ -247,6 +247,110 @@ def cmd_execution_preflight(args: argparse.Namespace) -> int:
     return 0 if result.status in ("READY_DRY_RUN", "STALE_REPORTS") else 2
 
 
+def _telegram_write_reports(reports_dir: str, text: str, result: dict) -> None:
+    import json as _json
+    from pathlib import Path as _Path
+    out = _Path(reports_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "telegram_last_message.md").write_text(text, encoding="utf-8")
+    (out / "telegram_notify_result.json").write_text(
+        _json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def cmd_telegram_test(args: argparse.Namespace) -> int:
+    from notifications.telegram import load_config, send_telegram_message
+    cfg = load_config()
+    text = "✅ telegram-test: T-Invest Kval Monitor на связи. Реальных заявок нет."
+    result = send_telegram_message(
+        cfg.bot_token, cfg.chat_id, text,
+        enabled=cfg.enabled, dry_run=args.dry_run, force=args.force)
+    if result.get("sent"):
+        logger.info("Telegram: тестовое сообщение отправлено.")
+    elif result.get("dry_run"):
+        logger.info("Telegram: dry-run — тестовое сообщение не отправлено.")
+    else:
+        logger.warning(f"Telegram: не отправлено ({result.get('reason') or result.get('error')}).")
+    return 0
+
+
+def cmd_telegram_summary(args: argparse.Namespace) -> int:
+    from notifications.telegram import (
+        build_summary_message,
+        load_config,
+        read_reports,
+        send_telegram_message,
+    )
+    data = read_reports(args.reports_dir)
+    text = build_summary_message(data)
+    print(text)
+    result = {"built": True, "sent": False, "reason": "summary_no_send"}
+    if args.send:
+        cfg = load_config()
+        result = send_telegram_message(
+            cfg.bot_token, cfg.chat_id, text,
+            enabled=cfg.enabled, dry_run=args.dry_run, force=args.force)
+    _telegram_write_reports(args.reports_dir, text, {"status": data.get("status"), **result})
+    return 0
+
+
+def cmd_telegram_notify(args: argparse.Namespace) -> int:
+    from datetime import datetime, timezone
+
+    from notifications.telegram import (
+        decide_notification,
+        load_alert_state,
+        load_config,
+        read_reports,
+        save_alert_state,
+        send_telegram_message,
+    )
+    cfg = load_config()
+    data = read_reports(args.reports_dir)
+    state_path = f"{args.alerts_dir.rstrip('/')}/telegram_alert_state.json"
+    state = load_alert_state(state_path)
+    now = datetime.now(timezone.utc)
+
+    decision = decide_notification(data, state, cfg, now)
+
+    if decision.should_send:
+        if args.dry_run:
+            send_result = {"sent": False, "dry_run": True, "reason": "dry_run", "error": None}
+        else:
+            send_result = send_telegram_message(
+                cfg.bot_token, cfg.chat_id, decision.text,
+                enabled=cfg.enabled, dry_run=False, force=args.force)
+        if send_result.get("sent") or args.dry_run:
+            state["last_sent_at_utc"] = now.isoformat()
+        if "daily_summary" in decision.reasons:
+            state["last_daily_summary_date"] = now.date().isoformat()
+        if decision.deadline_keys.get("month"):
+            state["last_month_deadline_alert"] = decision.deadline_keys["month"]
+        if decision.deadline_keys.get("quarter"):
+            state["last_quarter_deadline_alert"] = decision.deadline_keys["quarter"]
+    else:
+        send_result = {"sent": False, "reason": "suppressed", "error": None}
+
+    state["last_status"] = decision.status
+    state["last_hash"] = decision.text_hash
+    save_alert_state(state_path, state)
+
+    result = {
+        "status": decision.status,
+        "should_send": decision.should_send,
+        "reasons": decision.reasons,
+        **send_result,
+    }
+    _telegram_write_reports(args.reports_dir, decision.text, result)
+
+    logger.info(
+        f"telegram-notify: статус={decision.status}, "
+        f"отправка={'да' if decision.should_send else 'нет'} "
+        f"({', '.join(decision.reasons) or 'нет причин'}), "
+        f"sent={send_result.get('sent')}"
+    )
+    return 0
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="main.py", description="T-Invest Kval Bot (read-only)")
     parser.add_argument("-v", "--verbose", action="store_true", help="DEBUG-логирование")
@@ -357,6 +461,29 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                        help="Максимальный spread_bps (по умолчанию 5)")
     p_pre.add_argument("--min-depth-multiplier", type=float, default=1.2,
                        help="Требуемый запас глубины к side_notional (по умолчанию 1.2)")
+
+    p_tgt = sub.add_parser(
+        "telegram-test", help="Проверка Telegram bot_token/chat_id (read-only)")
+    p_tgt.add_argument("--dry-run", type=_boolish, default=True, metavar="true|false",
+                       help="Не отправлять реально (по умолчанию true)")
+    p_tgt.add_argument("--force", type=_boolish, default=False, metavar="true|false",
+                       help="Отправить даже при TELEGRAM_ALERTS_ENABLED=false")
+
+    p_tgs = sub.add_parser(
+        "telegram-summary", help="Короткий текст-сводка по отчётам (по умолчанию без отправки)")
+    p_tgs.add_argument("--reports-dir", default="data/reports", metavar="DIR")
+    p_tgs.add_argument("--send", type=_boolish, default=False, metavar="true|false",
+                       help="Отправить сводку (по умолчанию false)")
+    p_tgs.add_argument("--dry-run", type=_boolish, default=True, metavar="true|false")
+    p_tgs.add_argument("--force", type=_boolish, default=False, metavar="true|false")
+
+    p_tgn = sub.add_parser(
+        "telegram-notify", help="Авто-решение об уведомлении (для runner-скрипта)")
+    p_tgn.add_argument("--reports-dir", default="data/reports", metavar="DIR")
+    p_tgn.add_argument("--alerts-dir", default="data/alerts", metavar="DIR")
+    p_tgn.add_argument("--dry-run", type=_boolish, default=True, metavar="true|false",
+                       help="Не отправлять реально (по умолчанию true)")
+    p_tgn.add_argument("--force", type=_boolish, default=False, metavar="true|false")
     return parser.parse_args(argv)
 
 
@@ -369,6 +496,9 @@ _HANDLERS = {
     "turnover-plan": cmd_turnover_plan,
     "execution-plan": cmd_execution_plan,
     "execution-preflight": cmd_execution_preflight,
+    "telegram-test": cmd_telegram_test,
+    "telegram-summary": cmd_telegram_summary,
+    "telegram-notify": cmd_telegram_notify,
 }
 
 
