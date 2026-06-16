@@ -191,3 +191,32 @@ def test_decide_notification_deadline_triggers(tmp_path):
     # дневную сводку уже слали, но дедлайн месяца (2 дня) должен заставить отправить
     assert decision.should_send is True
     assert any("month_deadline" in r for r in decision.reasons)
+
+
+def test_load_config_reads_dotenv(tmp_path, monkeypatch):
+    # .env во временном каталоге + чистим OS env → load_config должен взять .env
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "TELEGRAM_ALERTS_ENABLED=true\n"
+        "TELEGRAM_BOT_TOKEN=123456:TEST\n"
+        "TELEGRAM_CHAT_ID=123456789\n",
+        encoding="utf-8",
+    )
+    for var in ("TELEGRAM_ALERTS_ENABLED", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+        monkeypatch.delenv(var, raising=False)
+
+    cfg = tg.load_config()
+    assert cfg.enabled is True
+    assert cfg.bot_token == "123456:TEST"
+    assert cfg.chat_id == "123456789"
+    # токен не должен светиться в repr
+    assert "123456:TEST" not in repr(cfg)
+
+
+def test_load_config_does_not_override_os_env(tmp_path, monkeypatch):
+    # реальная OS env-переменная имеет приоритет над .env
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("TELEGRAM_BOT_TOKEN=FROM_DOTENV\n", encoding="utf-8")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "FROM_OS_ENV")
+    cfg = tg.load_config()
+    assert cfg.bot_token == "FROM_OS_ENV"

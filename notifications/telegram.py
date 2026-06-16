@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import requests
+from dotenv import find_dotenv, load_dotenv
 from loguru import logger
 
 TELEGRAM_API = "https://api.telegram.org"
@@ -54,6 +55,9 @@ class TelegramConfig:
 
 
 def load_config() -> TelegramConfig:
+    # Подхватываем .env (как и config.settings), ищем от текущего рабочего
+    # каталога; НЕ перетираем уже заданные OS env (override=False). Токен не логируем.
+    load_dotenv(find_dotenv(usecwd=True), override=False)
     return TelegramConfig(
         enabled=_b(os.getenv("TELEGRAM_ALERTS_ENABLED", "false")),
         bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
