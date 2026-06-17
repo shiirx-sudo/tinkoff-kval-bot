@@ -466,24 +466,25 @@ def cmd_strategy_scan(args: argparse.Namespace) -> int:
 
     now = datetime.now(timezone.utc)
     state = sg.load_signal_state(opts["state_path"])
-    tg_cfg = tg.load_config()
 
-    for s in signals:
-        send, reason = sg.should_notify(s, state, now, opts["dedup_hours"],
-                                        opts["notify_on_hold"])
-        if not send:
-            continue
-        text = sg.build_signal_message(s, strategy=args.strategy)
-        # реальная отправка только при --notify и включённых уведомлениях
-        dry = not (args.notify and opts["notify_telegram"])
-        result = tg.send_telegram_message(
-            tg_cfg.bot_token, tg_cfg.chat_id, text,
-            enabled=tg_cfg.enabled, dry_run=dry)
-        if result.get("sent"):
-            s.notified = True
-            sg.update_state(state, s, now)
-
-    sg.save_signal_state(opts["state_path"], state)
+    # Telegram вызывается ТОЛЬКО при --notify; иначе просто пишем отчёты.
+    if args.notify and opts["notify_telegram"]:
+        tg_cfg = tg.load_config()
+        for s in signals:
+            if s.action not in ("BUY", "SELL"):
+                continue
+            send, _ = sg.should_notify(s, state, now, opts["dedup_hours"],
+                                       opts["notify_on_hold"])
+            if not send:
+                continue
+            text = sg.build_signal_message(s, strategy=args.strategy)
+            result = tg.send_telegram_message(
+                tg_cfg.bot_token, tg_cfg.chat_id, text,
+                enabled=tg_cfg.enabled, dry_run=False)
+            if result.get("sent"):
+                s.notified = True
+                sg.update_state(state, s, now)
+        sg.save_signal_state(opts["state_path"], state)
     written = strategy_signals_reports.write_all(signals, args.strategy, "data/reports")
     for name, path in written.items():
         logger.info(f"Отчёт: {path}")

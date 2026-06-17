@@ -12,6 +12,54 @@ from decimal import Decimal
 NORMAL = "SECURITY_TRADING_STATUS_NORMAL_TRADING"
 
 
+def parse_watchlist_item(item: str) -> tuple[str, str | None]:
+    """'TQBR:SBER' / 'SBER@TQBR' / 'SBER' -> (ticker, class_code|None)."""
+    s = str(item).strip()
+    if ":" in s:
+        cls, ticker = s.split(":", 1)        # CLASS:TICKER
+        return ticker.strip().upper(), (cls.strip().upper() or None)
+    if "@" in s:
+        ticker, cls = s.split("@", 1)         # TICKER@CLASS
+        return ticker.strip().upper(), (cls.strip().upper() or None)
+    return s.upper(), None
+
+
+def _norm_candidate(it: dict) -> dict:
+    return {
+        "ticker": str(it.get("ticker", "")).upper(),
+        "class_code": str(it.get("classCode") or it.get("class_code") or ""),
+        "figi": str(it.get("figi", "")),
+        "uid": str(it.get("uid") or it.get("instrumentUid") or ""),
+        "name": str(it.get("name", "")),
+        "instrument_type": str(it.get("instrumentType") or it.get("instrument_type") or ""),
+    }
+
+
+def resolve_instrument(
+    candidates: list[dict], ticker: str, explicit_class: str | None,
+    priority: list[str],
+) -> tuple[dict | None, str, list[str]]:
+    """Выбирает инструмент по тикеру с учётом class_code/приоритета.
+
+    Возвращает (chosen|None, selected_by, candidate_classes).
+    """
+    norm = [_norm_candidate(c) for c in (candidates or [])]
+    matches = [c for c in norm if c["ticker"] == ticker.upper()]
+    candidate_classes = [c["class_code"] for c in matches]
+
+    if explicit_class:
+        for c in matches:
+            if c["class_code"] == explicit_class.upper():
+                return c, "explicit_class_code", candidate_classes
+        return None, "no_allowed_match", candidate_classes
+
+    for cls in priority:
+        for c in matches:
+            if c["class_code"] == cls:
+                return c, "priority_fallback", candidate_classes
+    return None, "no_allowed_match", candidate_classes
+
+
 @dataclass
 class SignalConfig:
     min_score: int = 70
@@ -45,6 +93,11 @@ class Signal:
     liquidity_value_rub: Decimal | None = None
     reasons: list[str] = field(default_factory=list)
     blocked_reasons: list[str] = field(default_factory=list)
+    figi: str = ""
+    instrument_uid: str = ""
+    instrument_name: str = ""
+    instrument_type: str = ""
+    selected_by: str = ""             # explicit_class_code|default_class_code|priority_fallback|no_allowed_match
     notified: bool = False
 
 

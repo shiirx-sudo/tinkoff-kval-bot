@@ -55,6 +55,9 @@ def build_signal_message(sig: Signal, strategy: str = "trend_signal_v1") -> str:
         ]
         lines += [f"❌ {r}" for r in sig.reasons]
         lines += [
+            "",
+            "Если инструмент есть в портфеле — сигнал на выход/снижение риска.",
+            "Если инструмента нет — это сигнал слабости, не команда открывать шорт.",
             "", "Статус: SIGNAL_ONLY / READ_ONLY",
             "Заявки не отправляются.",
         ]

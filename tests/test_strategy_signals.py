@@ -7,7 +7,13 @@ from decimal import Decimal
 from pathlib import Path
 
 from notifications import signals as sg
-from strategies.trend_signal_v1 import NORMAL, SignalConfig, evaluate
+from strategies.trend_signal_v1 import (
+    NORMAL,
+    SignalConfig,
+    evaluate,
+    parse_watchlist_item,
+    resolve_instrument,
+)
 
 CFG = SignalConfig()
 
@@ -121,3 +127,79 @@ def test_no_order_endpoints_in_signal_sources():
                           "submit_order", "place_limit_order", "order_client",
                           "LIVE_EXECUTION", "TINKOFF_TOKEN", "full_token"):
             assert forbidden not in src, f"{f}: {forbidden}"
+
+
+# ─── resolver / class_code (focused fix) ─────────────────────────────────────
+
+PRIORITY = ["TQBR", "TQTF", "SPBRU"]
+
+
+def test_watchlist_parser():
+    assert parse_watchlist_item("TQBR:SBER") == ("SBER", "TQBR")
+    assert parse_watchlist_item("SBER@TQBR") == ("SBER", "TQBR")
+    assert parse_watchlist_item("SBER") == ("SBER", None)
+    assert parse_watchlist_item(" tqbr:sber ") == ("SBER", "TQBR")
+
+
+def test_resolver_priority_picks_tqbr():
+    cands = [{"ticker": "SBER", "classCode": "37M", "figi": "F37"},
+             {"ticker": "SBER", "classCode": "TQBR", "figi": "FTQ"}]
+    chosen, by, classes = resolve_instrument(cands, "SBER", None, PRIORITY)
+    assert chosen["class_code"] == "TQBR"
+    assert chosen["figi"] == "FTQ"
+    assert by == "priority_fallback"
+    assert set(classes) == {"37M", "TQBR"}
+
+
+def test_resolver_explicit_class():
+    cands = [{"ticker": "SBER", "classCode": "37M", "figi": "F37"},
+             {"ticker": "SBER", "classCode": "TQBR", "figi": "FTQ"}]
+    chosen, by, _ = resolve_instrument(cands, "SBER", "TQBR", PRIORITY)
+    assert chosen["class_code"] == "TQBR" and by == "explicit_class_code"
+    # явный, которого нет → no_allowed_match
+    chosen2, by2, _ = resolve_instrument(cands, "SBER", "SPBRU", PRIORITY)
+    assert chosen2 is None and by2 == "no_allowed_match"
+
+
+def test_resolver_no_allowed_class():
+    cands = [{"ticker": "SBER", "classCode": "37M", "figi": "F37"}]
+    chosen, by, classes = resolve_instrument(cands, "SBER", None, PRIORITY)
+    assert chosen is None
+    assert by == "no_allowed_match"
+    assert classes == ["37M"]
+
+
+def test_sell_message_exit_watch():
+    sig = evaluate(_downtrend(), _meta(), CFG)
+    assert sig.action == "SELL"
+    text = sg.build_signal_message(sig)
+    assert "SELL / EXIT WATCH" in text
+    assert "не команда открывать шорт" in text
+    assert "выход/снижение риска" in text
+
+
+def test_telegram_only_called_with_notify(monkeypatch, tmp_path):
+    import types
+    import main as m
+    from notifications import telegram as tgmod
+
+    buy = evaluate(_uptrend(), _meta(), CFG)
+    skip = evaluate([_candle(100) for _ in range(5)], _meta(), CFG)
+
+    monkeypatch.setattr("api.client.ReadOnlyClient", lambda *a, **k: object())
+    monkeypatch.setattr("modules.strategy_signals.scan", lambda *a, **k: [buy, skip])
+
+    calls = []
+    monkeypatch.setattr(tgmod, "send_telegram_message",
+                        lambda *a, **k: calls.append(1) or {"sent": False})
+    monkeypatch.chdir(tmp_path)
+
+    def _args(notify):
+        return types.SimpleNamespace(
+            strategy="trend_signal_v1", watchlist=None, min_score=None,
+            notify=notify, as_of=None, timeframe=None, max_signals=None)
+
+    m.cmd_strategy_scan(_args(False))
+    assert calls == []                      # без --notify Telegram не трогаем
+    m.cmd_strategy_scan(_args(True))
+    assert len(calls) == 1                  # только BUY (SKIP не шлём)

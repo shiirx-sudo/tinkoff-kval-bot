@@ -15,7 +15,13 @@ from dotenv import find_dotenv, load_dotenv
 from loguru import logger
 
 from common.helpers import quotation_to_decimal
-from strategies.trend_signal_v1 import SignalConfig, evaluate
+from strategies.trend_signal_v1 import (
+    Signal,
+    SignalConfig,
+    evaluate,
+    parse_watchlist_item,
+    resolve_instrument,
+)
 
 _STATE_PATH = "data/state/strategy_signals_state.json"
 
@@ -43,8 +49,13 @@ def load_signal_config() -> dict:
         "config": cfg,
         "enabled": _b(os.getenv("SIGNALS_ENABLED", "false")),
         "notify_telegram": _b(os.getenv("SIGNALS_NOTIFY_TELEGRAM", "true")),
-        "watchlist": [t.strip().upper() for t in
+        "watchlist": [t.strip() for t in
                       os.getenv("SIGNALS_WATCHLIST", "LQDT").split(",") if t.strip()],
+        "allowed_class_codes": [c.strip().upper() for c in
+                                os.getenv("SIGNALS_ALLOWED_CLASS_CODES", "TQBR,TQTF").split(",") if c.strip()],
+        "default_class_code": os.getenv("SIGNALS_DEFAULT_CLASS_CODE", "TQBR").strip().upper(),
+        "class_code_priority": [c.strip().upper() for c in
+                                os.getenv("SIGNALS_CLASS_CODE_PRIORITY", "TQBR,TQTF,SPBRU").split(",") if c.strip()],
         "timeframe": os.getenv("SIGNALS_TIMEFRAME", "day"),
         "lookback_days": int(os.getenv("SIGNALS_LOOKBACK_DAYS", "260") or "260"),
         "dedup_hours": int(os.getenv("SIGNALS_DEDUP_HOURS", "12") or "12"),
@@ -76,47 +87,71 @@ def _candles_for(client, figi: str, lookback_days: int, timeframe: str) -> list[
     return out
 
 
-def _meta_for(client, ticker: str) -> dict:
-    """Резолв инструмента + спред + статус + ликвидность (read-only, best-effort)."""
-    meta = {"ticker": ticker, "class_code": "", "figi": "",
-            "trading_status": "", "spread_bps": None, "liquidity_value_rub": None}
+def _resolve_meta(client, ticker: str, explicit_class: str | None,
+                  priority: list[str]) -> tuple[dict, str, list[str]]:
+    """Резолв инструмента (read-only) с учётом class_code/приоритета."""
     try:
         found = client.find_instruments(ticker)
-        for it in found or []:
-            if str(it.get("ticker", "")).upper() == ticker.upper():
-                meta["figi"] = str(it.get("figi", ""))
-                meta["class_code"] = str(it.get("classCode") or it.get("class_code") or "")
-                break
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"find_instruments({ticker}) недоступен: {exc}")
-    if not meta["figi"]:
-        return meta
+        found = []
+    chosen, selected_by, cand_classes = resolve_instrument(
+        found, ticker, explicit_class, priority)
+    if chosen is None:
+        return {}, selected_by, cand_classes
+
+    meta = {
+        "ticker": ticker, "class_code": chosen["class_code"], "figi": chosen["figi"],
+        "instrument_uid": chosen["uid"], "instrument_name": chosen["name"],
+        "instrument_type": chosen["instrument_type"],
+        "trading_status": "", "spread_bps": None, "liquidity_value_rub": None,
+    }
+    figi = chosen["figi"] or chosen["uid"]
+    if not figi:
+        return meta, selected_by, cand_classes
     try:
-        ts = client.get_trading_status(meta["figi"])
+        ts = client.get_trading_status(figi)
         meta["trading_status"] = str(ts.get("tradingStatus", ""))
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"trading_status недоступен: {exc}")
     try:
-        ob = client.get_order_book(meta["figi"], depth=1)
+        ob = client.get_order_book(figi, depth=1)
         bid = quotation_to_decimal((ob.get("bids") or [{}])[0].get("price"))
         ask = quotation_to_decimal((ob.get("asks") or [{}])[0].get("price"))
         if bid and ask and bid > 0:
             meta["spread_bps"] = (ask - bid) / ((ask + bid) / 2) * Decimal(10000)
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"order_book недоступен: {exc}")
-    return meta
+    return meta, selected_by, cand_classes
 
 
 def scan(client, opts: dict, *, as_of=None) -> list:
     """Прогоняет watchlist через стратегию (read-only). Возвращает список Signal."""
     cfg: SignalConfig = opts["config"]
+    priority = opts.get("class_code_priority") or ["TQBR", "TQTF", "SPBRU"]
     signals = []
-    for ticker in opts["watchlist"][: opts["max_per_run"]]:
-        meta = _meta_for(client, ticker)
+    for raw in opts["watchlist"][: opts["max_per_run"]]:
+        ticker, explicit = parse_watchlist_item(raw)
+        meta, selected_by, cand_classes = _resolve_meta(client, ticker, explicit, priority)
+
+        if not meta:
+            cands = ",".join(cand_classes) or "—"
+            logger.info(f"{ticker} -> SKIP no_allowed_class_code_match; candidates={cands}")
+            signals.append(Signal(
+                ticker=ticker, class_code=(explicit or ""), action="SKIP",
+                selected_by="no_allowed_match",
+                blocked_reasons=[f"no_allowed_class_code_match; candidates={cands}"]))
+            continue
+
+        # default vs priority в логе selected_by
+        if selected_by == "priority_fallback" and meta["class_code"] == opts.get("default_class_code"):
+            selected_by = "default_class_code"
+
         candles = []
-        if meta.get("figi"):
+        figi = meta.get("figi") or meta.get("instrument_uid")
+        if figi:
             try:
-                candles = _candles_for(client, meta["figi"], opts["lookback_days"],
+                candles = _candles_for(client, figi, opts["lookback_days"],
                                        opts["timeframe"])
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"get_candles({ticker}) недоступен: {exc}")
@@ -126,5 +161,14 @@ def scan(client, opts: dict, *, as_of=None) -> list:
             values = [closes[i] * vols[i] for i in range(len(candles))]
             if values:
                 meta["liquidity_value_rub"] = median(values)
-        signals.append(evaluate(candles, meta, cfg))
+
+        sig = evaluate(candles, meta, cfg)
+        sig.figi = meta.get("figi", "")
+        sig.instrument_uid = meta.get("instrument_uid", "")
+        sig.instrument_name = meta.get("instrument_name", "")
+        sig.instrument_type = meta.get("instrument_type", "")
+        sig.selected_by = selected_by
+        logger.info(f"{ticker} -> {meta['class_code']} / "
+                    f"{meta.get('instrument_name') or '—'} / selected_by={selected_by}")
+        signals.append(sig)
     return signals
