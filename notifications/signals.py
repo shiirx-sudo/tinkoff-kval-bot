@@ -56,8 +56,9 @@ def build_signal_message(sig: Signal, strategy: str = "trend_signal_v1") -> str:
         lines += [f"❌ {r}" for r in sig.reasons]
         lines += [
             "",
-            "Если инструмент есть в портфеле — сигнал на выход/снижение риска.",
-            "Если инструмента нет — это сигнал слабости, не команда открывать шорт.",
+            "Инструмент есть в портфеле.",
+            "Это сигнал на выход/снижение риска.",
+            "Это не команда открыть short.",
             "", "Статус: SIGNAL_ONLY / READ_ONLY",
             "Заявки не отправляются.",
         ]
@@ -98,10 +99,9 @@ def _parse_dt(s: str | None) -> datetime | None:
 def should_notify(sig: Signal, state: dict[str, Any], now: datetime,
                   dedup_hours: int, notify_on_hold: bool = False) -> tuple[bool, str]:
     """Решает, слать ли сигнал (без спама одинаковыми сигналами)."""
-    if sig.action == "SKIP":
-        return False, "skip_not_notified"
-    if sig.action == "HOLD" and not notify_on_hold:
-        return False, "hold_not_notified"
+    if sig.action not in ("BUY", "SELL"):
+        if not (sig.action == "HOLD" and notify_on_hold):
+            return False, f"{sig.action.lower()}_not_notified"
 
     prev = state.get(sig.ticker) or {}
     prev_action = prev.get("last_action")

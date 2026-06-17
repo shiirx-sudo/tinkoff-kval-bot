@@ -10,9 +10,11 @@ from strategies.trend_signal_v1 import Signal
 
 COLUMNS = [
     "timestamp", "strategy", "ticker", "class_code", "figi", "instrument_uid",
-    "instrument_name", "instrument_type", "selected_by", "action", "score", "price",
-    "entry", "stop", "take_profit", "rsi", "ema20", "ema50", "ema200", "atr",
-    "spread_bps", "liquidity_value_rub", "reasons", "blocked_reasons", "notified",
+    "instrument_name", "instrument_type", "selected_by", "raw_action", "action",
+    "held", "held_unknown", "position_quantity", "position_value_rub",
+    "score", "price", "entry", "stop", "take_profit", "rsi", "ema20", "ema50",
+    "ema200", "atr", "spread_bps", "liquidity_value_rub", "reasons",
+    "blocked_reasons", "notified",
 ]
 
 
@@ -26,7 +28,11 @@ def _row(sig: Signal, strategy: str, ts: str) -> dict:
         "class_code": sig.class_code, "figi": sig.figi,
         "instrument_uid": sig.instrument_uid, "instrument_name": sig.instrument_name,
         "instrument_type": sig.instrument_type, "selected_by": sig.selected_by,
-        "action": sig.action, "score": sig.score,
+        "raw_action": sig.raw_action or sig.action, "action": sig.action,
+        "held": sig.held, "held_unknown": sig.held_unknown,
+        "position_quantity": _s(sig.position_quantity),
+        "position_value_rub": _s(sig.position_value_rub),
+        "score": sig.score,
         "price": _s(sig.price), "entry": _s(sig.entry), "stop": _s(sig.stop),
         "take_profit": _s(sig.take_profit), "rsi": _s(sig.rsi),
         "ema20": _s(sig.ema20), "ema50": _s(sig.ema50), "ema200": _s(sig.ema200),

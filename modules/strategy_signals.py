@@ -15,9 +15,11 @@ from dotenv import find_dotenv, load_dotenv
 from loguru import logger
 
 from common.helpers import quotation_to_decimal
+from modules.balance import holdings_map, lookup_holding
 from strategies.trend_signal_v1 import (
     Signal,
     SignalConfig,
+    apply_portfolio_state,
     evaluate,
     parse_watchlist_item,
     resolve_instrument,
@@ -61,6 +63,8 @@ def load_signal_config() -> dict:
         "dedup_hours": int(os.getenv("SIGNALS_DEDUP_HOURS", "12") or "12"),
         "max_per_run": int(os.getenv("SIGNALS_MAX_PER_RUN", "10") or "10"),
         "notify_on_hold": _b(os.getenv("SIGNALS_NOTIFY_ON_HOLD", "false")),
+        "sell_only_if_held": _b(os.getenv("SIGNALS_SELL_ONLY_IF_HELD", "true")),
+        "include_portfolio_state": _b(os.getenv("SIGNALS_INCLUDE_PORTFOLIO_STATE", "true")),
         "state_path": _STATE_PATH,
     }
 
@@ -125,10 +129,20 @@ def _resolve_meta(client, ticker: str, explicit_class: str | None,
     return meta, selected_by, cand_classes
 
 
-def scan(client, opts: dict, *, as_of=None) -> list:
+def scan(client, opts: dict, *, as_of=None, account_id=None) -> list:
     """Прогоняет watchlist через стратегию (read-only). Возвращает список Signal."""
     cfg: SignalConfig = opts["config"]
     priority = opts.get("class_code_priority") or ["TQBR", "TQTF", "SPBRU"]
+    sell_only_if_held = opts.get("sell_only_if_held", True)
+
+    # read-only карта позиций (один раз). ok=False → held_unknown для всех.
+    holdings = {"ok": False, "by_figi": {}, "by_uid": {}, "by_ticker_class": {}}
+    if opts.get("include_portfolio_state", True) or sell_only_if_held:
+        try:
+            holdings = holdings_map(client, account_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"holdings_map недоступен (held_unknown): {exc}")
+
     signals = []
     for raw in opts["watchlist"][: opts["max_per_run"]]:
         ticker, explicit = parse_watchlist_item(raw)
@@ -139,11 +153,10 @@ def scan(client, opts: dict, *, as_of=None) -> list:
             logger.info(f"{ticker} -> SKIP no_allowed_class_code_match; candidates={cands}")
             signals.append(Signal(
                 ticker=ticker, class_code=(explicit or ""), action="SKIP",
-                selected_by="no_allowed_match",
+                selected_by="no_allowed_match", raw_action="SKIP",
                 blocked_reasons=[f"no_allowed_class_code_match; candidates={cands}"]))
             continue
 
-        # default vs priority в логе selected_by
         if selected_by == "priority_fallback" and meta["class_code"] == opts.get("default_class_code"):
             selected_by = "default_class_code"
 
@@ -168,7 +181,15 @@ def scan(client, opts: dict, *, as_of=None) -> list:
         sig.instrument_name = meta.get("instrument_name", "")
         sig.instrument_type = meta.get("instrument_type", "")
         sig.selected_by = selected_by
+
+        rec = lookup_holding(holdings, figi=sig.figi, uid=sig.instrument_uid,
+                             ticker=ticker, class_code=meta.get("class_code", ""))
+        apply_portfolio_state(sig, rec, holdings.get("ok", False), sell_only_if_held)
+
+        held_str = ("held" if sig.held else
+                    ("held_unknown" if sig.held_unknown else "not_held"))
         logger.info(f"{ticker} -> {meta['class_code']} / "
-                    f"{meta.get('instrument_name') or '—'} / selected_by={selected_by}")
+                    f"{meta.get('instrument_name') or '—'} / selected_by={selected_by} / "
+                    f"action={sig.action} (raw={sig.raw_action}, {held_str})")
         signals.append(sig)
     return signals

@@ -10,6 +10,7 @@ from notifications import signals as sg
 from strategies.trend_signal_v1 import (
     NORMAL,
     SignalConfig,
+    apply_portfolio_state,
     evaluate,
     parse_watchlist_item,
     resolve_instrument,
@@ -174,7 +175,7 @@ def test_sell_message_exit_watch():
     assert sig.action == "SELL"
     text = sg.build_signal_message(sig)
     assert "SELL / EXIT WATCH" in text
-    assert "не команда открывать шорт" in text
+    assert "не команда открыть short" in text
     assert "выход/снижение риска" in text
 
 
@@ -203,3 +204,92 @@ def test_telegram_only_called_with_notify(monkeypatch, tmp_path):
     assert calls == []                      # без --notify Telegram не трогаем
     m.cmd_strategy_scan(_args(True))
     assert len(calls) == 1                  # только BUY (SKIP не шлём)
+
+
+# ─── portfolio-aware SELL → SELL/AVOID ───────────────────────────────────────
+
+_HELD = {"held": True, "position_quantity": Decimal("100"),
+         "position_value_rub": Decimal("31240")}
+
+
+def _sell_sig():
+    return evaluate(_downtrend(), _meta(), CFG)
+
+
+def test_sell_held_stays_sell():
+    sig = apply_portfolio_state(_sell_sig(), _HELD, holdings_ok=True)
+    assert sig.action == "SELL"
+    assert sig.raw_action == "SELL"
+    assert sig.held is True
+    assert sig.position_quantity == Decimal("100")
+
+
+def test_sell_not_held_becomes_avoid():
+    sig = apply_portfolio_state(_sell_sig(), None, holdings_ok=True)
+    assert sig.raw_action == "SELL"
+    assert sig.action == "AVOID"
+    assert sig.held is False
+    assert "no_position_for_sell_signal" in sig.blocked_reasons
+
+
+def test_sell_unknown_portfolio_becomes_avoid():
+    sig = apply_portfolio_state(_sell_sig(), None, holdings_ok=False)
+    assert sig.action == "AVOID"
+    assert sig.held_unknown is True
+
+
+def test_buy_unaffected_by_portfolio():
+    buy = evaluate(_uptrend(), _meta(), CFG)
+    sig = apply_portfolio_state(buy, None, holdings_ok=True)
+    assert sig.action == "BUY"
+    assert sig.raw_action == "BUY"
+
+
+def test_sell_only_if_held_disabled_keeps_sell():
+    sig = apply_portfolio_state(_sell_sig(), None, holdings_ok=True,
+                                sell_only_if_held=False)
+    assert sig.action == "SELL"
+
+
+def test_reports_have_portfolio_fields(tmp_path):
+    from reports import strategy_signals_reports as rep
+    held = apply_portfolio_state(_sell_sig(), _HELD, holdings_ok=True)
+    avoid = apply_portfolio_state(_sell_sig(), None, holdings_ok=True)
+    rep.write_all([held, avoid], "trend_signal_v1", tmp_path)
+    header = (tmp_path / "strategy_signals.csv").read_text(
+        encoding="utf-8-sig").splitlines()[0].split(";")
+    for col in ("held", "held_unknown", "position_quantity", "position_value_rub",
+                "raw_action"):
+        assert col in header
+
+
+def test_avoid_not_notified():
+    now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
+    avoid = apply_portfolio_state(_sell_sig(), None, holdings_ok=True)
+    # AVOID не относится к BUY/SELL → в cmd оно фильтруется; should_notify тоже не шлёт
+    send, _ = sg.should_notify(avoid, {}, now, dedup_hours=12)
+    assert send is False
+
+
+def test_holdings_map_and_lookup():
+    from modules.balance import holdings_map, lookup_holding
+
+    class _C:
+        def get_broker_accounts(self):
+            return [{"id": "ACC1"}]
+
+        def get_portfolio(self, account_id):
+            return {"positions": [
+                {"figi": "FSBER", "instrumentUid": "U1", "ticker": "SBER",
+                 "classCode": "TQBR", "instrumentType": "share",
+                 "quantity": {"units": "100", "nano": 0},
+                 "currentPrice": {"units": "312", "nano": 0},
+                 "averagePositionPrice": {"units": "300", "nano": 0}},
+            ]}
+
+    h = holdings_map(_C(), None)
+    assert h["ok"] is True
+    rec = lookup_holding(h, figi="FSBER")
+    assert rec["held"] is True and rec["position_quantity"] == Decimal("100")
+    assert lookup_holding(h, ticker="SBER", class_code="TQBR")["held"] is True
+    assert lookup_holding(h, figi="NOPE") is None

@@ -104,3 +104,50 @@ def portfolio_breakdown(client, account_id: str | None) -> PortfolioBreakdown:
     out.total_rub = (out.free_rub + out.money_market_funds_rub + out.bonds_rub
                      + out.dividend_shares_rub + out.other_rub)
     return out
+
+
+def holdings_map(client, account_id: str | None) -> dict:
+    """Read-only карта позиций по figi / instrument_uid / ticker+class_code.
+
+    {"ok": bool, "by_figi": {...}, "by_uid": {...}, "by_ticker_class": {...}}.
+    ok=False означает, что портфель прочитать не удалось (held_unknown).
+    """
+    out: dict = {"ok": False, "by_figi": {}, "by_uid": {}, "by_ticker_class": {}}
+    acc = _resolve_account_id(client, account_id)
+    if not acc:
+        return out
+    try:
+        pf = client.get_portfolio(acc)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"GetPortfolio недоступен (held_unknown): {exc}")
+        return out
+    out["ok"] = True
+    for pos in pf.get("positions") or []:
+        qty = quotation_to_decimal(pos.get("quantity")) or Decimal("0")
+        rec = {
+            "held": qty != 0,
+            "position_quantity": qty,
+            "position_value_rub": _pos_value(pos),
+            "average_position_price": quotation_to_decimal(pos.get("averagePositionPrice")),
+        }
+        figi = str(pos.get("figi", ""))
+        uid = str(pos.get("instrumentUid") or pos.get("instrument_uid") or "")
+        ticker = str(pos.get("ticker", "")).upper()
+        cls = str(pos.get("classCode") or pos.get("class_code") or "")
+        if figi:
+            out["by_figi"][figi] = rec
+        if uid:
+            out["by_uid"][uid] = rec
+        if ticker:
+            out["by_ticker_class"][f"{ticker}:{cls}"] = rec
+    return out
+
+
+def lookup_holding(holdings: dict, figi: str = "", uid: str = "",
+                   ticker: str = "", class_code: str = "") -> dict | None:
+    if figi and figi in holdings.get("by_figi", {}):
+        return holdings["by_figi"][figi]
+    if uid and uid in holdings.get("by_uid", {}):
+        return holdings["by_uid"][uid]
+    key = f"{ticker.upper()}:{class_code}"
+    return holdings.get("by_ticker_class", {}).get(key)

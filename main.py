@@ -459,7 +459,8 @@ def cmd_strategy_scan(args: argparse.Namespace) -> int:
         opts["max_per_run"] = int(args.max_signals)
 
     try:
-        signals = scan(ReadOnlyClient(), opts, as_of=args.as_of)
+        signals = scan(ReadOnlyClient(), opts, as_of=args.as_of,
+                       account_id=getattr(args, "account_id", None))
     except Exception as exc:  # noqa: BLE001
         logger.error(f"Ошибка скана сигналов (read-only): {exc}")
         return 1
@@ -490,12 +491,21 @@ def cmd_strategy_scan(args: argparse.Namespace) -> int:
         logger.info(f"Отчёт: {path}")
 
     actionable = [s for s in signals if s.action in ("BUY", "SELL")]
+    avoid = [s for s in signals if s.action == "AVOID"]
     print(f"Стратегия {args.strategy}: {len(signals)} инструментов, "
-          f"{len(actionable)} BUY/SELL, отправлено: "
+          f"{len(actionable)} BUY/SELL, {len(avoid)} AVOID, отправлено: "
           f"{sum(1 for s in signals if s.notified)}.")
     for s in signals:
+        if s.action == "AVOID" and not getattr(args, "include_avoid", False):
+            # AVOID всегда в отчётах; в консоли по умолчанию свернём в одну строку
+            pass
         extra = f" score={s.score}" if s.action in ("BUY", "HOLD") else ""
-        print(f"  {s.action:5} {s.ticker}{extra}"
+        tag = ""
+        if s.action == "SELL":
+            tag = " [held]"
+        elif s.action == "AVOID":
+            tag = " [raw=SELL, not_held]" if not s.held_unknown else " [raw=SELL, held_unknown]"
+        print(f"  {s.action:5} {s.ticker}{extra}{tag}"
               + (f" — {', '.join(s.blocked_reasons)}" if s.action == "SKIP" else ""))
     print("Режим: SIGNAL_ONLY / READ_ONLY. Заявки не отправляются.")
     return 0
@@ -657,6 +667,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                       metavar="YYYY-MM-DD")
     p_ss.add_argument("--timeframe", default=None, choices=("day", "hour", "week"))
     p_ss.add_argument("--max-signals", type=int, default=None)
+    p_ss.add_argument("--account-id", default=None,
+                      help="Счёт для чтения позиций (read-only; иначе первый брокерский)")
+    p_ss.add_argument("--include-avoid", action="store_true",
+                      help="Подробнее показывать AVOID в консоли (в отчётах всегда есть)")
 
     sub.add_parser("strategy-status",
                    help="Статус стратегии сигналов + последние сигналы (read-only)")

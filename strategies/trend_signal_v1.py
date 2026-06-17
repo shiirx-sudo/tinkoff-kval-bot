@@ -98,6 +98,11 @@ class Signal:
     instrument_name: str = ""
     instrument_type: str = ""
     selected_by: str = ""             # explicit_class_code|default_class_code|priority_fallback|no_allowed_match
+    raw_action: str = ""              # действие до учёта портфеля
+    held: bool = False
+    held_unknown: bool = False
+    position_quantity: Decimal | None = None
+    position_value_rub: Decimal | None = None
     notified: bool = False
 
 
@@ -264,4 +269,35 @@ def evaluate(candles: list[dict], meta: dict, config: SignalConfig) -> Signal:
     # ── иначе HOLD ──
     sig.action = "HOLD"
     sig.reasons.append("нет подтверждённого входа")
+    return sig
+
+
+def apply_portfolio_state(sig: Signal, holding: dict | None, holdings_ok: bool,
+                          sell_only_if_held: bool = True) -> Signal:
+    """Учитывает портфель для SELL: held → SELL, иначе AVOID (read-only)."""
+    sig.raw_action = sig.action
+
+    # позицию проставляем всегда, если она известна
+    if holding and holding.get("held"):
+        sig.held = True
+        sig.position_quantity = holding.get("position_quantity")
+        sig.position_value_rub = holding.get("position_value_rub")
+
+    if sig.action != "SELL" or not sell_only_if_held:
+        return sig
+
+    if not holdings_ok:
+        sig.held_unknown = True
+        sig.action = "AVOID"
+        sig.blocked_reasons.append("no_position_for_sell_signal")
+        sig.reasons.append("портфель недоступен — SELL преобразован в AVOID")
+        return sig
+
+    if sig.held:
+        return sig  # есть позиция → остаётся SELL / EXIT WATCH
+
+    sig.held = False
+    sig.action = "AVOID"
+    sig.blocked_reasons.append("no_position_for_sell_signal")
+    sig.reasons.append("позиции нет — SELL преобразован в AVOID")
     return sig
