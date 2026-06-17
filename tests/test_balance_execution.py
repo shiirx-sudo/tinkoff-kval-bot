@@ -174,3 +174,21 @@ def test_portfolio_breakdown_categorizes():
     assert b.dividend_shares_rub == Decimal("1500")        # 5 * 300
     assert b.account_id_masked.endswith("1918")
     assert b.total_rub == Decimal("135500")
+
+
+def test_balance_low_cash_depth_not_false(tmp_path):
+    # свободные < резерва → side=0; depth_sufficient неприменим (ok=True),
+    # блокировка остаётся по balance/reserve (0019/cosmetic hotfix)
+    _setup(tmp_path)
+    p = _bal(tmp_path, 2105, balance_utilization_pct=Decimal("0.80"),
+             min_cash_reserve_rub=Decimal("5000"))
+    assert p.status == "BLOCKED"
+    assert p.side_notional == Decimal("0")
+    assert p.sizing.planned_actions == 0
+    depth = next(c for c in p.risk_checks if c.name == "depth_sufficient")
+    assert depth.ok is True
+    assert "n/a" in depth.detail
+    # основная блокировка — balance/reserve, не глубина
+    failed = [c.name for c in p.risk_checks if not c.ok]
+    assert "depth_sufficient" not in failed
+    assert any(n in failed for n in ("side_notional_within_balance", "reserve_preserved"))

@@ -328,11 +328,17 @@ def build(
     checks.append(RiskCheck(
         "spread_within_limit", spread_ok,
         f"spread_bps={spread_bps}, limit={spread_bps_limit}"))
-    depth_ok = (min_side_depth is not None and side_notional > 0
-                and min_side_depth >= side_notional)
-    checks.append(RiskCheck(
-        "depth_sufficient", depth_ok,
-        f"min_side_depth={min_side_depth}, side_notional={side_notional}"))
+    if side_notional <= 0:
+        # сайзинг дал 0 действий (например, balance: usable<reserve) — глубина
+        # стакана тут неприменима, не делаем её причиной BLOCKED.
+        checks.append(RiskCheck(
+            "depth_sufficient", True,
+            "n/a: side_notional=0 (см. balance-проверки)"))
+    else:
+        depth_ok = min_side_depth is not None and min_side_depth >= side_notional
+        checks.append(RiskCheck(
+            "depth_sufficient", depth_ok,
+            f"min_side_depth={min_side_depth}, side_notional={side_notional}"))
 
     if max_side_notional_rub and max_side_notional_rub > 0:
         checks.append(RiskCheck(
