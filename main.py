@@ -526,6 +526,106 @@ def cmd_strategy_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_income_summary(args: argparse.Namespace) -> int:
+    from decimal import Decimal
+
+    from api.client import ReadOnlyClient
+    from modules.fundamental_filter import load_fundamental_filter
+    from modules.income_engine import load_income_config, load_income_env, summarize_account
+    from modules.income_engine import build_calendar
+    from reports import income_reports
+
+    config = load_income_config(getattr(args, "config_path", None))
+    env = load_income_env(config)
+    if args.target_monthly_rub is not None:
+        env.target_monthly_rub = Decimal(str(args.target_monthly_rub))
+    try:
+        summary = summarize_account(ReadOnlyClient(), args.account_id, config, env,
+                                    load_fundamental_filter())
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка income-summary (read-only): {exc}")
+        return 1
+
+    written = income_reports.write_summary(summary, "data/reports")
+    print(income_reports._summary_md(summary))
+    for name, path in written.items():
+        logger.info(f"Отчёт: {path}")
+
+    if getattr(args, "notify", False):
+        from notifications import telegram as tg
+        cal = build_calendar(summary.items, env.horizon_months, env.tax_rate_pct)
+        text = income_reports.build_summary_telegram(summary, cal)
+        cfg = tg.load_config()
+        tg.send_telegram_message(cfg.bot_token, cfg.chat_id, text,
+                                 enabled=cfg.enabled, dry_run=False)
+    return 0
+
+
+def cmd_income_calendar(args: argparse.Namespace) -> int:
+    from api.client import ReadOnlyClient
+    from modules.fundamental_filter import load_fundamental_filter
+    from modules.income_engine import (
+        build_calendar,
+        load_income_config,
+        load_income_env,
+        summarize_account,
+    )
+    from reports import income_reports
+
+    config = load_income_config(getattr(args, "config_path", None))
+    env = load_income_env(config)
+    months = args.months or env.horizon_months
+    try:
+        summary = summarize_account(ReadOnlyClient(), args.account_id, config, env,
+                                    load_fundamental_filter())
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка income-calendar (read-only): {exc}")
+        return 1
+    rows = build_calendar(summary.items, months, env.tax_rate_pct)
+    income_reports.write_calendar(rows, "data/reports")
+    print(f"Income calendar — READ ONLY ({len(rows)} строк, горизонт {months} мес.):")
+    for r in rows[:40]:
+        print(f"  {r['month']:>10} {r['ticker']:8} {r['source_type']:12} "
+              f"{r['expected_payment_date']:>12} net={r['net_amount']} ({r['confidence']})")
+    print("Статус: аналитика, не рекомендация. Заявки не отправляются.")
+    return 0
+
+
+def cmd_income_watchlist(args: argparse.Namespace) -> int:
+    from decimal import Decimal
+
+    from modules.fundamental_filter import evaluate_fundamental, load_fundamental_filter
+    from modules.income_engine import (
+        IncomeEnv,
+        income_for_item,
+        income_verdict,
+        load_income_config,
+        load_income_env,
+    )
+    from strategies.trend_signal_v1 import parse_watchlist_item
+
+    config = load_income_config(getattr(args, "config_path", None))
+    env: IncomeEnv = load_income_env(config)
+    fdata = load_fundamental_filter()
+    items = [t.strip() for t in (args.watchlist or "").split(",") if t.strip()]
+
+    print("Income watchlist — READ ONLY (аналитический список, не рекомендация):")
+    for raw in items:
+        ticker, cls = parse_watchlist_item(raw)
+        pos = {"ticker": ticker, "class_code": cls or "", "figi": "",
+               "instrument_name": "", "instrument_type": "share",
+               "position_quantity": Decimal("1"), "position_value_rub": Decimal("0")}
+        item = income_for_item(pos, config, env)
+        fr = evaluate_fundamental(ticker, cls or "", fdata)
+        item.fundamental_verdict = fr.verdict
+        item.income_verdict = income_verdict(item)
+        print(f"  {ticker:8} {cls or '—':6} src={item.source_type:12} "
+              f"yield={item.expected_annual_yield_pct or item.gross_yield_pct or 'n/a'} "
+              f"conf={item.confidence} fund={fr.verdict} -> {item.income_verdict}")
+    print("Статус: аналитика, не рекомендация. Заявки не отправляются.")
+    return 0
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="main.py", description="T-Invest Kval Bot (read-only)")
     parser.add_argument("-v", "--verbose", action="store_true", help="DEBUG-логирование")
@@ -687,6 +787,26 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     sub.add_parser("strategy-status",
                    help="Статус стратегии сигналов + последние сигналы (read-only)")
 
+    p_is = sub.add_parser("income-summary",
+                          help="READ-ONLY доходная аналитика портфеля (дивиденды/купоны/MM)")
+    p_is.add_argument("--account-id", default=None)
+    p_is.add_argument("--target-monthly-rub", type=float, default=None)
+    p_is.add_argument("--config-path", default=None)
+    p_is.add_argument("--notify", action="store_true",
+                      help="Отправить summary в Telegram (иначе только отчёты)")
+
+    p_ic = sub.add_parser("income-calendar",
+                          help="READ-ONLY календарь ожидаемых выплат")
+    p_ic.add_argument("--account-id", default=None)
+    p_ic.add_argument("--months", type=int, default=None)
+    p_ic.add_argument("--config-path", default=None)
+
+    p_iw = sub.add_parser("income-watchlist",
+                          help="READ-ONLY доходный обзор watchlist (аналитика, не рекомендация)")
+    p_iw.add_argument("--watchlist", default="")
+    p_iw.add_argument("--account-id", default=None)
+    p_iw.add_argument("--config-path", default=None)
+
     p_tgt = sub.add_parser(
         "telegram-test", help="Проверка Telegram bot_token/chat_id (read-only)")
     p_tgt.add_argument("--dry-run", type=_boolish, default=True, metavar="true|false",
@@ -724,6 +844,9 @@ _HANDLERS = {
     "passive-income-summary": cmd_passive_income_summary,
     "strategy-scan": cmd_strategy_scan,
     "strategy-status": cmd_strategy_status,
+    "income-summary": cmd_income_summary,
+    "income-calendar": cmd_income_calendar,
+    "income-watchlist": cmd_income_watchlist,
     "telegram-test": cmd_telegram_test,
     "telegram-summary": cmd_telegram_summary,
     "telegram-notify": cmd_telegram_notify,

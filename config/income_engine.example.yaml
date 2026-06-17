@@ -1,0 +1,35 @@
+# Пример ручной базы доходной аналитики (read-only income engine).
+# Скопируйте в data/config/income_engine.yaml и заполните под себя.
+# Это НЕ инвестиционная рекомендация и НЕ гарантия выплат — ручные оценки.
+
+targets:
+  monthly_income_rub: 100000
+  horizon_months: 12
+  tax_rate_pct: 13
+
+# Фонды денежного рынка / переменная доходность (вручную обновлять)
+manual_yields:
+  LQDT:
+    class_code: TQTF
+    type: money_market_fund
+    expected_annual_yield_pct: 14.0
+    notes:
+      - "Доходность переменная, вручную обновлять"
+
+# Дивидендные акции (ручная оценка ожидаемого дивиденда на акцию в год)
+manual_dividends:
+  SBER:
+    class_code: TQBR
+    expected_annual_dividend_rub_per_share: 35
+    confidence: medium
+    next_dividend_date: null
+    notes:
+      - "Ручная оценка, не гарантия"
+
+# Облигации (купон на бумагу за период × частота в год)
+manual_bonds:
+  RU000A000000:
+    expected_coupon_rub: 0
+    coupon_frequency_per_year: 2
+    maturity_date: null
+    confidence: low
