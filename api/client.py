@@ -68,6 +68,10 @@ class ReadOnlyClient:
     def get_trading_status(self, instrument_id: str) -> dict[str, Any]:
         return self._rest.get_trading_status(instrument_id)
 
+    def get_candles(self, instrument_id: str, from_iso: str, to_iso: str,
+                    interval: str = "CANDLE_INTERVAL_DAY") -> dict[str, Any]:
+        return self._rest.get_candles(instrument_id, from_iso, to_iso, interval)
+
     def get_portfolio(self, account_id: str) -> dict[str, Any]:
         return self._rest.get_portfolio(account_id)
 

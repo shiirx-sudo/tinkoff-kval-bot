@@ -144,6 +144,33 @@ python main.py telegram-notify --dry-run false
 Уведомления полностью read-only: они сообщают о статусе, но ничего не покупают, не
 продают и не меняют портфель.
 
+## Сигналы trend_signal_v1 (read-only)
+
+Стратегия анализирует свечи watchlist и выдаёт сигналы BUY / SELL / HOLD / SKIP с
+score 0–100, риск-моделью (entry/stop/take-profit — **справочно, не рекомендация**)
+и Telegram-уведомлениями. Это уведомления, а не приказы: заявки не отправляются,
+портфель не меняется, всё строго read-only.
+
+```bash
+python main.py strategy-scan --strategy trend_signal_v1            # скан + отчёты
+python main.py strategy-scan --strategy trend_signal_v1 --notify   # + Telegram BUY/SELL
+python main.py strategy-status                                     # конфиг + последние сигналы
+```
+
+Параметры: `--watchlist`, `--min-score`, `--timeframe`, `--max-signals`, `--as-of`,
+`--notify`. Конфиг — переменные `SIGNALS_*` в `.env` (по умолчанию
+`SIGNALS_ENABLED=false`). Правила BUY: `close>EMA200`, `EMA20>EMA50`, `RSI14` в
+45–70, пробой/откат, спред ≤ лимита, ликвидность и `NORMAL_TRADING`; BUY шлётся при
+`score >= SIGNALS_MIN_SCORE`. Антиспам: одинаковый сигнал по инструменту не
+повторяется в пределах `SIGNALS_DEDUP_HOURS` (смена `HOLD→BUY`/`BUY→SELL` или
+заметное изменение score — шлётся). Отчёты: `strategy_signals.{json,csv,md}`,
+состояние — `data/state/strategy_signals_state.json`.
+
+В runner добавляется отдельным шагом только при `SIGNALS_ENABLED=true`:
+`python main.py strategy-scan --strategy trend_signal_v1 --notify` (не падает, если
+сигналов нет). Telegram `/signals`, `/signals_status`, `/signals_scan` соответствуют
+`strategy-status` / `strategy-scan` и text-билдерам в `notifications/signals.py`.
+
 ## Структура
 
 ```

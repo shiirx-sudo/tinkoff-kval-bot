@@ -439,6 +439,76 @@ def cmd_telegram_notify(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_strategy_scan(args: argparse.Namespace) -> int:
+    from datetime import datetime, timezone
+
+    from api.client import ReadOnlyClient
+    from modules.strategy_signals import load_signal_config, scan
+    from notifications import signals as sg
+    from notifications import telegram as tg
+    from reports import strategy_signals_reports
+
+    opts = load_signal_config()
+    if args.watchlist:
+        opts["watchlist"] = [t.strip().upper() for t in args.watchlist.split(",") if t.strip()]
+    if args.min_score is not None:
+        opts["config"].min_score = int(args.min_score)
+    if args.timeframe:
+        opts["timeframe"] = args.timeframe
+    if args.max_signals is not None:
+        opts["max_per_run"] = int(args.max_signals)
+
+    try:
+        signals = scan(ReadOnlyClient(), opts, as_of=args.as_of)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка скана сигналов (read-only): {exc}")
+        return 1
+
+    now = datetime.now(timezone.utc)
+    state = sg.load_signal_state(opts["state_path"])
+    tg_cfg = tg.load_config()
+
+    for s in signals:
+        send, reason = sg.should_notify(s, state, now, opts["dedup_hours"],
+                                        opts["notify_on_hold"])
+        if not send:
+            continue
+        text = sg.build_signal_message(s, strategy=args.strategy)
+        # реальная отправка только при --notify и включённых уведомлениях
+        dry = not (args.notify and opts["notify_telegram"])
+        result = tg.send_telegram_message(
+            tg_cfg.bot_token, tg_cfg.chat_id, text,
+            enabled=tg_cfg.enabled, dry_run=dry)
+        if result.get("sent"):
+            s.notified = True
+            sg.update_state(state, s, now)
+
+    sg.save_signal_state(opts["state_path"], state)
+    written = strategy_signals_reports.write_all(signals, args.strategy, "data/reports")
+    for name, path in written.items():
+        logger.info(f"Отчёт: {path}")
+
+    actionable = [s for s in signals if s.action in ("BUY", "SELL")]
+    print(f"Стратегия {args.strategy}: {len(signals)} инструментов, "
+          f"{len(actionable)} BUY/SELL, отправлено: "
+          f"{sum(1 for s in signals if s.notified)}.")
+    for s in signals:
+        extra = f" score={s.score}" if s.action in ("BUY", "HOLD") else ""
+        print(f"  {s.action:5} {s.ticker}{extra}"
+              + (f" — {', '.join(s.blocked_reasons)}" if s.action == "SKIP" else ""))
+    print("Режим: SIGNAL_ONLY / READ_ONLY. Заявки не отправляются.")
+    return 0
+
+
+def cmd_strategy_status(args: argparse.Namespace) -> int:
+    from modules.strategy_signals import load_signal_config
+    from notifications import signals as sg
+    opts = load_signal_config()
+    print(sg.signals_status_text(opts["config"], opts["enabled"], opts["watchlist"]))
+    print(sg.signals_last_text("data/reports"))
+    return 0
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="main.py", description="T-Invest Kval Bot (read-only)")
     parser.add_argument("-v", "--verbose", action="store_true", help="DEBUG-логирование")
@@ -574,6 +644,22 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p_pis.add_argument("--account-id", default=None,
                        help="Счёт (read-only; иначе первый брокерский)")
 
+    p_ss = sub.add_parser(
+        "strategy-scan",
+        help="READ-ONLY скан сигналов BUY/SELL/HOLD/SKIP (заявки НЕ отправляются)")
+    p_ss.add_argument("--strategy", default="trend_signal_v1")
+    p_ss.add_argument("--watchlist", default=None, help="Тикеры через запятую")
+    p_ss.add_argument("--min-score", type=int, default=None)
+    p_ss.add_argument("--notify", action="store_true",
+                      help="Отправлять BUY/SELL в Telegram (иначе только отчёты)")
+    p_ss.add_argument("--as-of", type=lambda s: date.fromisoformat(s), default=None,
+                      metavar="YYYY-MM-DD")
+    p_ss.add_argument("--timeframe", default=None, choices=("day", "hour", "week"))
+    p_ss.add_argument("--max-signals", type=int, default=None)
+
+    sub.add_parser("strategy-status",
+                   help="Статус стратегии сигналов + последние сигналы (read-only)")
+
     p_tgt = sub.add_parser(
         "telegram-test", help="Проверка Telegram bot_token/chat_id (read-only)")
     p_tgt.add_argument("--dry-run", type=_boolish, default=True, metavar="true|false",
@@ -609,6 +695,8 @@ _HANDLERS = {
     "execution-plan": cmd_execution_plan,
     "execution-preflight": cmd_execution_preflight,
     "passive-income-summary": cmd_passive_income_summary,
+    "strategy-scan": cmd_strategy_scan,
+    "strategy-status": cmd_strategy_status,
     "telegram-test": cmd_telegram_test,
     "telegram-summary": cmd_telegram_summary,
     "telegram-notify": cmd_telegram_notify,
