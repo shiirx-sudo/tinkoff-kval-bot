@@ -148,6 +148,7 @@ def run(
     min_monthly_actions: int = 4,
     kval_min_total_trades: int = 41,
     kval_target_total_trades: int = 48,
+    max_monthly_actions: int = 0,
 ) -> PreflightResult:
     out = Path(reports_dir)
     as_of = as_of or date.today()
@@ -187,6 +188,7 @@ def run(
             min_depth_multiplier=min_depth_multiplier,
             kval_min_total_trades=kval_min_total_trades,
             kval_target_total_trades=kval_target_total_trades,
+            max_monthly_actions=max_monthly_actions,
         )
         scan = json.loads((out / "instrument_scan.json").read_text(encoding="utf-8"))
         sel, _ = select_instrument(scan, instrument)
@@ -254,7 +256,7 @@ def run(
     if size_mode == "balance":
         _balance_names = {"available_cash_present", "side_notional_within_balance",
                           "reserve_preserved", "min_monthly_actions_met",
-                          "min_total_trades_met"}
+                          "min_total_trades_met", "max_monthly_actions_ok"}
         for rc in plan.risk_checks:
             if rc.name in _balance_names:
                 add(rc.name, rc.ok, rc.detail)
@@ -278,7 +280,7 @@ def run(
         # чтобы не показывать вторичную причину как основную.
         _balance_first = {"available_cash_present", "side_notional_within_balance",
                           "reserve_preserved", "min_monthly_actions_met",
-                          "min_total_trades_met"}
+                          "min_total_trades_met", "max_monthly_actions_ok"}
         failed = [c for c in checks if c.blocking and not c.ok]
         failed.sort(key=lambda c: 0 if c.name in _balance_first else 1)
         for c in failed:

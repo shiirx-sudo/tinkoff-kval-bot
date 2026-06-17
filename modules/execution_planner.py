@@ -78,6 +78,7 @@ def _compute_balance_sizing(
     max_side: Decimal, min_side_depth: Decimal | None, min_depth_multiplier: Decimal,
     min_monthly_actions: int, missing: int,
     kval_min_total_trades: int, kval_target_total_trades: int,
+    max_monthly_actions: int = 0,
 ) -> tuple[int, int, Decimal, Sizing, list[RiskCheck]]:
     """Balance-adaptive расчёт. Возвращает (sides, cycles, side_notional, sizing, checks)."""
     sizing = Sizing(
@@ -155,6 +156,10 @@ def _compute_balance_sizing(
                   f"projected={projected_total}, min={kval_min_total_trades}, "
                   f"target={kval_target_total_trades}"),
     ])
+    if max_monthly_actions and max_monthly_actions > 0:
+        checks.append(RiskCheck(
+            "max_monthly_actions_ok", planned <= max_monthly_actions,
+            f"planned_actions={planned}, max_monthly_actions={max_monthly_actions}"))
     return sides, cycles, side_notional, sizing, checks
 
 
@@ -206,6 +211,7 @@ def build(
     min_depth_multiplier: Decimal = Decimal("1.2"),
     kval_min_total_trades: int = 41,
     kval_target_total_trades: int = 48,
+    max_monthly_actions: int = 0,
 ) -> ExecutionPlan:
     out = Path(reports_dir)
     warnings: list[str] = []
@@ -279,6 +285,7 @@ def build(
             min_monthly_actions=min_monthly_actions, missing=missing,
             kval_min_total_trades=kval_min_total_trades,
             kval_target_total_trades=kval_target_total_trades,
+            max_monthly_actions=max_monthly_actions,
         )
         cycle_turnover = _round(side_notional * 2) if mode == "roundtrip" else Decimal("0")
         total_turnover = _round(side_notional * sides) if sides > 0 else Decimal("0")

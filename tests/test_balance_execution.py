@@ -192,3 +192,32 @@ def test_balance_low_cash_depth_not_false(tmp_path):
     failed = [c.name for c in p.risk_checks if not c.ok]
     assert "depth_sufficient" not in failed
     assert any(n in failed for n in ("side_notional_within_balance", "reserve_preserved"))
+
+
+# ─── практический лимит действий (max_monthly_actions) ───────────────────────
+
+def test_max_monthly_actions_blocks_when_too_many(tmp_path):
+    _setup(tmp_path)
+    p = _bal(tmp_path, 10105, balance_utilization_pct=Decimal("0.80"),
+             min_cash_reserve_rub=Decimal("5000"), max_monthly_actions=40)
+    assert p.sizing.planned_actions > 40
+    assert p.status == "BLOCKED"
+    chk = next(c for c in p.risk_checks if c.name == "max_monthly_actions_ok")
+    assert chk.ok is False
+    assert "max_monthly_actions=40" in chk.detail
+
+
+def test_max_monthly_actions_zero_keeps_old_behavior(tmp_path):
+    _setup(tmp_path)
+    p = _bal(tmp_path, 130000, max_monthly_actions=0)
+    assert p.status == "OK"
+    assert all(c.name != "max_monthly_actions_ok" for c in p.risk_checks)
+
+
+def test_max_monthly_actions_ok_when_within_limit(tmp_path):
+    _setup(tmp_path)
+    p = _bal(tmp_path, 130000, max_monthly_actions=40)
+    assert p.sizing.planned_actions <= 40
+    assert p.status == "OK"
+    chk = next(c for c in p.risk_checks if c.name == "max_monthly_actions_ok")
+    assert chk.ok is True

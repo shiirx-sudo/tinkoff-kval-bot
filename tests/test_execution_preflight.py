@@ -197,3 +197,19 @@ def test_balance_normal_cash_ready(tmp_path):
     assert r.status == "READY_DRY_RUN"
     assert r.side_notional > 0
     assert r.planned_actions_count >= 4
+
+
+def test_preflight_max_monthly_actions_blocks(tmp_path):
+    from modules.execution_planner import build as _bp
+    _write_plan_json(tmp_path, missing=4)
+    _write_scan(tmp_path)
+    common = dict(size_mode="balance", available_cash_rub=Decimal("10105"),
+                  balance_utilization_pct=Decimal("0.80"),
+                  min_cash_reserve_rub=Decimal("5000"),
+                  max_side_notional_rub=Decimal("0"), max_monthly_actions=40)
+    execution_plan_reports.write_all(
+        _bp(tmp_path, as_of=AS_OF, instrument="LQDT", **common), tmp_path)
+    r = run(tmp_path, as_of=AS_OF, instrument="LQDT", **common)
+    assert r.status == "BLOCKED"
+    assert any(c.name == "max_monthly_actions_ok" and not c.ok for c in r.checks)
+    assert "max_monthly_actions_ok" in r.errors[0]

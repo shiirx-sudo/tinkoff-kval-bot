@@ -58,7 +58,7 @@ def render(p: PreflightResult) -> None:
     _console.print("\n[bold]Risk checks:[/bold]")
     balance_names = ("available_cash_present", "side_notional_within_balance",
                      "reserve_preserved", "min_monthly_actions_met",
-                     "min_total_trades_met")
+                     "min_total_trades_met", "max_monthly_actions_ok")
     order = list(_RISK_CHECK_ORDER)
     order += [n for n in balance_names if n in by_name]
     for name in order:

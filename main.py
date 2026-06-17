@@ -202,9 +202,15 @@ def _resolve_execution_sizing(args) -> dict:
         "balance_utilization_pct": Decimal(os.getenv("EXECUTION_BALANCE_UTILIZATION_PCT", "0.80") or "0.80"),
         "min_cash_reserve_rub": Decimal(os.getenv("EXECUTION_MIN_CASH_RESERVE_RUB", "5000") or "5000"),
         "min_monthly_actions": int(os.getenv("EXECUTION_MIN_MONTHLY_ACTIONS", "4") or "4"),
+        "max_monthly_actions": int(os.getenv("EXECUTION_MAX_MONTHLY_ACTIONS", "0") or "0"),
         "kval_min_total_trades": int(os.getenv("KVAL_MIN_TOTAL_TRADES", "41") or "41"),
         "kval_target_total_trades": int(os.getenv("KVAL_TARGET_TOTAL_TRADES", "48") or "48"),
     }
+
+    # CLI override практического лимита действий
+    mma = getattr(args, "max_monthly_actions", None)
+    if mma is not None:
+        kwargs["max_monthly_actions"] = int(mma)
 
     # available_cash: явный CLI-override → read-only чтение со счёта
     cash = getattr(args, "available_cash_rub", None)
@@ -529,6 +535,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                         help="Счёт для чтения баланса (read-only; иначе первый)")
     p_exec.add_argument("--available-cash-rub", type=float, default=None,
                         help="Override свободного баланса (иначе читается со счёта)")
+    p_exec.add_argument("--max-monthly-actions", type=int, default=None,
+                        help="Практический лимит действий в месяц (0=выкл; иначе из env)")
     p_exec.add_argument("--min-depth-multiplier", type=float, default=1.2,
                         help="Запас глубины к side_notional (по умолчанию 1.2)")
 
@@ -557,6 +565,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                        help="Счёт для чтения баланса (read-only; иначе первый)")
     p_pre.add_argument("--available-cash-rub", type=float, default=None,
                        help="Override свободного баланса (иначе читается со счёта)")
+    p_pre.add_argument("--max-monthly-actions", type=int, default=None,
+                       help="Практический лимит действий в месяц (0=выкл; иначе из env)")
 
     p_pis = sub.add_parser(
         "passive-income-summary",
