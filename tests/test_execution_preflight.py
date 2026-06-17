@@ -146,3 +146,54 @@ def test_preflight_source_has_no_order_endpoints():
                       "order_client", "place_order", "submit_order",
                       "LIVE_EXECUTION_ENABLED"):
         assert forbidden not in src, forbidden
+
+
+# ─── balance-режим: причина BLOCKED не должна быть depth (0019 hotfix) ────────
+
+def _setup_balance(tmp, available_cash, reserve="5000", util="0.80", max_side="0"):
+    from modules.execution_planner import build as _bp
+    _write_plan_json(tmp, missing=4)
+    _write_scan(tmp)  # depth=300000, GOOD, NORMAL
+    p = _bp(tmp, as_of=AS_OF, instrument="LQDT", size_mode="balance",
+            available_cash_rub=Decimal(str(available_cash)),
+            balance_utilization_pct=Decimal(util),
+            min_cash_reserve_rub=Decimal(reserve),
+            max_side_notional_rub=Decimal(str(max_side)))
+    execution_plan_reports.write_all(p, tmp)
+
+
+def _run_balance(tmp, available_cash, reserve="5000", util="0.80", max_side="0"):
+    return run(tmp, as_of=AS_OF, instrument="LQDT", size_mode="balance",
+               available_cash_rub=Decimal(str(available_cash)),
+               balance_utilization_pct=Decimal(util),
+               min_cash_reserve_rub=Decimal(reserve),
+               max_side_notional_rub=Decimal(str(max_side)))
+
+
+def test_balance_low_cash_blocks_with_balance_reason(tmp_path):
+    _setup_balance(tmp_path, available_cash="2105")
+    r = _run_balance(tmp_path, available_cash="2105")
+    assert r.status == "BLOCKED"
+    assert r.side_notional == Decimal("0")
+    assert r.planned_actions_count == 0
+    # основная причина — balance/reserve/side_cap, НЕ depth
+    assert r.errors, "ожидались errors"
+    head = r.errors[0]
+    assert ("side_cap<=0" in head or "reserve" in head)
+    assert "depth_sufficient" not in head
+    # depth-чек не должен быть блокирующим провалом при side==0
+    depth = next(c for c in r.checks if c.name == "depth_sufficient")
+    assert depth.ok is True and depth.blocking is False
+    # balance-проверки присутствуют
+    names = {c.name for c in r.checks}
+    assert {"available_cash_present", "side_notional_within_balance",
+            "reserve_preserved", "min_monthly_actions_met",
+            "min_total_trades_met"} <= names
+
+
+def test_balance_normal_cash_ready(tmp_path):
+    _setup_balance(tmp_path, available_cash="300000")
+    r = _run_balance(tmp_path, available_cash="300000")
+    assert r.status == "READY_DRY_RUN"
+    assert r.side_notional > 0
+    assert r.planned_actions_count >= 4

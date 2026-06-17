@@ -224,9 +224,15 @@ def run(
         f"spread_bps={spread_bps}, limit={spread_bps_limit}")
 
     need_depth = side * min_depth_multiplier
-    depth_ok = min_depth is not None and side > 0 and min_depth >= need_depth
-    add("depth_sufficient", depth_ok,
-        f"min_side_depth={min_depth} >= side*{min_depth_multiplier}={need_depth}")
+    if side <= 0:
+        # сайзинг дал 0 действий (например, balance: usable<reserve) — глубина
+        # стакана тут ни при чём, не делаем её причиной BLOCKED.
+        add("depth_sufficient", True,
+            "n/a: side_notional=0 (см. balance-проверки)", blocking=False)
+    else:
+        depth_ok = min_depth is not None and min_depth >= need_depth
+        add("depth_sufficient", depth_ok,
+            f"min_side_depth={min_depth} >= side*{min_depth_multiplier}={need_depth}")
 
     if max_side_notional_rub and max_side_notional_rub > 0:
         add("side_within_max", side <= max_side_notional_rub,
@@ -268,9 +274,15 @@ def run(
     hard_fail = any(c.blocking and not c.ok for c in checks)
     if hard_fail:
         status = "BLOCKED"
-        for c in checks:
-            if c.blocking and not c.ok:
-                errors.append(f"{c.name}: {c.detail}")
+        # balance-причины важнее общих (planned_actions_nonempty и т.п.),
+        # чтобы не показывать вторичную причину как основную.
+        _balance_first = {"available_cash_present", "side_notional_within_balance",
+                          "reserve_preserved", "min_monthly_actions_met",
+                          "min_total_trades_met"}
+        failed = [c for c in checks if c.blocking and not c.ok]
+        failed.sort(key=lambda c: 0 if c.name in _balance_first else 1)
+        for c in failed:
+            errors.append(f"{c.name}: {c.detail}")
     elif stale:
         status = "STALE_REPORTS"
     else:
