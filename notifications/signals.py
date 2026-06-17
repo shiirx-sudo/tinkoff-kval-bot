@@ -18,6 +18,23 @@ def _money(v) -> str:
     return f"{Decimal(str(v)):,.2f} ₽".replace(",", " ")
 
 
+def _fundamental_block(sig: Signal) -> list[str]:
+    """Блок фундаментального фильтра для Telegram (если есть данные)."""
+    v = sig.fundamental_verdict
+    if not v or v == "quality_unknown":
+        return []
+    if v == "quality_risk":
+        out = ["", "⚠ Фундаментальный риск:"]
+        out += [f"• {r}" for r in (sig.fundamental_reasons or ["качество ниже порога"])[:5]]
+        return out
+    score = "—" if sig.fundamental_score is None else f"{sig.fundamental_score}/4"
+    out = ["", "Фундаментальный фильтр:", f"Вердикт: {v}", f"Оценка: {score}"]
+    if sig.fundamental_reasons:
+        out.append("Причины:")
+        out += [f"• {r}" for r in sig.fundamental_reasons[:5]]
+    return out
+
+
 def build_signal_message(sig: Signal, strategy: str = "trend_signal_v1") -> str:
     head_ticker = f"{sig.ticker} / {sig.class_code or '—'}"
     if sig.action == "BUY":
@@ -39,8 +56,11 @@ def build_signal_message(sig: Signal, strategy: str = "trend_signal_v1") -> str:
             f"Entry: {_money(sig.entry)}",
             f"Stop: {_money(sig.stop)}",
             f"Take-profit: {_money(sig.take_profit)}",
-            f"R/R: {rr or '—'}", "",
-            "Статус: SIGNAL_ONLY / READ_ONLY",
+            f"R/R: {rr or '—'}",
+        ]
+        lines += _fundamental_block(sig)
+        lines += [
+            "", "Статус: SIGNAL_ONLY / READ_ONLY",
             "Заявки не отправляются.",
         ]
         return "\n".join(lines)
@@ -59,12 +79,15 @@ def build_signal_message(sig: Signal, strategy: str = "trend_signal_v1") -> str:
             "Инструмент есть в портфеле.",
             "Это сигнал на выход/снижение риска.",
             "Это не команда открыть short.",
+        ]
+        lines += _fundamental_block(sig)
+        lines += [
             "", "Статус: SIGNAL_ONLY / READ_ONLY",
             "Заявки не отправляются.",
         ]
         return "\n".join(lines)
 
-    # HOLD/SKIP (по умолчанию не отправляются)
+    # HOLD/SKIP/AVOID (по умолчанию не отправляются)
     return (f"ℹ️ SIGNAL: {sig.action} — {head_ticker} ({strategy})\n"
             f"Статус: SIGNAL_ONLY / READ_ONLY. Заявки не отправляются.")
 

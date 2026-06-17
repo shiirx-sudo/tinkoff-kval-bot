@@ -1,0 +1,36 @@
+# Пример ручной базы фундаментальных оценок (read-only фильтр качества).
+# Скопируйте в data/config/fundamental_filter.yaml и заполните под себя.
+# Это НЕ инвестиционная рекомендация — лишь структурированные качественные пометки.
+#
+# Допустимые значения по каждому измерению:
+#   positive | neutral | mixed | weak | negative | unknown
+# Балл: positive=+1, neutral/mixed=+0.5, weak/negative/unknown=0
+# Вердикт: >=3.0 quality_pass, >=2.0 quality_watch, <2.0 quality_risk, нет данных quality_unknown
+#
+# 4 качественных вопроса (по мотивам идеи «без сложной аналитики»):
+#   management_alignment — хочет ли менеджмент роста стоимости акций
+#   cash_return          — деньги идут акционерам (дивиденды/байбэк) или в долг/бесконечный капекс
+#   state_role           — государство союзник или контролёр
+#   market_growth        — рынок компании растёт или сжимается
+
+SBER:
+  class_code: TQBR
+  management_alignment: positive
+  cash_return: positive
+  state_role: mixed
+  market_growth: neutral
+  notes:
+    - "Менеджмент публично ориентирован на капитализацию"
+    - "Есть дивидендная история"
+  verdict: quality_watch
+
+GAZP:
+  class_code: TQBR
+  management_alignment: negative
+  cash_return: weak
+  state_role: controller
+  market_growth: weak
+  notes:
+    - "Высокая роль государства"
+    - "Инвесттезис зависит не только от интересов миноритариев"
+  verdict: quality_risk

@@ -16,6 +16,11 @@ from loguru import logger
 
 from common.helpers import quotation_to_decimal
 from modules.balance import holdings_map, lookup_holding
+from modules.fundamental_filter import (
+    apply_to_signal,
+    evaluate_fundamental,
+    load_fundamental_filter,
+)
 from strategies.trend_signal_v1 import (
     Signal,
     SignalConfig,
@@ -65,6 +70,10 @@ def load_signal_config() -> dict:
         "notify_on_hold": _b(os.getenv("SIGNALS_NOTIFY_ON_HOLD", "false")),
         "sell_only_if_held": _b(os.getenv("SIGNALS_SELL_ONLY_IF_HELD", "true")),
         "include_portfolio_state": _b(os.getenv("SIGNALS_INCLUDE_PORTFOLIO_STATE", "true")),
+        "fundamental_filter_enabled": _b(os.getenv("SIGNALS_FUNDAMENTAL_FILTER_ENABLED", "false")),
+        "fundamental_filter_path": os.getenv("SIGNALS_FUNDAMENTAL_FILTER_PATH",
+                                             "data/config/fundamental_filter.yaml"),
+        "require_fundamental_pass": _b(os.getenv("SIGNALS_REQUIRE_FUNDAMENTAL_PASS", "false")),
         "state_path": _STATE_PATH,
     }
 
@@ -135,6 +144,10 @@ def scan(client, opts: dict, *, as_of=None, account_id=None) -> list:
     priority = opts.get("class_code_priority") or ["TQBR", "TQTF", "SPBRU"]
     sell_only_if_held = opts.get("sell_only_if_held", True)
 
+    fundamental_data = {}
+    if opts.get("fundamental_filter_enabled"):
+        fundamental_data = load_fundamental_filter(opts.get("fundamental_filter_path"))
+
     # read-only карта позиций (один раз). ok=False → held_unknown для всех.
     holdings = {"ok": False, "by_figi": {}, "by_uid": {}, "by_ticker_class": {}}
     if opts.get("include_portfolio_state", True) or sell_only_if_held:
@@ -185,6 +198,10 @@ def scan(client, opts: dict, *, as_of=None, account_id=None) -> list:
         rec = lookup_holding(holdings, figi=sig.figi, uid=sig.instrument_uid,
                              ticker=ticker, class_code=meta.get("class_code", ""))
         apply_portfolio_state(sig, rec, holdings.get("ok", False), sell_only_if_held)
+
+        if opts.get("fundamental_filter_enabled"):
+            fr = evaluate_fundamental(ticker, meta.get("class_code", ""), fundamental_data)
+            apply_to_signal(sig, fr, opts.get("require_fundamental_pass", False))
 
         held_str = ("held" if sig.held else
                     ("held_unknown" if sig.held_unknown else "not_held"))

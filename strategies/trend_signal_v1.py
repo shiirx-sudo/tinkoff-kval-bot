@@ -103,6 +103,13 @@ class Signal:
     held_unknown: bool = False
     position_quantity: Decimal | None = None
     position_value_rub: Decimal | None = None
+    fundamental_score: float | None = None
+    fundamental_verdict: str = ""
+    management_alignment: str = ""
+    cash_return: str = ""
+    state_role: str = ""
+    market_growth: str = ""
+    fundamental_reasons: list[str] = field(default_factory=list)
     notified: bool = False
 
 

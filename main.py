@@ -457,6 +457,12 @@ def cmd_strategy_scan(args: argparse.Namespace) -> int:
         opts["timeframe"] = args.timeframe
     if args.max_signals is not None:
         opts["max_per_run"] = int(args.max_signals)
+    if getattr(args, "fundamental_filter", False):
+        opts["fundamental_filter_enabled"] = True
+    if getattr(args, "fundamental_filter_path", None):
+        opts["fundamental_filter_path"] = args.fundamental_filter_path
+    if getattr(args, "require_fundamental_pass", False):
+        opts["require_fundamental_pass"] = True
 
     try:
         signals = scan(ReadOnlyClient(), opts, as_of=args.as_of,
@@ -671,6 +677,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                       help="Счёт для чтения позиций (read-only; иначе первый брокерский)")
     p_ss.add_argument("--include-avoid", action="store_true",
                       help="Подробнее показывать AVOID в консоли (в отчётах всегда есть)")
+    p_ss.add_argument("--fundamental-filter", action="store_true",
+                      help="Включить read-only фундаментальный фильтр качества")
+    p_ss.add_argument("--fundamental-filter-path", default=None,
+                      help="Путь к YAML-базе оценок (иначе из env/по умолчанию)")
+    p_ss.add_argument("--require-fundamental-pass", action="store_true",
+                      help="Понижать BUY до HOLD, если качество ниже quality_pass")
 
     sub.add_parser("strategy-status",
                    help="Статус стратегии сигналов + последние сигналы (read-only)")
