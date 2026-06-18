@@ -8,7 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from common.helpers import utc_now
-from modules.income_engine import IncomeItem, IncomeSummary
+from modules.income_engine import IncomeItem, IncomeSummary, WatchlistItem
 
 ITEM_COLUMNS = [
     "ticker", "class_code", "figi", "instrument_name", "source_type",
@@ -19,6 +19,12 @@ ITEM_COLUMNS = [
 ]
 CALENDAR_COLUMNS = ["month", "ticker", "source_type", "expected_payment_date",
                     "gross_amount", "net_amount", "confidence"]
+WATCHLIST_COLUMNS = [
+    "ticker", "class_code", "figi", "instrument_uid", "instrument_name",
+    "instrument_type", "current_price", "price_source", "source_type",
+    "expected_annual_yield_pct", "gross_yield_pct", "net_yield_pct", "confidence",
+    "fundamental_verdict", "income_verdict", "risk_notes",
+]
 
 
 def _s(v) -> str:
@@ -113,6 +119,75 @@ def write_calendar(rows: list[dict], reports_dir: str | Path = "data/reports") -
         for r in norm:
             w.writerow(r)
     return {"income_calendar.json": json_path, "income_calendar.csv": csv_path}
+
+
+def _pct(v) -> str:
+    return "n/a" if v is None else f"{Decimal(str(v)):.2f}%"
+
+
+def _price(v) -> str:
+    return "n/a" if v is None else f"{Decimal(str(v)):.2f}"
+
+
+def _watchlist_row(it: WatchlistItem) -> dict:
+    d = asdict(it)
+    d["risk_notes"] = " | ".join(it.risk_notes)
+    return {k: _s(d.get(k)) for k in WATCHLIST_COLUMNS}
+
+
+def render_watchlist_line(it: WatchlistItem) -> str:
+    """Строка CLI: тикер/цена/доходность/вердикт (read-only аналитика)."""
+    div = ""
+    if it.expected_annual_dividend_rub_per_share is not None:
+        div = f"div={it.expected_annual_dividend_rub_per_share} ₽ "
+    yld = it.gross_yield_pct if it.gross_yield_pct is not None else it.expected_annual_yield_pct
+    yld_s = "n/a" if yld is None else f"{Decimal(str(yld)):.2f}%"
+    return (f"{it.ticker:8} {it.class_code or '—':6} price={_price(it.current_price)} "
+            f"{div}yield={yld_s} net={_pct(it.net_yield_pct)} conf={it.confidence} "
+            f"fund={it.fundamental_verdict or 'quality_unknown'} -> {it.income_verdict}")
+
+
+def _watchlist_md(items: list[WatchlistItem]) -> str:
+    lines = [
+        "# Income watchlist — READ ONLY", "",
+        "| Тикер | Класс | Цена | Источник | Доходность | Net | Confidence | Fund | Verdict | Риски |",
+        "|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for it in items:
+        yld = it.gross_yield_pct if it.gross_yield_pct is not None else it.expected_annual_yield_pct
+        lines.append(
+            f"| {it.ticker} | {it.class_code or '—'} | {_price(it.current_price)} | "
+            f"{it.price_source} | {_pct(yld)} | {_pct(it.net_yield_pct)} | {it.confidence} | "
+            f"{it.fundamental_verdict or 'quality_unknown'} | {it.income_verdict} | "
+            f"{', '.join(it.risk_notes) or '—'} |")
+    lines += ["", "_Аналитика, не рекомендация. Ручные оценки не гарантия выплат. "
+              "Заявки не отправляются._", ""]
+    return "\n".join(lines)
+
+
+def write_watchlist(items: list[WatchlistItem],
+                    reports_dir: str | Path = "data/reports") -> dict[str, Path]:
+    out = Path(reports_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    ts = utc_now()
+
+    rows = [_watchlist_row(it) for it in items]
+    json_path = out / "income_watchlist.json"
+    json_path.write_text(json.dumps(
+        {"generated_at_utc": ts, "items": rows}, ensure_ascii=False, indent=2),
+        encoding="utf-8")
+
+    csv_path = out / "income_watchlist.csv"
+    with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=WATCHLIST_COLUMNS, delimiter=";")
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+
+    md_path = out / "income_watchlist.md"
+    md_path.write_text(_watchlist_md(items), encoding="utf-8")
+    return {"income_watchlist.json": json_path, "income_watchlist.csv": csv_path,
+            "income_watchlist.md": md_path}
 
 
 def build_summary_telegram(s: IncomeSummary, calendar: list[dict] | None = None) -> str:
