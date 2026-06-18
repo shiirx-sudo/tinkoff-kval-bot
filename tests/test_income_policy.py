@@ -54,6 +54,22 @@ def test_api_known_future_without_date_degrades_to_estimate():
     assert r.estimate_annual_income_rub == Decimal("3500")
 
 
+# ─── api_coupon_schedule → reliable, в base ──────────────────────────────────
+
+def test_api_coupon_schedule_is_reliable_base():
+    r = classify_income_policy(
+        income_data_source="api_coupon_schedule", source_type="coupon",
+        raw_annual_income_rub=Decimal("800"), gross_yield_pct=Decimal("9"),
+        env=POLICY)
+    assert r.policy_bucket == BUCKET_RELIABLE
+    assert r.policy_confidence == "high"
+    assert r.base_annual_income_rub == Decimal("800")
+    assert r.estimate_annual_income_rub == Decimal("0")
+    assert r.excluded_annual_income_rub == Decimal("0")
+    assert r.conservative_yield_pct == Decimal("9")
+    assert "known_coupon_schedule" in r.policy_reasons
+
+
 # ─── 2. api_trailing_12m → estimated, не в base ──────────────────────────────
 
 def test_api_trailing_is_estimate_not_base():
@@ -199,6 +215,29 @@ def test_summary_layers_split():
     assert s.gross_annual_rub == Decimal("18200.0")
     # base < raw (часть в estimate + haircut)
     assert s.base_annual_gross_rub < s.gross_annual_rub
+
+
+# ─── Integration: облигационный купонный график в base income ────────────────
+
+def test_bond_coupon_schedule_in_base_income():
+    positions = [_pos(
+        "RU000TEST", "bond", 10, 9000,
+        auto={"coupon": {"coupon_source": "api_coupon_schedule",
+                         "coupon_confidence": "api_known",
+                         "known_coupon_income_annualized_rub": Decimal("80"),
+                         "next_coupon_date": "2026-09-15", "events": []}},
+        cls="TQCB", figi="RU000TEST")]
+    s = compute_income(positions, {}, ENV, {}, policy_env=POLICY)
+    it = s.items[0]
+    assert it.income_data_source == "api_coupon_schedule"
+    assert it.policy_bucket == BUCKET_RELIABLE
+    # 80 * 10 = 800 годовых купонов → в base
+    assert it.expected_annual_income_rub == Decimal("800")
+    assert it.base_annual_income_rub == Decimal("800")
+    assert s.base_annual_gross_rub == Decimal("800")
+    # required_capital считается по консервативной (base) net-доходности
+    assert s.conservative_net_yield_pct is not None
+    assert s.required_capital_rub is not None
 
 
 # ─── 9. required_capital по консервативной (base) net-доходности ──────────────

@@ -140,6 +140,15 @@ def classify_income_policy(
             res.estimate_annual_income_rub = raw
         return res
 
+    if src == "api_coupon_schedule":
+        # известный купонный график облигации надёжнее trailing-дивидендов
+        res.policy_bucket = BUCKET_RELIABLE
+        res.policy_confidence = CONF_HIGH
+        res.policy_reasons = ["known_coupon_schedule"]
+        res.base_annual_income_rub = raw
+        res.conservative_yield_pct = gross_yield_pct
+        return res
+
     if src == "api_trailing_12m":
         reasons = ["trailing_not_guaranteed"]
         over_cap = (gross_yield_pct is not None and env.trailing_yield_cap_pct > 0
