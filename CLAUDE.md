@@ -10,6 +10,9 @@ This bot **never** sends, cancels, or modifies orders. Only the read-only Tinkof
 - `config/settings.py` raises at import time if `LIVE_ENABLED=true`. Don't relax this without an explicit user instruction.
 - `execution-plan` builds a *dry-run* plan only — `dry_run=true` is forced; treat the word "execution" in this codebase as planning, not trading.
 - All "income", "strategy", and "signals" outputs are notifications/analytics, never recommendations or orders.
+- Forbidden by name (do not introduce, even as stubs): `order_client.py`, `OrdersService`, `postOrder`/`cancelOrder`, `place_order`/`submit_order`/`place_limit_order`, any full-access token. No web scraping; no investment recommendations; missing data resolves to `unknown` / `manual_required`, never a guess.
+- Do not mutate the portfolio, and never inflate turnover just to reach kval status.
+- If trade execution is ever added, it must be a **human-confirmed** flow (the decision and the button stay with the user) — never an autonomous engine.
 
 When adding features, preserve this contract: any new TInvest endpoint must be a read method, and Telegram/output must say so.
 
@@ -37,6 +40,7 @@ python main.py execution-preflight --instrument LQDT --max-side-notional-rub 130
 python main.py passive-income-summary
 python main.py income-summary --account-id <id> --target-monthly-rub 100000
 python main.py income-calendar --months 12
+python main.py income-watchlist
 
 # Signals (read-only notifications)
 python main.py strategy-scan --strategy trend_signal_v1 [--notify]
@@ -44,9 +48,16 @@ python main.py strategy-status
 
 # Telegram (opt-in)
 python main.py telegram-test --dry-run true
+python main.py telegram-summary                  # print report digest (no send by default)
 python main.py telegram-notify --dry-run false   # used by runner
 
 python main.py -v <cmd>            # DEBUG logging
+```
+
+Both `ruff check .` and `pytest` must be green before any commit. Local dev is Windows/PowerShell + Python 3.14 + `.venv`; set the token env before running tests:
+
+```powershell
+$env:TINKOFF_READ_TOKEN="test"; $env:LIVE_ENABLED="false"; python -m pytest
 ```
 
 CI runs `ruff check .` then `pytest -q` against Python 3.10/3.11/3.12 with `TINKOFF_READ_TOKEN=test-token-readonly`.
@@ -110,3 +121,9 @@ All monetary math uses `decimal.Decimal`. `common/helpers.quotation_to_decimal` 
 ### Telegram
 
 `notifications/telegram.py` is fully self-contained: reading reports, computing the alert decision (status-change, deadline windows, daily summary cadence with antispam in `data/alerts/telegram_alert_state.json`), and sending. Token is never logged. `telegram-notify` is the cron-friendly entry point; `telegram-test` and `telegram-summary` are diagnostic.
+
+## Conventions & workflow
+
+- Code comments and all user-facing text (Telegram, console, commit messages) are written in **Russian**.
+- CSV output is `utf-8-sig` with `;` as the delimiter (see `reports/output_contract.py`); reports also emit json and md.
+- **Never push directly to `main`.** Work on a branch and open a PR so the diff is reviewable.
