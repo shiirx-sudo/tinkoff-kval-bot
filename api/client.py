@@ -100,6 +100,56 @@ class ReadOnlyClient:
                 continue
         return out
 
+    # ─── Доходные данные (read-only) ────────────────────────────────────────
+
+    def get_dividends(self, instrument_id: str, from_iso: str,
+                      to_iso: str) -> list[dict[str, Any]]:
+        """История/график дивидендов по акции (read-only). [] при ошибке."""
+        try:
+            resp = self._rest.get_dividends(instrument_id, from_iso, to_iso)
+        except Exception as exc:  # noqa: BLE001 — доходные данные опциональны
+            logger.warning(f"GetDividends({instrument_id}) недоступен: {exc}")
+            return []
+        return (resp or {}).get("dividends") or []
+
+    def get_bond_coupons(self, instrument_id: str, from_iso: str,
+                         to_iso: str) -> list[dict[str, Any]]:
+        """График купонов облигации (read-only). [] при ошибке."""
+        try:
+            resp = self._rest.get_bond_coupons(instrument_id, from_iso, to_iso)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"GetBondCoupons({instrument_id}) недоступен: {exc}")
+            return []
+        return (resp or {}).get("events") or []
+
+    def get_accrued_interests(self, instrument_id: str, from_iso: str,
+                              to_iso: str) -> list[dict[str, Any]]:
+        """Накопленный купонный доход (НКД), read-only. [] при ошибке."""
+        try:
+            resp = self._rest.get_accrued_interests(instrument_id, from_iso, to_iso)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"GetAccruedInterests({instrument_id}) недоступен: {exc}")
+            return []
+        return (resp or {}).get("accruedInterests") or []
+
+    def get_asset_fundamentals(self, asset_uids: list[str]) -> list[dict[str, Any]]:
+        """Фундаментальные показатели по assetUid (read-only). [] при ошибке."""
+        try:
+            resp = self._rest.get_asset_fundamentals(asset_uids)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"GetAssetFundamentals недоступен: {exc}")
+            return []
+        return (resp or {}).get("fundamentals") or []
+
+    def get_asset_reports(self, instrument_id: str) -> list[dict[str, Any]]:
+        """Календарь отчётностей эмитента (read-only). [] при ошибке."""
+        try:
+            resp = self._rest.get_asset_reports(instrument_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"GetAssetReports({instrument_id}) недоступен: {exc}")
+            return []
+        return (resp or {}).get("events") or []
+
     def get_operations(
         self,
         account_id: str,

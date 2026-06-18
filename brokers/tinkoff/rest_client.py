@@ -253,6 +253,79 @@ class TinkoffReadOnlyClient:
         """InstrumentsService/FindInstrument — поиск инструментов по строке."""
         return self._post(_INSTRUMENTS, "FindInstrument", {"query": query})
 
+    # ─── Доходные данные (read-only, InstrumentsService) ─────────────────────
+    #
+    # Все методы ниже — ТОЛЬКО чтение справочной/исторической информации
+    # (дивиденды, купоны, НКД, фундаментальные показатели, отчётности эмитента).
+    # Это не заявки и не торговые операции.
+
+    def get_dividends(
+        self, instrument_id: str, from_iso: str, to_iso: str
+    ) -> dict[str, Any]:
+        """
+        InstrumentsService/GetDividends — график/история дивидендов по акции.
+
+        instrument_id — figi или instrument_uid. Возвращает {'dividends': [...]}
+        с полями dividendNet/paymentDate/recordDate/lastBuyDate/yieldValue и т.д.
+        """
+        if not instrument_id:
+            raise ValueError("instrument_id must be a non-empty string")
+        return self._post(
+            _INSTRUMENTS, "GetDividends",
+            {"instrumentId": instrument_id, "from": from_iso, "to": to_iso},
+        )
+
+    def get_bond_coupons(
+        self, instrument_id: str, from_iso: str, to_iso: str
+    ) -> dict[str, Any]:
+        """
+        InstrumentsService/GetBondCoupons — график купонов облигации.
+
+        Возвращает {'events': [...]} с couponDate/payOneBond/couponNumber/
+        couponPeriod/couponType.
+        """
+        if not instrument_id:
+            raise ValueError("instrument_id must be a non-empty string")
+        return self._post(
+            _INSTRUMENTS, "GetBondCoupons",
+            {"instrumentId": instrument_id, "from": from_iso, "to": to_iso},
+        )
+
+    def get_accrued_interests(
+        self, instrument_id: str, from_iso: str, to_iso: str
+    ) -> dict[str, Any]:
+        """
+        InstrumentsService/GetAccruedInterests — накопленный купонный доход (НКД).
+
+        Возвращает {'accruedInterests': [...]} с date/value/valuePercent/nominal.
+        """
+        if not instrument_id:
+            raise ValueError("instrument_id must be a non-empty string")
+        return self._post(
+            _INSTRUMENTS, "GetAccruedInterests",
+            {"instrumentId": instrument_id, "from": from_iso, "to": to_iso},
+        )
+
+    def get_asset_fundamentals(self, asset_uids: list[str]) -> dict[str, Any]:
+        """
+        InstrumentsService/GetAssetFundamentals — фундаментальные показатели
+        по списку assetUid (read-only). Возвращает {'fundamentals': [...]}.
+        """
+        return self._post(
+            _INSTRUMENTS, "GetAssetFundamentals", {"assets": asset_uids},
+        )
+
+    def get_asset_reports(self, instrument_id: str) -> dict[str, Any]:
+        """
+        InstrumentsService/GetAssetReports — календарь отчётностей эмитента
+        (read-only). Возвращает {'events': [...]}.
+        """
+        if not instrument_id:
+            raise ValueError("instrument_id must be a non-empty string")
+        return self._post(
+            _INSTRUMENTS, "GetAssetReports", {"instrumentId": instrument_id},
+        )
+
     def _list_instruments(self, method: str) -> dict[str, Any]:
         return self._post(
             _INSTRUMENTS, method,
