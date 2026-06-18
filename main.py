@@ -630,6 +630,56 @@ def cmd_income_watchlist(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_income_source_audit(args: argparse.Namespace) -> int:
+    import os
+
+    from api.client import ReadOnlyClient
+    from modules.income_audit import build_audit
+    from modules.income_engine import (
+        DEFAULT_CLASS_CODE_PRIORITY,
+        load_income_config,
+        load_income_env,
+    )
+    from reports import income_audit_reports as rep
+
+    config = load_income_config(getattr(args, "config_path", None))
+    env = load_income_env(config)
+    if args.lookback_months is not None:
+        env.dividend_lookback_months = args.lookback_months
+    if args.trailing_months is not None:
+        env.dividend_trailing_months = args.trailing_months
+    if args.mm_trailing_days is not None:
+        env.mm_trailing_days = args.mm_trailing_days
+
+    raw_items = [t.strip() for t in (args.watchlist or "").split(",") if t.strip()]
+    if not raw_items and args.account_id is None:
+        logger.error("Укажите --watchlist и/или --account-id для аудита.")
+        return 1
+    priority = [c.strip().upper() for c in
+                os.getenv("SIGNALS_CLASS_CODE_PRIORITY",
+                          ",".join(DEFAULT_CLASS_CODE_PRIORITY)).split(",") if c.strip()]
+
+    try:
+        items = build_audit(ReadOnlyClient(), raw_items=raw_items,
+                            account_id=args.account_id, config=config, env=env,
+                            priority=priority)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка income-source-audit (read-only): {exc}")
+        return 1
+
+    written = rep.write_audit(items, "data/reports")
+    fmt = getattr(args, "format", "md")
+    if fmt == "json":
+        print((written["income_source_audit.json"]).read_text(encoding="utf-8"))
+    elif fmt == "csv":
+        print((written["income_source_audit.csv"]).read_text(encoding="utf-8-sig"))
+    else:
+        print(rep.render_audit_console(items))
+    for _name, path in written.items():
+        logger.info(f"Отчёт: {path}")
+    return 0
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="main.py", description="T-Invest Kval Bot (read-only)")
     parser.add_argument("-v", "--verbose", action="store_true", help="DEBUG-логирование")
@@ -811,6 +861,18 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p_iw.add_argument("--account-id", default=None)
     p_iw.add_argument("--config-path", default=None)
 
+    p_isa = sub.add_parser(
+        "income-source-audit",
+        help="READ-ONLY аудит сырых API-событий, легших в расчёт доходности")
+    p_isa.add_argument("--watchlist", default="", help="Тикеры через запятую")
+    p_isa.add_argument("--account-id", default=None,
+                       help="Аудит позиций портфеля (read-only; можно вместе с watchlist)")
+    p_isa.add_argument("--lookback-months", type=int, default=None)
+    p_isa.add_argument("--trailing-months", type=int, default=None)
+    p_isa.add_argument("--mm-trailing-days", type=int, default=None)
+    p_isa.add_argument("--format", default="md", choices=("md", "json", "csv"))
+    p_isa.add_argument("--config-path", default=None)
+
     p_tgt = sub.add_parser(
         "telegram-test", help="Проверка Telegram bot_token/chat_id (read-only)")
     p_tgt.add_argument("--dry-run", type=_boolish, default=True, metavar="true|false",
@@ -851,6 +913,7 @@ _HANDLERS = {
     "income-summary": cmd_income_summary,
     "income-calendar": cmd_income_calendar,
     "income-watchlist": cmd_income_watchlist,
+    "income-source-audit": cmd_income_source_audit,
     "telegram-test": cmd_telegram_test,
     "telegram-summary": cmd_telegram_summary,
     "telegram-notify": cmd_telegram_notify,
