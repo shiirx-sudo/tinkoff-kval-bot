@@ -592,36 +592,40 @@ def cmd_income_calendar(args: argparse.Namespace) -> int:
 
 
 def cmd_income_watchlist(args: argparse.Namespace) -> int:
-    from decimal import Decimal
+    import os
 
-    from modules.fundamental_filter import evaluate_fundamental, load_fundamental_filter
+    from api.client import ReadOnlyClient
+    from modules.fundamental_filter import load_fundamental_filter
     from modules.income_engine import (
+        DEFAULT_CLASS_CODE_PRIORITY,
         IncomeEnv,
-        income_for_item,
-        income_verdict,
+        build_watchlist,
         load_income_config,
         load_income_env,
     )
-    from strategies.trend_signal_v1 import parse_watchlist_item
+    from reports import income_reports
 
     config = load_income_config(getattr(args, "config_path", None))
     env: IncomeEnv = load_income_env(config)
     fdata = load_fundamental_filter()
-    items = [t.strip() for t in (args.watchlist or "").split(",") if t.strip()]
+    raw_items = [t.strip() for t in (args.watchlist or "").split(",") if t.strip()]
+    priority = [c.strip().upper() for c in
+                os.getenv("SIGNALS_CLASS_CODE_PRIORITY",
+                          ",".join(DEFAULT_CLASS_CODE_PRIORITY)).split(",") if c.strip()]
 
-    print("Income watchlist — READ ONLY (аналитический список, не рекомендация):")
-    for raw in items:
-        ticker, cls = parse_watchlist_item(raw)
-        pos = {"ticker": ticker, "class_code": cls or "", "figi": "",
-               "instrument_name": "", "instrument_type": "share",
-               "position_quantity": Decimal("1"), "position_value_rub": Decimal("0")}
-        item = income_for_item(pos, config, env)
-        fr = evaluate_fundamental(ticker, cls or "", fdata)
-        item.fundamental_verdict = fr.verdict
-        item.income_verdict = income_verdict(item)
-        print(f"  {ticker:8} {cls or '—':6} src={item.source_type:12} "
-              f"yield={item.expected_annual_yield_pct or item.gross_yield_pct or 'n/a'} "
-              f"conf={item.confidence} fund={fr.verdict} -> {item.income_verdict}")
+    try:
+        items = build_watchlist(ReadOnlyClient(), raw_items, config, env, fdata, priority)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка income-watchlist (read-only): {exc}")
+        return 1
+
+    written = income_reports.write_watchlist(items, "data/reports")
+    print("Income watchlist — READ ONLY")
+    print("")
+    for it in items:
+        print(income_reports.render_watchlist_line(it))
+    for _name, path in written.items():
+        logger.info(f"Отчёт: {path}")
     print("Статус: аналитика, не рекомендация. Заявки не отправляются.")
     return 0
 
@@ -854,6 +858,12 @@ _HANDLERS = {
 
 
 def main(argv: list[str] | None = None) -> int:
+    # На Windows-консоли (cp1251) символы вроде '₽' рушат вывод — печатаем в UTF-8.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):  # не TextIOWrapper / уже сконфигурирован
+            pass
     args = _parse_args(argv)
     _setup_logging(getattr(args, "verbose", False))
     return _HANDLERS[args.command](args)

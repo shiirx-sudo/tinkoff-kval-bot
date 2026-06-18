@@ -364,3 +364,211 @@ def summarize_account(client, account_id: str | None, config: dict, env: IncomeE
     positions = build_positions(client, account_id)
     free_cash = available_cash_rub(client, account_id) or Decimal("0")
     return compute_income(positions, config, env, fundamental_data, free_cash)
+
+
+# ─── watchlist: доходность по текущей цене (read-only, без позиций) ───────────
+#
+# В отличие от income-summary (считает доход от стоимости позиции в портфеле),
+# watchlist резолвит инструмент и тянет ТЕКУЩУЮ цену read-only, чтобы посчитать
+# дивдоходность/купонную доходность на акцию. Заявок не отправляет.
+
+DEFAULT_CLASS_CODE_PRIORITY = ["TQBR", "TQTF", "SPBRU"]
+
+# «серьёзные» риск-флаги: переводят вердикт в income_risk (см. watchlist_verdict)
+_SERIOUS_RISK = {"state_control_risk", "dividend_cut_risk", "coupon_default_risk"}
+
+
+@dataclass
+class WatchlistItem:
+    ticker: str
+    class_code: str = ""
+    figi: str = ""
+    instrument_uid: str = ""
+    instrument_name: str = ""
+    instrument_type: str = ""
+    current_price: Decimal | None = None
+    price_source: str = "price_unknown"   # last_price|orderbook_mid|candle_close|price_unknown
+    source_type: str = "unknown"          # money_market|dividend|coupon|unknown
+    expected_annual_yield_pct: Decimal | None = None
+    gross_yield_pct: Decimal | None = None
+    net_yield_pct: Decimal | None = None
+    confidence: str = "unknown"           # api|manual|medium|low|assumed|unknown
+    fundamental_verdict: str = ""
+    income_verdict: str = "income_unknown"
+    risk_notes: list[str] = field(default_factory=list)
+    # для CLI-вывода (не входит в фиксированную схему отчёта)
+    expected_annual_dividend_rub_per_share: Decimal | None = None
+
+
+def fetch_current_price(client, instrument_id: str) -> tuple[Decimal | None, str]:
+    """Текущая цена read-only: last price → mid стакана → close свечи → unknown."""
+    if not instrument_id:
+        return None, "price_unknown"
+    try:
+        lp = client.get_last_price(instrument_id)
+        if lp:
+            from common.helpers import quotation_to_decimal
+            p = quotation_to_decimal(lp.get("price"))
+            if p > 0:
+                return p, "last_price"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"get_last_price({instrument_id}) недоступен: {exc}")
+    try:
+        from common.helpers import quotation_to_decimal
+        ob = client.get_order_book(instrument_id, depth=1)
+        bid = quotation_to_decimal((ob.get("bids") or [{}])[0].get("price"))
+        ask = quotation_to_decimal((ob.get("asks") or [{}])[0].get("price"))
+        if bid > 0 and ask > 0:
+            return (bid + ask) / Decimal("2"), "orderbook_mid"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"get_order_book({instrument_id}) недоступен: {exc}")
+    try:
+        from datetime import datetime, timedelta, timezone
+
+        from common.helpers import quotation_to_decimal
+        now = datetime.now(timezone.utc)
+        frm = now - timedelta(days=7)
+        cs = client.get_candles(instrument_id, frm.isoformat(), now.isoformat(),
+                                "CANDLE_INTERVAL_DAY")
+        candles = cs.get("candles") or []
+        if candles:
+            c = quotation_to_decimal(candles[-1].get("close"))
+            if c > 0:
+                return c, "candle_close"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"get_candles({instrument_id}) недоступен: {exc}")
+    return None, "price_unknown"
+
+
+def resolve_watchlist_meta(client, ticker: str, explicit_class: str | None,
+                           priority: list[str]) -> dict:
+    """Read-only резолв инструмента → figi/uid/name/type/class_code (или минимум)."""
+    from strategies.trend_signal_v1 import resolve_instrument
+    try:
+        found = client.find_instruments(ticker)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"find_instruments({ticker}) недоступен: {exc}")
+        found = []
+    chosen, _selected_by, _classes = resolve_instrument(
+        found, ticker, explicit_class, priority)
+    if chosen is None:
+        return {"ticker": ticker, "class_code": (explicit_class or ""), "figi": "",
+                "instrument_uid": "", "instrument_name": "", "instrument_type": ""}
+    return {
+        "ticker": ticker, "class_code": chosen["class_code"], "figi": chosen["figi"],
+        "instrument_uid": chosen["uid"], "instrument_name": chosen["name"],
+        "instrument_type": chosen["instrument_type"],
+    }
+
+
+def _watchlist_risk_notes(item: WatchlistItem, fr) -> list[str]:
+    notes: list[str] = []
+    if item.price_source == "price_unknown" and item.source_type in ("dividend", "coupon"):
+        notes.append("price_unknown")
+    if getattr(fr, "verdict", "") == "quality_risk" \
+            or getattr(fr, "state_role", "") in ("controller", "negative"):
+        notes.append("state_control_risk")
+    # low/assumed — это шаткая оценка дохода (manual/medium — осознанная ручная)
+    if item.source_type == "dividend" and item.confidence in ("low", "assumed"):
+        notes.append("dividend_cut_risk")
+    if item.source_type == "coupon" and item.confidence in ("low", "assumed"):
+        notes.append("coupon_default_risk")
+    if item.confidence in ("manual", "assumed"):
+        notes.append("manual_estimate")
+    return notes
+
+
+def watchlist_verdict(item: WatchlistItem) -> str:
+    """Вердикт по watchlist-инструменту (read-only аналитика, не рекомендация)."""
+    has_yield = item.gross_yield_pct is not None or item.expected_annual_yield_pct is not None
+    # нет дохода вовсе, либо для дивиденда/облигации нет цены → unknown
+    if not has_yield:
+        return "income_unknown"
+    if item.price_source == "price_unknown" and item.source_type in ("dividend", "coupon"):
+        return "income_unknown"
+    # серьёзные риски
+    if item.fundamental_verdict == "quality_risk" or (_SERIOUS_RISK & set(item.risk_notes)):
+        return "income_risk"
+    # доходность известна; money market — переменная и ручная → всегда watch
+    soft = (item.source_type == "money_market"
+            or item.confidence in ("low", "medium", "manual", "assumed")
+            or bool(item.risk_notes))
+    return "income_watch" if soft else "income_candidate"
+
+
+def compute_watchlist_item(ticker: str, explicit_class: str | None, meta: dict,
+                           current_price: Decimal | None, price_source: str,
+                           config: dict, env: IncomeEnv, fundamental_result) -> WatchlistItem:
+    ticker = ticker.upper()
+    item = WatchlistItem(
+        ticker=ticker,
+        class_code=str(meta.get("class_code") or explicit_class or ""),
+        figi=str(meta.get("figi", "")), instrument_uid=str(meta.get("instrument_uid", "")),
+        instrument_name=str(meta.get("instrument_name", "")),
+        instrument_type=str(meta.get("instrument_type", "")),
+        current_price=current_price, price_source=price_source,
+    )
+    item.source_type = classify_source(
+        {"ticker": ticker, "instrument_type": item.instrument_type}, config)
+
+    if item.source_type == "money_market":
+        rec = (config.get("manual_yields") or {}).get(ticker) or {}
+        ypct = _dec(rec.get("expected_annual_yield_pct"))
+        if ypct is not None:
+            item.confidence = "manual"
+        elif env.money_market_yield_pct > 0:
+            ypct = env.money_market_yield_pct
+            item.confidence = "assumed"
+        if ypct is not None:
+            item.expected_annual_yield_pct = ypct
+            item.gross_yield_pct = ypct
+
+    elif item.source_type == "dividend":
+        rec = (config.get("manual_dividends") or {}).get(ticker) or {}
+        dps = _dec(rec.get("expected_annual_dividend_rub_per_share"))
+        if dps is not None:
+            item.expected_annual_dividend_rub_per_share = dps
+            item.confidence = str(rec.get("confidence") or "manual")
+            if current_price is not None and current_price > 0:
+                item.gross_yield_pct = dps / current_price * Decimal("100")
+
+    elif item.source_type == "coupon":
+        rec = (config.get("manual_bonds") or {}).get(ticker) \
+            or (config.get("manual_bonds") or {}).get(item.figi) or {}
+        coupon = _dec(rec.get("expected_coupon_rub"))
+        freq = _dec(rec.get("coupon_frequency_per_year")) or Decimal("0")
+        if coupon is not None and freq > 0:
+            item.confidence = str(rec.get("confidence") or "manual")
+            annual = coupon * freq
+            if current_price is not None and current_price > 0:
+                item.gross_yield_pct = annual / current_price * Decimal("100")
+
+    if item.gross_yield_pct is not None:
+        item.net_yield_pct = _net(item.gross_yield_pct, env.tax_rate_pct)
+
+    item.fundamental_verdict = getattr(fundamental_result, "verdict", "") or ""
+    item.risk_notes = _watchlist_risk_notes(item, fundamental_result)
+    item.income_verdict = watchlist_verdict(item)
+    return item
+
+
+def build_watchlist(client, raw_items: list[str], config: dict, env: IncomeEnv,
+                    fundamental_data: dict | None = None,
+                    priority: list[str] | None = None) -> list[WatchlistItem]:
+    """Прогоняет watchlist через read-only резолв + текущую цену. Заявок нет."""
+    from modules.fundamental_filter import evaluate_fundamental
+    from strategies.trend_signal_v1 import parse_watchlist_item
+
+    fundamental_data = fundamental_data or {}
+    priority = priority or DEFAULT_CLASS_CODE_PRIORITY
+    out: list[WatchlistItem] = []
+    for raw in raw_items:
+        ticker, explicit = parse_watchlist_item(raw)
+        meta = resolve_watchlist_meta(client, ticker, explicit, priority)
+        instrument_id = meta.get("figi") or meta.get("instrument_uid")
+        price, price_source = fetch_current_price(client, instrument_id)
+        fr = evaluate_fundamental(ticker, meta.get("class_code") or explicit or "",
+                                  fundamental_data)
+        out.append(compute_watchlist_item(ticker, explicit, meta, price, price_source,
+                                           config, env, fr))
+    return out
