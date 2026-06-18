@@ -178,6 +178,34 @@ def test_money_market_manual_override_flag():
     assert it.candle_basis is not None
 
 
+def test_money_market_manual_override_yield_display():
+    # при активном manual override основной yield — ручной (14%), а trailing
+    # из свечей остаётся в candle_basis как наблюдаемый базис и НЕ подменяет его
+    config = {"manual_yields": {"LQDT": {"expected_annual_yield_pct": 14.0}}}
+    client = FakeAuditClient(candles=[
+        {"time": "2026-05-19T00:00:00Z", "close": _q("100")},
+        {"time": "2026-06-18T00:00:00Z", "close": _q("101")},
+    ])
+    it = audit_one(client, _meta("LQDT", "etf", cls="TQTF"), config, ENV,
+                   origin="watchlist", now=NOW)
+    assert it.income_data_source == "manual_override"
+    assert it.yield_source == "manual_override"
+    assert it.confidence == "manual"
+    assert it.expected_annual_yield_pct == Decimal("14.0")
+    # trailing-базис присутствует и отличается от ручного yield
+    assert it.candle_basis is not None
+    assert it.candle_basis.annualized_yield_pct is not None
+    assert it.candle_basis.annualized_yield_pct != it.expected_annual_yield_pct
+    # отчёты/консоль не теряют candle_basis
+    from reports import income_audit_reports as rep
+    console = rep.render_audit_console([it])
+    assert "yield=14.00%" in console
+    assert "trailing_30d=" in console
+    md = rep._audit_md([it])
+    assert "expected_annual_yield: 14.00%" in md
+    assert it.candle_basis.start_date in md and it.candle_basis.end_date in md
+
+
 # ─── 6. Отчёты генерируются ──────────────────────────────────────────────────
 
 def test_audit_reports_generated(tmp_path):
