@@ -18,6 +18,11 @@ from loguru import logger
 
 from modules.balance import _MM_FUND_TICKERS, available_cash_rub
 from modules.fundamental_filter import evaluate_fundamental
+from modules.income_policy import (
+    PolicyEnv,
+    classify_income_policy,
+    load_policy_env,
+)
 
 _DEFAULT_PATH = "data/config/income_engine.yaml"
 _FALLBACK_EXAMPLE = "config/income_engine.example.yaml"
@@ -88,6 +93,16 @@ class IncomeItem:
     trailing_income_rub: Decimal = Decimal("0")
     manual_income_rub: Decimal = Decimal("0")
     notes: str = ""
+    # conservative income policy (income_quality_policy_v1)
+    policy_bucket: str = "income_unknown"
+    policy_confidence: str = "unknown"
+    policy_reasons: list[str] = field(default_factory=list)
+    base_annual_income_rub: Decimal = Decimal("0")
+    base_monthly_income_rub: Decimal = Decimal("0")
+    estimate_annual_income_rub: Decimal = Decimal("0")
+    estimate_monthly_income_rub: Decimal = Decimal("0")
+    excluded_annual_income_rub: Decimal = Decimal("0")
+    conservative_yield_pct: Decimal | None = None
     # внутреннее: датированные события выплат для календаря (не в схеме отчёта)
     calendar_events: list[dict] = field(default_factory=list)
 
@@ -110,6 +125,21 @@ class IncomeSummary:
     gap_monthly_rub: Decimal = Decimal("0")
     required_capital_rub: Decimal | None = None
     tax_rate_pct: Decimal = Decimal("13")
+    # conservative income policy: 3 слоя дохода (gross + net)
+    policy_enabled: bool = True
+    base_annual_gross_rub: Decimal = Decimal("0")
+    base_annual_net_rub: Decimal = Decimal("0")
+    base_monthly_net_rub: Decimal = Decimal("0")
+    estimate_annual_gross_rub: Decimal = Decimal("0")
+    estimate_annual_net_rub: Decimal = Decimal("0")
+    estimate_monthly_net_rub: Decimal = Decimal("0")
+    excluded_annual_gross_rub: Decimal = Decimal("0")
+    excluded_monthly_net_rub: Decimal = Decimal("0")
+    unknown_instruments: int = 0
+    conservative_gross_yield_pct: Decimal | None = None
+    conservative_net_yield_pct: Decimal | None = None
+    gap_raw_monthly_rub: Decimal = Decimal("0")
+    gap_base_monthly_rub: Decimal = Decimal("0")
     items: list[IncomeItem] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -355,15 +385,43 @@ def income_verdict(item: IncomeItem) -> str:
     return "income_candidate"
 
 
+def _has_future_date(date_str: str) -> bool:
+    return bool(date_str) and date_str not in ("month_unknown", "")
+
+
+def apply_item_policy(item: IncomeItem, policy_env: PolicyEnv) -> None:
+    """Раскладывает доход инструмента по policy-слоям (base/estimate/excluded)."""
+    res = classify_income_policy(
+        income_data_source=item.income_data_source,
+        source_type=item.source_type,
+        raw_annual_income_rub=item.expected_annual_income_rub,
+        gross_yield_pct=item.gross_yield_pct,
+        has_future_date=_has_future_date(item.next_payment_date),
+        env=policy_env,
+    )
+    item.policy_bucket = res.policy_bucket
+    item.policy_confidence = res.policy_confidence
+    item.policy_reasons = res.policy_reasons
+    item.base_annual_income_rub = res.base_annual_income_rub
+    item.base_monthly_income_rub = res.base_annual_income_rub / Decimal("12")
+    item.estimate_annual_income_rub = res.estimate_annual_income_rub
+    item.estimate_monthly_income_rub = res.estimate_annual_income_rub / Decimal("12")
+    item.excluded_annual_income_rub = res.excluded_annual_income_rub
+    item.conservative_yield_pct = res.conservative_yield_pct
+
+
 # ─── агрегация портфеля ──────────────────────────────────────────────────────
 
 def compute_income(positions: list[dict], config: dict, env: IncomeEnv,
                    fundamental_data: dict | None = None,
-                   free_cash_rub: Decimal | None = None) -> IncomeSummary:
+                   free_cash_rub: Decimal | None = None,
+                   policy_env: PolicyEnv | None = None) -> IncomeSummary:
     fundamental_data = fundamental_data or {}
+    policy_env = policy_env or load_policy_env()
     s = IncomeSummary(tax_rate_pct=env.tax_rate_pct,
                       target_monthly_rub=env.target_monthly_rub,
-                      free_cash_rub=free_cash_rub or Decimal("0"))
+                      free_cash_rub=free_cash_rub or Decimal("0"),
+                      policy_enabled=policy_env.enabled)
 
     items: list[IncomeItem] = []
     total = s.free_cash_rub
@@ -378,6 +436,16 @@ def compute_income(positions: list[dict], config: dict, env: IncomeEnv,
         add_risk_notes(item, fr.verdict, fr.state_role, total)
         item.income_verdict = income_verdict(item)
 
+        if policy_env.enabled:
+            apply_item_policy(item, policy_env)
+        else:
+            # policy выключен → весь доход считаем опорным (как раньше)
+            item.policy_bucket = "income_reliable" if item.expected_annual_income_rub > 0 \
+                else "income_unknown"
+            item.base_annual_income_rub = item.expected_annual_income_rub
+            item.base_monthly_income_rub = item.expected_annual_income_rub / Decimal("12")
+            item.conservative_yield_pct = item.gross_yield_pct
+
         if item.source_type == "money_market":
             s.money_market_rub += item.position_value_rub
         elif item.source_type == "dividend":
@@ -386,27 +454,47 @@ def compute_income(positions: list[dict], config: dict, env: IncomeEnv,
             s.bonds_rub += item.position_value_rub
 
         s.gross_annual_rub += item.expected_annual_income_rub
+        s.base_annual_gross_rub += item.base_annual_income_rub
+        s.estimate_annual_gross_rub += item.estimate_annual_income_rub
+        s.excluded_annual_gross_rub += item.excluded_annual_income_rub
+        if item.policy_bucket == "income_unknown":
+            s.unknown_instruments += 1
         if item.expected_annual_income_rub <= 0 and not env.include_unknown:
             s.warnings.append(f"{item.ticker or item.figi}: доход неизвестен (unknown)")
 
     s.items = items
+    # raw слой
     s.net_annual_rub = _net(s.gross_annual_rub, env.tax_rate_pct)
     s.gross_monthly_rub = s.gross_annual_rub / Decimal("12")
     s.net_monthly_rub = s.net_annual_rub / Decimal("12")
     s.current_monthly_net_rub = s.net_monthly_rub
+    # conservative слои (net)
+    s.base_annual_net_rub = _net(s.base_annual_gross_rub, env.tax_rate_pct)
+    s.base_monthly_net_rub = s.base_annual_net_rub / Decimal("12")
+    s.estimate_annual_net_rub = _net(s.estimate_annual_gross_rub, env.tax_rate_pct)
+    s.estimate_monthly_net_rub = s.estimate_annual_net_rub / Decimal("12")
+    s.excluded_monthly_net_rub = _net(s.excluded_annual_gross_rub, env.tax_rate_pct) / Decimal("12")
 
-    if s.total_value_rub > 0 and s.gross_annual_rub > 0:
-        s.portfolio_gross_yield_pct = s.gross_annual_rub / s.total_value_rub * Decimal("100")
-        s.portfolio_net_yield_pct = s.net_annual_rub / s.total_value_rub * Decimal("100")
+    if s.total_value_rub > 0:
+        if s.gross_annual_rub > 0:
+            s.portfolio_gross_yield_pct = s.gross_annual_rub / s.total_value_rub * Decimal("100")
+            s.portfolio_net_yield_pct = s.net_annual_rub / s.total_value_rub * Decimal("100")
+        if s.base_annual_gross_rub > 0:
+            s.conservative_gross_yield_pct = s.base_annual_gross_rub / s.total_value_rub * Decimal("100")
+            s.conservative_net_yield_pct = s.base_annual_net_rub / s.total_value_rub * Decimal("100")
 
     if env.target_monthly_rub > 0:
-        s.gap_monthly_rub = max(Decimal("0"), env.target_monthly_rub - s.net_monthly_rub)
-        if s.portfolio_net_yield_pct and s.portfolio_net_yield_pct > 0:
+        s.gap_raw_monthly_rub = max(Decimal("0"), env.target_monthly_rub - s.net_monthly_rub)
+        s.gap_base_monthly_rub = max(Decimal("0"), env.target_monthly_rub - s.base_monthly_net_rub)
+        s.gap_monthly_rub = s.gap_raw_monthly_rub  # обратная совместимость
+        # required_capital по КОНСЕРВАТИВНОЙ (base) net-доходности
+        if s.conservative_net_yield_pct and s.conservative_net_yield_pct > 0:
             target_annual_net = env.target_monthly_rub * Decimal("12")
             s.required_capital_rub = (target_annual_net
-                                      / (s.portfolio_net_yield_pct / Decimal("100")))
+                                      / (s.conservative_net_yield_pct / Decimal("100")))
         else:
-            s.warnings.append("required_capital: n/a (доходность портфеля неизвестна)")
+            s.warnings.append(
+                "required_capital: n/a (консервативная доходность не определена)")
 
     return s
 
@@ -584,6 +672,11 @@ class WatchlistItem:
     trailing_12m_dividend: Decimal | None = None
     known_future_dividend: Decimal | None = None
     notes: str = ""
+    # conservative income policy (income_quality_policy_v1)
+    policy_bucket: str = "income_unknown"
+    policy_confidence: str = "unknown"
+    policy_reasons: list[str] = field(default_factory=list)
+    conservative_yield_pct: Decimal | None = None
     # для CLI-вывода (не входит в фиксированную схему отчёта)
     expected_annual_dividend_rub_per_share: Decimal | None = None
 
@@ -775,7 +868,8 @@ def watchlist_verdict(item: WatchlistItem) -> str:
 def compute_watchlist_item(ticker: str, explicit_class: str | None, meta: dict,
                            current_price: Decimal | None, price_source: str,
                            config: dict, env: IncomeEnv, fundamental_result,
-                           auto: dict | None = None) -> WatchlistItem:
+                           auto: dict | None = None,
+                           policy_env: PolicyEnv | None = None) -> WatchlistItem:
     auto = auto or {}
     ticker = ticker.upper()
     item = WatchlistItem(
@@ -802,18 +896,36 @@ def compute_watchlist_item(ticker: str, explicit_class: str | None, meta: dict,
     item.fundamental_verdict = getattr(fundamental_result, "verdict", "") or ""
     item.risk_notes = _watchlist_risk_notes(item, fundamental_result)
     item.income_verdict = watchlist_verdict(item)
+
+    if policy_env is None:
+        policy_env = load_policy_env()
+    if policy_env.enabled:
+        res = classify_income_policy(
+            income_data_source=item.income_data_source,
+            source_type=item.source_type,
+            raw_annual_income_rub=Decimal("0"),     # watchlist без позиции
+            gross_yield_pct=item.gross_yield_pct,
+            has_future_date=(item.income_data_source == "api_known_future"),
+            env=policy_env,
+        )
+        item.policy_bucket = res.policy_bucket
+        item.policy_confidence = res.policy_confidence
+        item.policy_reasons = res.policy_reasons
+        item.conservative_yield_pct = res.conservative_yield_pct
     return item
 
 
 def build_watchlist(client, raw_items: list[str], config: dict, env: IncomeEnv,
                     fundamental_data: dict | None = None,
-                    priority: list[str] | None = None) -> list[WatchlistItem]:
+                    priority: list[str] | None = None,
+                    policy_env: PolicyEnv | None = None) -> list[WatchlistItem]:
     """Прогоняет watchlist через read-only резолв + текущую цену. Заявок нет."""
     from modules.fundamental_filter import evaluate_fundamental
     from strategies.trend_signal_v1 import parse_watchlist_item
 
     fundamental_data = fundamental_data or {}
     priority = priority or DEFAULT_CLASS_CODE_PRIORITY
+    policy_env = policy_env or load_policy_env()
     out: list[WatchlistItem] = []
     for raw in raw_items:
         ticker, explicit = parse_watchlist_item(raw)
@@ -824,7 +936,7 @@ def build_watchlist(client, raw_items: list[str], config: dict, env: IncomeEnv,
                                   fundamental_data)
         auto = _watchlist_auto_income(client, ticker, meta, config, env)
         out.append(compute_watchlist_item(ticker, explicit, meta, price, price_source,
-                                           config, env, fr, auto))
+                                           config, env, fr, auto, policy_env))
     return out
 
 
