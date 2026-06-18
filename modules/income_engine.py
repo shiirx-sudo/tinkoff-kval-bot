@@ -24,6 +24,10 @@ _FALLBACK_EXAMPLE = "config/income_engine.example.yaml"
 
 CONCENTRATION_LIMIT_PCT = Decimal("25")
 
+# Дисклеймеры (история/оценка ≠ гарантия будущего дохода)
+NOTE_TRAILING_DIV = "Историческая оценка, не гарантия будущих дивидендов."
+NOTE_TRAILING_MM = "Trailing yield фонда — оценка, доходность переменная."
+
 
 def _b(s: str) -> bool:
     return str(s).strip().lower() in ("1", "true", "yes", "y", "да")
@@ -45,6 +49,15 @@ class IncomeEnv:
     tax_rate_pct: Decimal = Decimal("13")
     money_market_yield_pct: Decimal = Decimal("0")
     include_unknown: bool = False
+    # Автоматические read-only источники (T-Invest API). manual YAML остаётся
+    # как override/fallback; основной источник — официальный API.
+    auto_fetch_enabled: bool = True
+    dividend_lookback_months: int = 24
+    dividend_trailing_months: int = 12
+    mm_trailing_days: int = 30
+    use_trailing_dividends: bool = True
+    use_known_future_dividends: bool = True
+    use_bond_coupons: bool = True
 
 
 @dataclass
@@ -61,11 +74,22 @@ class IncomeItem:
     expected_monthly_income_rub: Decimal = Decimal("0")
     gross_yield_pct: Decimal | None = None
     net_yield_pct: Decimal | None = None
-    confidence: str = "unknown"           # api|manual|assumed|unknown
+    confidence: str = "unknown"           # api_known|estimated|manual|assumed|unknown
     next_payment_date: str = ""           # ISO | "month_unknown" | ""
     fundamental_verdict: str = ""
     risk_notes: list[str] = field(default_factory=list)
     income_verdict: str = "income_unknown"
+    # источники дохода (manual_override|api_known_future|api_trailing_12m|trailing_30d|...)
+    income_data_source: str = "unknown"
+    dividend_source: str = ""
+    coupon_source: str = ""
+    yield_source: str = ""                # источник доходности фонда денежного рынка
+    known_future_income_rub: Decimal = Decimal("0")
+    trailing_income_rub: Decimal = Decimal("0")
+    manual_income_rub: Decimal = Decimal("0")
+    notes: str = ""
+    # внутреннее: датированные события выплат для календаря (не в схеме отчёта)
+    calendar_events: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -119,6 +143,13 @@ def load_income_env(config: dict | None = None) -> IncomeEnv:
                           or targets.get("tax_rate_pct") or 13) or Decimal("13"),
         money_market_yield_pct=_dec(os.getenv("INCOME_MONEY_MARKET_YIELD_PCT") or 0) or Decimal("0"),
         include_unknown=_b(os.getenv("INCOME_INCLUDE_UNKNOWN", "false")),
+        auto_fetch_enabled=_b(os.getenv("INCOME_AUTO_FETCH_ENABLED", "true")),
+        dividend_lookback_months=int(os.getenv("INCOME_DIVIDEND_LOOKBACK_MONTHS") or 24),
+        dividend_trailing_months=int(os.getenv("INCOME_DIVIDEND_TRAILING_MONTHS") or 12),
+        mm_trailing_days=int(os.getenv("INCOME_MM_TRAILING_DAYS") or 30),
+        use_trailing_dividends=_b(os.getenv("INCOME_USE_TRAILING_DIVIDENDS", "true")),
+        use_known_future_dividends=_b(os.getenv("INCOME_USE_KNOWN_FUTURE_DIVIDENDS", "true")),
+        use_bond_coupons=_b(os.getenv("INCOME_USE_BOND_COUPONS", "true")),
     )
 
 
@@ -143,7 +174,15 @@ def classify_source(pos: dict, config: dict) -> str:
     return "unknown"
 
 
-def income_for_item(pos: dict, config: dict, env: IncomeEnv) -> IncomeItem:
+def income_for_item(pos: dict, config: dict, env: IncomeEnv,
+                    auto: dict | None = None) -> IncomeItem:
+    """
+    Доход по одной позиции. Приоритет источников:
+        manual_override → api_known_future → api_trailing_12m →
+        trailing_price_estimate (money market) → unknown.
+    `auto` — авто-данные из read-only API (modules.income_sources.fetch_auto_income).
+    """
+    auto = auto or pos.get("auto_income") or {}
     ticker = str(pos.get("ticker", "")).upper()
     value = _dec(pos.get("position_value_rub")) or Decimal("0")
     qty = _dec(pos.get("position_quantity"))
@@ -155,52 +194,135 @@ def income_for_item(pos: dict, config: dict, env: IncomeEnv) -> IncomeItem:
     )
 
     if item.source_type == "money_market":
-        rec = (config.get("manual_yields") or {}).get(ticker) or {}
-        ypct = _dec(rec.get("expected_annual_yield_pct"))
-        if ypct is not None:
-            item.confidence = "manual"
-        elif env.money_market_yield_pct > 0:
-            ypct = env.money_market_yield_pct
-            item.confidence = "assumed"
-        if ypct is not None:
-            item.expected_annual_yield_pct = ypct
-            item.expected_annual_income_rub = value * ypct / Decimal("100")
-            item.gross_yield_pct = ypct
-
+        _income_money_market(item, config, env, auto.get("mm") or {}, value)
     elif item.source_type == "dividend":
-        rec = (config.get("manual_dividends") or {}).get(ticker) or {}
-        dps = _dec(rec.get("expected_annual_dividend_rub_per_share"))
-        if dps is not None and qty is not None:
-            item.confidence = str(rec.get("confidence") or "manual")
-            item.expected_annual_income_rub = dps * qty
-            if value > 0:
-                item.gross_yield_pct = item.expected_annual_income_rub / value * Decimal("100")
-        nxt = rec.get("next_dividend_date") or rec.get("next_known_dividend_date")
-        if nxt:
-            item.next_payment_date = str(nxt)
-
+        _income_dividend(item, config, env, auto.get("dividend") or {}, value, qty)
     elif item.source_type == "coupon":
-        rec = (config.get("manual_bonds") or {}).get(ticker) \
-            or (config.get("manual_bonds") or {}).get(item.figi) or {}
-        coupon = _dec(rec.get("expected_coupon_rub"))
-        freq = _dec(rec.get("coupon_frequency_per_year")) or Decimal("0")
-        if coupon is not None and freq > 0:
-            item.confidence = str(rec.get("confidence") or "manual")
-            per_unit = coupon * freq
-            item.expected_annual_income_rub = per_unit * (qty or Decimal("1"))
-            if value > 0:
-                item.gross_yield_pct = item.expected_annual_income_rub / value * Decimal("100")
-        if rec.get("maturity_date"):
-            item.next_payment_date = str(rec.get("maturity_date"))
+        _income_coupon(item, config, env, auto.get("coupon") or {}, value, qty)
 
     if item.expected_annual_income_rub > 0:
         item.expected_monthly_income_rub = item.expected_annual_income_rub / Decimal("12")
         if item.gross_yield_pct is not None:
             item.net_yield_pct = _net(item.gross_yield_pct, env.tax_rate_pct)
-    else:
-        item.confidence = item.confidence if item.confidence != "unknown" else "unknown"
-
     return item
+
+
+def _income_money_market(item, config, env, auto_mm, value) -> None:
+    rec = (config.get("manual_yields") or {}).get(item.ticker) or {}
+    ypct = _dec(rec.get("expected_annual_yield_pct"))
+    if ypct is not None:                       # manual override
+        item.confidence = "manual"
+        item.yield_source = "manual_override"
+        item.income_data_source = "manual_override"
+    elif auto_mm.get("expected_annual_yield_pct") is not None:   # trailing API
+        ypct = _dec(auto_mm.get("expected_annual_yield_pct"))
+        item.confidence = "estimated"
+        item.yield_source = auto_mm.get("yield_source") or "trailing_30d"
+        item.income_data_source = item.yield_source
+        item.notes = NOTE_TRAILING_MM
+        for note in auto_mm.get("risk_notes") or []:
+            if note not in item.risk_notes:
+                item.risk_notes.append(note)
+    elif env.money_market_yield_pct > 0:       # ассумпция из env
+        ypct = env.money_market_yield_pct
+        item.confidence = "assumed"
+        item.yield_source = "assumed"
+        item.income_data_source = "assumed"
+    if ypct is not None:
+        item.expected_annual_yield_pct = ypct
+        item.expected_annual_income_rub = value * ypct / Decimal("100")
+        item.gross_yield_pct = ypct
+        if item.income_data_source == "manual_override":
+            item.manual_income_rub = item.expected_annual_income_rub
+        elif item.yield_source == "trailing_30d":
+            item.trailing_income_rub = item.expected_annual_income_rub
+
+
+def _income_dividend(item, config, env, auto_div, value, qty) -> None:
+    rec = (config.get("manual_dividends") or {}).get(item.ticker) or {}
+    manual_dps = _dec(rec.get("expected_annual_dividend_rub_per_share"))
+    src = str(auto_div.get("dividend_source") or "unknown")
+    dps: Decimal | None = None
+
+    if manual_dps is not None:                 # manual override
+        dps = manual_dps
+        item.confidence = str(rec.get("confidence") or "manual")
+        item.dividend_source = "manual_override"
+        item.income_data_source = "manual_override"
+        nxt = rec.get("next_dividend_date") or rec.get("next_known_dividend_date")
+        if nxt:
+            item.next_payment_date = str(nxt)
+        if qty is not None:
+            item.manual_income_rub = manual_dps * qty
+    elif src == "api_known_future" and env.use_known_future_dividends:
+        dps = _dec(auto_div.get("expected_annual_dividend_rub_per_share"))
+        item.confidence = "api_known"
+        item.dividend_source = "api_known_future"
+        item.income_data_source = "api_known_future"
+        item.next_payment_date = auto_div.get("next_dividend_date") or item.next_payment_date
+        if dps is not None and qty is not None:
+            item.known_future_income_rub = dps * qty
+        # датированные будущие выплаты → календарь
+        for ev in auto_div.get("events") or []:
+            if qty is not None and _dec(ev.get("per_share")) is not None:
+                item.calendar_events.append({
+                    "date": ev.get("date"),
+                    "gross_amount": _dec(ev.get("per_share")) * qty})
+    elif src == "api_trailing_12m" and env.use_trailing_dividends:
+        dps = _dec(auto_div.get("trailing_12m_dividends_rub_per_share")) \
+            or _dec(auto_div.get("expected_annual_dividend_rub_per_share"))
+        item.confidence = "estimated"
+        item.dividend_source = "api_trailing_12m"
+        item.income_data_source = "api_trailing_12m"
+        item.notes = NOTE_TRAILING_DIV
+        if "trailing_not_guaranteed" not in item.risk_notes:
+            item.risk_notes.append("trailing_not_guaranteed")
+        if auto_div.get("last_dividend_date"):
+            item.next_payment_date = item.next_payment_date or ""
+        if dps is not None and qty is not None:
+            item.trailing_income_rub = dps * qty
+
+    if dps is not None and qty is not None:
+        item.expected_annual_income_rub = dps * qty
+        if value > 0:
+            item.gross_yield_pct = item.expected_annual_income_rub / value * Decimal("100")
+
+
+def _income_coupon(item, config, env, auto_coupon, value, qty) -> None:
+    rec = (config.get("manual_bonds") or {}).get(item.ticker) \
+        or (config.get("manual_bonds") or {}).get(item.figi) or {}
+    coupon = _dec(rec.get("expected_coupon_rub"))
+    freq = _dec(rec.get("coupon_frequency_per_year")) or Decimal("0")
+
+    if coupon is not None and freq > 0:        # manual override
+        item.confidence = str(rec.get("confidence") or "manual")
+        item.coupon_source = "manual_override"
+        item.income_data_source = "manual_override"
+        per_unit = coupon * freq
+        item.expected_annual_income_rub = per_unit * (qty or Decimal("1"))
+        item.manual_income_rub = item.expected_annual_income_rub
+        if rec.get("maturity_date"):
+            item.next_payment_date = str(rec.get("maturity_date"))
+    elif env.use_bond_coupons and auto_coupon.get("coupon_source") not in (None, "unknown"):
+        item.confidence = "api_known"
+        item.coupon_source = auto_coupon.get("coupon_source")
+        item.income_data_source = auto_coupon.get("coupon_source")
+        annual_per_unit = _dec(auto_coupon.get("known_coupon_income_annualized_rub")) \
+            or Decimal("0")
+        item.expected_annual_income_rub = annual_per_unit * (qty or Decimal("1"))
+        item.known_future_income_rub = item.expected_annual_income_rub
+        item.next_payment_date = auto_coupon.get("next_coupon_date") \
+            or auto_coupon.get("maturity_date") or ""
+        # купонные события в горизонте → календарь
+        for ev in auto_coupon.get("events") or []:
+            amt = _dec(ev.get("amount"))
+            if amt is not None:
+                item.calendar_events.append({
+                    "date": ev.get("date"),
+                    "gross_amount": amt * (qty or Decimal("1"))})
+
+    if item.expected_annual_income_rub > 0 and value > 0:
+        item.gross_yield_pct = item.expected_annual_income_rub / value * Decimal("100")
 
 
 def add_risk_notes(item: IncomeItem, fundamental_verdict: str,
@@ -227,7 +349,8 @@ def income_verdict(item: IncomeItem) -> str:
     if "state_control_risk" in item.risk_notes or item.fundamental_verdict == "quality_risk":
         return "income_risk"
     if item.fundamental_verdict in ("", "quality_unknown", "quality_watch") \
-            or item.confidence in ("assumed", "low"):
+            or item.confidence in ("assumed", "low", "estimated") \
+            or "trailing_not_guaranteed" in item.risk_notes:
         return "income_watch"
     return "income_candidate"
 
@@ -290,40 +413,61 @@ def compute_income(positions: list[dict], config: dict, env: IncomeEnv,
 
 def build_calendar(items: list[IncomeItem], horizon_months: int,
                    tax_pct: Decimal) -> list[dict]:
-    """Календарь ожидаемых выплат. Без точной даты — month_unknown."""
+    """
+    Календарь ожидаемых выплат. Будущие известные дивиденды и купоны строятся
+    автоматически из датированных событий (calendar_events); фонды денежного
+    рынка размазываются помесячно; manual без даты — month_unknown.
+    """
     rows: list[dict] = []
     for it in items:
         if it.expected_annual_income_rub <= 0:
             continue
         gross = it.expected_annual_income_rub
-        if it.source_type == "money_market":
-            # равномерно по месяцам горизонта
+        source = it.income_data_source or it.confidence
+
+        if it.calendar_events:                 # датированные будущие выплаты из API
+            for ev in it.calendar_events:
+                date = str(ev.get("date") or "")
+                amt = _dec(ev.get("gross_amount")) or Decimal("0")
+                rows.append({
+                    "month": date[:7] if date else "month_unknown",
+                    "ticker": it.ticker, "source_type": it.source_type,
+                    "source": source,
+                    "expected_payment_date": date or "month_unknown",
+                    "gross_amount": amt, "net_amount": _net(amt, tax_pct),
+                    "confidence": it.confidence, "notes": it.notes})
+        elif it.source_type == "money_market":
             per_month = gross / Decimal("12")
             for m in range(1, min(horizon_months, 12) + 1):
                 rows.append({
                     "month": f"M+{m}", "ticker": it.ticker,
-                    "source_type": "money_market",
+                    "source_type": "money_market", "source": source,
                     "expected_payment_date": "month_unknown",
                     "gross_amount": per_month, "net_amount": _net(per_month, tax_pct),
-                    "confidence": it.confidence})
+                    "confidence": it.confidence, "notes": it.notes})
         else:
             rows.append({
                 "month": (it.next_payment_date[:7] if it.next_payment_date
                           and it.next_payment_date != "month_unknown" else "month_unknown"),
-                "ticker": it.ticker, "source_type": it.source_type,
+                "ticker": it.ticker, "source_type": it.source_type, "source": source,
                 "expected_payment_date": it.next_payment_date or "month_unknown",
                 "gross_amount": gross, "net_amount": _net(gross, tax_pct),
-                "confidence": it.confidence})
+                "confidence": it.confidence, "notes": it.notes})
     return rows
 
 
 # ─── read-only сбор позиций со счёта ─────────────────────────────────────────
 
-def build_positions(client, account_id: str | None) -> list[dict]:
-    """Нормализует позиции портфеля (read-only), резолвит ticker/class по figi."""
+def build_positions(client, account_id: str | None, config: dict | None = None,
+                    env: IncomeEnv | None = None) -> list[dict]:
+    """
+    Нормализует позиции портфеля (read-only), резолвит ticker/class по figi и
+    подтягивает авто-данные дохода (дивиденды/купоны/trailing yield) из API.
+    """
     from modules.balance import _pos_value, _resolve_account_id
     from common.helpers import quotation_to_decimal
 
+    config = config or {}
     acc = _resolve_account_id(client, account_id)
     if not acc:
         return []
@@ -339,29 +483,65 @@ def build_positions(client, account_id: str | None) -> list[dict]:
         if itype == "currency":
             continue  # свободный кэш учитываем отдельно
         figi = str(pos.get("figi", ""))
+        uid = str(pos.get("instrumentUid") or pos.get("instrument_uid") or "")
         ticker = str(pos.get("ticker", "")).upper()
         class_code = str(pos.get("classCode") or pos.get("class_code") or "")
         name = ""
+        maturity = ""
         if (not ticker or not class_code) and figi:
             try:
                 meta = client.get_instrument_by_figi(figi) or {}
                 ticker = ticker or str(meta.get("ticker", "")).upper()
                 class_code = class_code or str(meta.get("classCode") or meta.get("class_code") or "")
                 name = str(meta.get("name", ""))
+                uid = uid or str(meta.get("uid") or meta.get("instrumentUid") or "")
+                maturity = str(meta.get("maturityDate") or "")
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"get_instrument_by_figi({figi}) недоступен: {exc}")
-        out.append({
+        record = {
             "ticker": ticker, "class_code": class_code, "figi": figi,
-            "instrument_name": name, "instrument_type": itype,
+            "instrument_uid": uid, "instrument_name": name, "instrument_type": itype,
             "position_quantity": quotation_to_decimal(pos.get("quantity")),
             "position_value_rub": _pos_value(pos),
-        })
+        }
+        record["auto_income"] = _auto_income_for_position(
+            client, record, config, env, maturity)
+        out.append(record)
     return out
+
+
+def _auto_income_for_position(client, record: dict, config: dict,
+                              env: IncomeEnv | None, maturity_date: str) -> dict:
+    """Авто-данные дохода по позиции (read-only). Пустой словарь, если выключено."""
+    if env is None or not env.auto_fetch_enabled:
+        return {}
+    source_type = classify_source(record, config)
+    # manual override полностью перекрывает API → авто-запрос не нужен
+    ticker = record["ticker"]
+    if source_type == "money_market" and ticker in (config.get("manual_yields") or {}):
+        return {}
+    if source_type == "dividend" and ticker in (config.get("manual_dividends") or {}):
+        return {}
+    if source_type == "coupon" and (
+            ticker in (config.get("manual_bonds") or {})
+            or record.get("figi") in (config.get("manual_bonds") or {})):
+        return {}
+    instrument_id = record.get("figi") or record.get("instrument_uid")
+    if not instrument_id:
+        return {}
+    from modules.income_sources import fetch_auto_income
+    try:
+        return fetch_auto_income(client, source_type=source_type,
+                                 instrument_id=instrument_id, env=env,
+                                 maturity_date=maturity_date)
+    except Exception as exc:  # noqa: BLE001 — авто-данные опциональны
+        logger.warning(f"income_sources недоступны для {ticker}: {exc}")
+        return {}
 
 
 def summarize_account(client, account_id: str | None, config: dict, env: IncomeEnv,
                       fundamental_data: dict | None = None) -> IncomeSummary:
-    positions = build_positions(client, account_id)
+    positions = build_positions(client, account_id, config, env)
     free_cash = available_cash_rub(client, account_id) or Decimal("0")
     return compute_income(positions, config, env, fundamental_data, free_cash)
 
@@ -392,10 +572,18 @@ class WatchlistItem:
     expected_annual_yield_pct: Decimal | None = None
     gross_yield_pct: Decimal | None = None
     net_yield_pct: Decimal | None = None
-    confidence: str = "unknown"           # api|manual|medium|low|assumed|unknown
+    confidence: str = "unknown"           # api_known|estimated|manual|medium|low|assumed|unknown
     fundamental_verdict: str = ""
     income_verdict: str = "income_unknown"
     risk_notes: list[str] = field(default_factory=list)
+    # источники дохода (автоматические read-only API + manual override)
+    income_data_source: str = "unknown"
+    dividend_source: str = ""
+    coupon_source: str = ""
+    yield_source: str = ""
+    trailing_12m_dividend: Decimal | None = None
+    known_future_dividend: Decimal | None = None
+    notes: str = ""
     # для CLI-вывода (не входит в фиксированную схему отчёта)
     expected_annual_dividend_rub_per_share: Decimal | None = None
 
@@ -462,7 +650,9 @@ def resolve_watchlist_meta(client, ticker: str, explicit_class: str | None,
 
 
 def _watchlist_risk_notes(item: WatchlistItem, fr) -> list[str]:
-    notes: list[str] = []
+    # сохраняем флаги, уже выставленные авто-источниками (trailing_not_guaranteed,
+    # variable_yield), и добавляем флаги по фундаменталу/цене/уверенности
+    notes: list[str] = list(item.risk_notes)
     if item.price_source == "price_unknown" and item.source_type in ("dividend", "coupon"):
         notes.append("price_unknown")
     if getattr(fr, "verdict", "") == "quality_risk" \
@@ -475,7 +665,93 @@ def _watchlist_risk_notes(item: WatchlistItem, fr) -> list[str]:
         notes.append("coupon_default_risk")
     if item.confidence in ("manual", "assumed"):
         notes.append("manual_estimate")
-    return notes
+    # доходность фонда денежного рынка переменная (manual или trailing)
+    if item.source_type == "money_market" and item.gross_yield_pct is not None:
+        notes.append("variable_yield")
+    # дедупликация с сохранением порядка
+    seen: set[str] = set()
+    return [n for n in notes if not (n in seen or seen.add(n))]
+
+
+def _wl_money_market(item: WatchlistItem, config: dict, env: IncomeEnv,
+                     auto_mm: dict) -> None:
+    rec = (config.get("manual_yields") or {}).get(item.ticker) or {}
+    ypct = _dec(rec.get("expected_annual_yield_pct"))
+    if ypct is not None:                       # manual override
+        item.confidence = "manual"
+        item.yield_source = "manual_override"
+        item.income_data_source = "manual_override"
+    elif auto_mm.get("expected_annual_yield_pct") is not None:   # trailing API
+        ypct = _dec(auto_mm.get("expected_annual_yield_pct"))
+        item.confidence = "estimated"
+        item.yield_source = auto_mm.get("yield_source") or "trailing_30d"
+        item.income_data_source = item.yield_source
+        item.notes = NOTE_TRAILING_MM
+        for note in auto_mm.get("risk_notes") or []:
+            if note not in item.risk_notes:
+                item.risk_notes.append(note)
+    elif env.money_market_yield_pct > 0:
+        ypct = env.money_market_yield_pct
+        item.confidence = "assumed"
+        item.yield_source = "assumed"
+        item.income_data_source = "assumed"
+    if ypct is not None:
+        item.expected_annual_yield_pct = ypct
+        item.gross_yield_pct = ypct
+
+
+def _wl_dividend(item: WatchlistItem, config: dict, env: IncomeEnv,
+                 auto_div: dict, price: Decimal | None) -> None:
+    rec = (config.get("manual_dividends") or {}).get(item.ticker) or {}
+    manual_dps = _dec(rec.get("expected_annual_dividend_rub_per_share"))
+    src = str(auto_div.get("dividend_source") or "unknown")
+    dps: Decimal | None = None
+    if manual_dps is not None:                 # manual override
+        dps = manual_dps
+        item.confidence = str(rec.get("confidence") or "manual")
+        item.dividend_source = "manual_override"
+        item.income_data_source = "manual_override"
+    elif src == "api_known_future" and env.use_known_future_dividends:
+        dps = _dec(auto_div.get("expected_annual_dividend_rub_per_share"))
+        item.known_future_dividend = dps
+        item.confidence = "api_known"
+        item.dividend_source = "api_known_future"
+        item.income_data_source = "api_known_future"
+    elif src == "api_trailing_12m" and env.use_trailing_dividends:
+        dps = _dec(auto_div.get("trailing_12m_dividends_rub_per_share")) \
+            or _dec(auto_div.get("expected_annual_dividend_rub_per_share"))
+        item.trailing_12m_dividend = dps
+        item.confidence = "estimated"
+        item.dividend_source = "api_trailing_12m"
+        item.income_data_source = "api_trailing_12m"
+        item.notes = NOTE_TRAILING_DIV
+        if "trailing_not_guaranteed" not in item.risk_notes:
+            item.risk_notes.append("trailing_not_guaranteed")
+    if dps is not None:
+        item.expected_annual_dividend_rub_per_share = dps
+        if price is not None and price > 0:
+            item.gross_yield_pct = dps / price * Decimal("100")
+
+
+def _wl_coupon(item: WatchlistItem, config: dict, env: IncomeEnv,
+               auto_coupon: dict, price: Decimal | None) -> None:
+    rec = (config.get("manual_bonds") or {}).get(item.ticker) \
+        or (config.get("manual_bonds") or {}).get(item.figi) or {}
+    coupon = _dec(rec.get("expected_coupon_rub"))
+    freq = _dec(rec.get("coupon_frequency_per_year")) or Decimal("0")
+    annual: Decimal | None = None
+    if coupon is not None and freq > 0:        # manual override
+        item.confidence = str(rec.get("confidence") or "manual")
+        item.coupon_source = "manual_override"
+        item.income_data_source = "manual_override"
+        annual = coupon * freq
+    elif env.use_bond_coupons and auto_coupon.get("coupon_source") not in (None, "unknown"):
+        item.confidence = "api_known"
+        item.coupon_source = auto_coupon.get("coupon_source")
+        item.income_data_source = auto_coupon.get("coupon_source")
+        annual = _dec(auto_coupon.get("known_coupon_income_annualized_rub"))
+    if annual is not None and price is not None and price > 0:
+        item.gross_yield_pct = annual / price * Decimal("100")
 
 
 def watchlist_verdict(item: WatchlistItem) -> str:
@@ -498,7 +774,9 @@ def watchlist_verdict(item: WatchlistItem) -> str:
 
 def compute_watchlist_item(ticker: str, explicit_class: str | None, meta: dict,
                            current_price: Decimal | None, price_source: str,
-                           config: dict, env: IncomeEnv, fundamental_result) -> WatchlistItem:
+                           config: dict, env: IncomeEnv, fundamental_result,
+                           auto: dict | None = None) -> WatchlistItem:
+    auto = auto or {}
     ticker = ticker.upper()
     item = WatchlistItem(
         ticker=ticker,
@@ -512,36 +790,11 @@ def compute_watchlist_item(ticker: str, explicit_class: str | None, meta: dict,
         {"ticker": ticker, "instrument_type": item.instrument_type}, config)
 
     if item.source_type == "money_market":
-        rec = (config.get("manual_yields") or {}).get(ticker) or {}
-        ypct = _dec(rec.get("expected_annual_yield_pct"))
-        if ypct is not None:
-            item.confidence = "manual"
-        elif env.money_market_yield_pct > 0:
-            ypct = env.money_market_yield_pct
-            item.confidence = "assumed"
-        if ypct is not None:
-            item.expected_annual_yield_pct = ypct
-            item.gross_yield_pct = ypct
-
+        _wl_money_market(item, config, env, auto.get("mm") or {})
     elif item.source_type == "dividend":
-        rec = (config.get("manual_dividends") or {}).get(ticker) or {}
-        dps = _dec(rec.get("expected_annual_dividend_rub_per_share"))
-        if dps is not None:
-            item.expected_annual_dividend_rub_per_share = dps
-            item.confidence = str(rec.get("confidence") or "manual")
-            if current_price is not None and current_price > 0:
-                item.gross_yield_pct = dps / current_price * Decimal("100")
-
+        _wl_dividend(item, config, env, auto.get("dividend") or {}, current_price)
     elif item.source_type == "coupon":
-        rec = (config.get("manual_bonds") or {}).get(ticker) \
-            or (config.get("manual_bonds") or {}).get(item.figi) or {}
-        coupon = _dec(rec.get("expected_coupon_rub"))
-        freq = _dec(rec.get("coupon_frequency_per_year")) or Decimal("0")
-        if coupon is not None and freq > 0:
-            item.confidence = str(rec.get("confidence") or "manual")
-            annual = coupon * freq
-            if current_price is not None and current_price > 0:
-                item.gross_yield_pct = annual / current_price * Decimal("100")
+        _wl_coupon(item, config, env, auto.get("coupon") or {}, current_price)
 
     if item.gross_yield_pct is not None:
         item.net_yield_pct = _net(item.gross_yield_pct, env.tax_rate_pct)
@@ -569,6 +822,37 @@ def build_watchlist(client, raw_items: list[str], config: dict, env: IncomeEnv,
         price, price_source = fetch_current_price(client, instrument_id)
         fr = evaluate_fundamental(ticker, meta.get("class_code") or explicit or "",
                                   fundamental_data)
+        auto = _watchlist_auto_income(client, ticker, meta, config, env)
         out.append(compute_watchlist_item(ticker, explicit, meta, price, price_source,
-                                           config, env, fr))
+                                           config, env, fr, auto))
     return out
+
+
+def _watchlist_auto_income(client, ticker: str, meta: dict, config: dict,
+                           env: IncomeEnv) -> dict:
+    """Авто-данные дохода для watchlist-инструмента (read-only). {} если выключено."""
+    if not getattr(env, "auto_fetch_enabled", True):
+        return {}
+    source_type = classify_source(
+        {"ticker": ticker.upper(), "instrument_type": meta.get("instrument_type", "")},
+        config)
+    tkr = ticker.upper()
+    figi = meta.get("figi", "")
+    if source_type == "money_market" and tkr in (config.get("manual_yields") or {}):
+        return {}
+    if source_type == "dividend" and tkr in (config.get("manual_dividends") or {}):
+        return {}
+    if source_type == "coupon" and (
+            tkr in (config.get("manual_bonds") or {})
+            or figi in (config.get("manual_bonds") or {})):
+        return {}
+    instrument_id = figi or meta.get("instrument_uid")
+    if not instrument_id:
+        return {}
+    from modules.income_sources import fetch_auto_income
+    try:
+        return fetch_auto_income(client, source_type=source_type,
+                                 instrument_id=instrument_id, env=env)
+    except Exception as exc:  # noqa: BLE001 — авто-данные опциональны
+        logger.warning(f"income_sources недоступны для {tkr}: {exc}")
+        return {}

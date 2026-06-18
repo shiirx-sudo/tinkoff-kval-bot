@@ -14,16 +14,21 @@ ITEM_COLUMNS = [
     "ticker", "class_code", "figi", "instrument_name", "source_type",
     "position_quantity", "position_value_rub", "expected_annual_yield_pct",
     "expected_annual_income_rub", "expected_monthly_income_rub", "gross_yield_pct",
-    "net_yield_pct", "confidence", "next_payment_date", "fundamental_verdict",
-    "risk_notes", "income_verdict",
+    "net_yield_pct", "confidence", "income_data_source", "dividend_source",
+    "coupon_source", "yield_source", "known_future_income_rub", "trailing_income_rub",
+    "manual_income_rub", "next_payment_date", "fundamental_verdict",
+    "risk_notes", "income_verdict", "notes",
 ]
-CALENDAR_COLUMNS = ["month", "ticker", "source_type", "expected_payment_date",
-                    "gross_amount", "net_amount", "confidence"]
+CALENDAR_COLUMNS = ["month", "ticker", "source_type", "source",
+                    "expected_payment_date", "gross_amount", "net_amount",
+                    "confidence", "notes"]
 WATCHLIST_COLUMNS = [
     "ticker", "class_code", "figi", "instrument_uid", "instrument_name",
     "instrument_type", "current_price", "price_source", "source_type",
     "expected_annual_yield_pct", "gross_yield_pct", "net_yield_pct", "confidence",
-    "fundamental_verdict", "income_verdict", "risk_notes",
+    "income_data_source", "dividend_source", "coupon_source", "yield_source",
+    "trailing_12m_dividend", "known_future_dividend",
+    "fundamental_verdict", "income_verdict", "risk_notes", "notes",
 ]
 
 
@@ -144,6 +149,7 @@ def render_watchlist_line(it: WatchlistItem) -> str:
     yld_s = "n/a" if yld is None else f"{Decimal(str(yld)):.2f}%"
     return (f"{it.ticker:8} {it.class_code or '—':6} price={_price(it.current_price)} "
             f"{div}yield={yld_s} net={_pct(it.net_yield_pct)} conf={it.confidence} "
+            f"src={it.income_data_source} "
             f"fund={it.fundamental_verdict or 'quality_unknown'} -> {it.income_verdict}")
 
 
@@ -190,6 +196,21 @@ def write_watchlist(items: list[WatchlistItem],
             "income_watchlist.md": md_path}
 
 
+def _telegram_item_line(it: IncomeItem) -> str:
+    """Строка по инструменту: доход/доходность + источник и confidence."""
+    src = it.income_data_source or "unknown"
+    parts = [it.ticker or it.figi]
+    if it.source_type == "dividend" and it.position_quantity:
+        dps = (it.expected_annual_income_rub / it.position_quantity
+               if it.position_quantity else None)
+        if dps is not None:
+            parts.append(f"{Decimal(str(dps)):.2f} ₽/акц")
+    if it.gross_yield_pct is not None:
+        parts.append(f"yield {Decimal(str(it.gross_yield_pct)):.1f}%")
+    head = parts[0] + ": " + ", ".join(parts[1:]) if len(parts) > 1 else parts[0] + ":"
+    return f"{head} source={src}, confidence={it.confidence}"
+
+
 def build_summary_telegram(s: IncomeSummary, calendar: list[dict] | None = None) -> str:
     lines = [
         "💰 Income summary — READ ONLY", "",
@@ -204,6 +225,12 @@ def build_summary_telegram(s: IncomeSummary, calendar: list[dict] | None = None)
             f"Сейчас: {_money(s.current_monthly_net_rub)}/мес",
             f"Gap: {_money(s.gap_monthly_rub)}/мес",
         ]
+    earning = [it for it in s.items if it.expected_annual_income_rub > 0][:8]
+    if earning:
+        lines.append("")
+        lines.append("Источники дохода:")
+        for it in earning:
+            lines.append(f"- {_telegram_item_line(it)}")
     near = [r for r in (calendar or []) if r.get("expected_payment_date") not in
             ("", "month_unknown")][:5]
     if near:
@@ -212,5 +239,9 @@ def build_summary_telegram(s: IncomeSummary, calendar: list[dict] | None = None)
         for r in near:
             lines.append(f"- {r['ticker']}: {r['expected_payment_date']} / "
                          f"{_money(r['net_amount'])} / {r['confidence']}")
-    lines += ["", "Статус: аналитика, не рекомендация. Заявки не отправляются."]
+    lines += [
+        "",
+        "Исторические выплаты и trailing yield не гарантируют будущий доход.",
+        "Статус: аналитика, не рекомендация. Заявки не отправляются.",
+    ]
     return "\n".join(lines)
