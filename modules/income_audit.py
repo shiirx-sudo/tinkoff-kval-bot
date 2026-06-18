@@ -24,6 +24,7 @@ from common.helpers import quotation_to_decimal
 from modules.income_engine import (
     DEFAULT_CLASS_CODE_PRIORITY,
     IncomeEnv,
+    _dec,
     classify_source,
     fetch_current_price,
     resolve_watchlist_meta,
@@ -331,13 +332,21 @@ def _audit_money_market(client, item: AuditItem, config: dict, env: IncomeEnv,
     item.income_data_source = item.yield_source
     item.expected_annual_yield_pct = mm.get("expected_annual_yield_pct")
     item.risk_notes = list(mm.get("risk_notes") or [])
+    # trailing-базис свечей всегда собираем как raw/audit basis — даже если
+    # активен manual override (candle_basis.annualized_yield_pct ≠ ручной yield).
     item.candle_basis = audit_candle_basis(
         client, instrument_id, now, env.mm_trailing_days)
     rec = (config.get("manual_yields") or {}).get(item.ticker)
     if rec is not None:
+        # manual override приоритетен: основной yield в сводке — ручной, а
+        # trailing остаётся виден в candle_basis (не подменяет override).
         item.manual_override_active = True
         item.income_data_source = SRC_MANUAL_OVERRIDE
+        item.yield_source = SRC_MANUAL_OVERRIDE
         item.confidence = CONF_MANUAL
+        manual_yield = _dec(rec.get("expected_annual_yield_pct"))
+        if manual_yield is not None:
+            item.expected_annual_yield_pct = manual_yield
 
 
 # ─── оркестрация: watchlist и/или портфель ───────────────────────────────────

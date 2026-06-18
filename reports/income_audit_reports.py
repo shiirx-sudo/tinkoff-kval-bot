@@ -246,7 +246,12 @@ def render_audit_console(items: list[AuditItem]) -> str:
         if it.manual_override_active:
             head += " [manual_override]"
         lines.append(head)
-        if it.risk_notes:
+        # trailing-базис свечей показываем отдельно, чтобы не путать с manual yield
+        if it.source_type == "money_market" and it.candle_basis is not None:
+            cb = it.candle_basis
+            risk = (" " + ", ".join(it.risk_notes)) if it.risk_notes else ""
+            lines.append(f"         trailing_30d={_pct(cb.annualized_yield_pct)}{risk}")
+        elif it.risk_notes:
             lines.append(f"         risk: {', '.join(it.risk_notes)}")
     lines += ["", *DISCLAIMER_LINES]
     return "\n".join(lines)
