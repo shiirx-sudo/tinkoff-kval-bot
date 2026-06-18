@@ -36,6 +36,41 @@ CONF_API_KNOWN = "api_known"
 CONF_ESTIMATED = "estimated"
 CONF_UNKNOWN = "unknown"
 
+# Бакеты классификации сырых событий (для income-source-audit)
+DIV_BUCKET_FUTURE = "future_known"        # объявленная будущая выплата → используется
+DIV_BUCKET_TRAILING = "trailing_12m"      # за последние trailing_months → оценка
+DIV_BUCKET_OLDER = "older_lookback"       # внутри lookback, но старше trailing → НЕ в оценке
+DIV_BUCKET_IGNORED = "ignored"            # без даты/суммы → пропущено
+
+COUPON_BUCKET_HORIZON = "within_horizon"  # в горизонте → known_coupon_income_horizon
+COUPON_BUCKET_ANNUAL = "annualized"       # в пределах 12м, но вне горизонта
+COUPON_BUCKET_OUTSIDE = "outside_horizon" # прошлое/за пределами → не учитывается
+
+
+def classify_dividend_event(pay_dt: datetime | None, per_share: Decimal | None,
+                            now: datetime, trailing_cut: datetime) -> str:
+    """Бакет дивидендного события (единый источник истины для движка и аудита)."""
+    if pay_dt is None or per_share is None or per_share <= 0:
+        return DIV_BUCKET_IGNORED
+    if pay_dt > now:
+        return DIV_BUCKET_FUTURE
+    if pay_dt >= trailing_cut:
+        return DIV_BUCKET_TRAILING
+    return DIV_BUCKET_OLDER
+
+
+def classify_coupon_event(pay_dt: datetime | None, amount: Decimal | None,
+                          now: datetime, horizon_end: datetime,
+                          annual_end: datetime) -> str:
+    """Бакет купонного события (горизонт/год/вне) для аудита."""
+    if pay_dt is None or amount is None or amount <= 0 or pay_dt < now:
+        return COUPON_BUCKET_OUTSIDE
+    if pay_dt <= horizon_end:
+        return COUPON_BUCKET_HORIZON
+    if pay_dt <= annual_end:
+        return COUPON_BUCKET_ANNUAL
+    return COUPON_BUCKET_OUTSIDE
+
 
 def _now(now: datetime | None) -> datetime:
     return now or datetime.now(timezone.utc)
@@ -109,19 +144,19 @@ def fetch_dividend_data(
     for row in rows or []:
         pay_dt = _parse_dt(row.get("paymentDate") or row.get("recordDate"))
         per_share = quotation_to_decimal(row.get("dividendNet"))
-        if per_share <= 0:
-            continue
-        if pay_dt and pay_dt > n:
+        bucket = classify_dividend_event(pay_dt, per_share, n, trailing_cut)
+        if bucket == DIV_BUCKET_FUTURE:
             known_future += per_share
             future_events.append({"date": pay_dt, "per_share": per_share})
             if next_dt is None or pay_dt < next_dt:
                 next_dt = pay_dt
-        elif pay_dt and pay_dt >= trailing_cut:
+        elif bucket == DIV_BUCKET_TRAILING:
             trailing += per_share
             if last_dt is None or pay_dt > last_dt:
                 last_dt = pay_dt
-        elif pay_dt and (last_dt is None or pay_dt > last_dt):
-            last_dt = pay_dt
+        elif bucket == DIV_BUCKET_OLDER:
+            if last_dt is None or pay_dt > last_dt:
+                last_dt = pay_dt
 
     out["known_future_dividends_rub_per_share"] = known_future or None
     out["trailing_12m_dividends_rub_per_share"] = trailing or None
