@@ -127,3 +127,139 @@ All monetary math uses `decimal.Decimal`. `common/helpers.quotation_to_decimal` 
 - Code comments and all user-facing text (Telegram, console, commit messages) are written in **Russian**.
 - CSV output is `utf-8-sig` with `;` as the delimiter (see `reports/output_contract.py`); reports also emit json and md.
 - **Never push directly to `main`.** Work on a branch and open a PR so the diff is reviewable.
+
+## Claude Code workflow protocol
+
+This is the operating protocol for Claude Code in this repo. It exists so the
+user does not have to re-decide every time whether to `/clear`, what to do next,
+PR vs direct, whether to commit, which checks to run, or what to put in the
+report. Follow it by default.
+
+### 1. Session hygiene
+
+- Start every new independent task with `/clear` unless the user explicitly says
+  this is a continuation.
+- After `/clear`, restate the task, branch/main policy, allowed files, forbidden
+  files, validation commands, and expected report format.
+- Do not rely on hidden chat history after `/clear`; use repository files and the
+  latest user task.
+
+### 2. Default task framing
+
+For every task, Claude must identify:
+
+- task type:
+  - docs-only
+  - local config/generated data
+  - code change
+  - report/smoke/validation
+  - PR review/fixup
+- allowed files
+- forbidden files
+- branch policy
+- commit policy
+- validation commands
+- stop conditions
+
+### 3. Branch / PR / direct-to-main rules
+
+- Default: work on a branch and open a PR.
+- Never push directly to `main` unless the user explicitly says direct-to-main is
+  allowed for this exact task.
+- New modules, API client changes, income engine/policy changes, report
+  semantics, calculations, or anything near execution/trading/orders/tokens/live
+  require branch + PR.
+- Docs-only changes may still use branch + PR if `CLAUDE.md` is being changed or
+  if the workflow rules are being changed.
+- Local generated/user config under `data/config` and reports under
+  `data/reports` are not committed.
+
+### 4. Local config / generated files
+
+- `data/config/*.yaml` are user/local files unless explicitly stated otherwise.
+- Generated files like `data/config/income_universe.yaml` and
+  `data/config/income_universe.generated.yaml` must not be committed.
+- If updating a local config file, create a timestamped backup before overwrite.
+- After local config generation, run smoke commands and report exact
+  enabled/disabled profiles.
+- If `git status` shows `data/config` or `data/reports` as tracked changes, stop
+  and ask/report.
+
+### 5. Reporting requirement
+
+Every Claude response after doing work must include:
+
+- HEAD / branch
+- files changed
+- whether anything was committed/pushed
+- whether PR was opened or not
+- validation results:
+  - pytest
+  - ruff
+  - safety scan
+  - smoke commands
+- `git status -sb`
+- exact next action for the user
+- explicit "do not merge yet" or "ready to merge" if a PR exists
+
+Claude must not leave the user asking "what now?".
+
+### 6. PR workflow
+
+When work is PR-based:
+
+- Push branch.
+- If `gh` is available and authenticated, open PR.
+- If `gh` is not available, do not install it unless the user explicitly asks.
+- Instead provide the GitHub PR creation URL and exact title/body.
+- After PR is opened, report:
+  - PR URL
+  - base branch
+  - head branch
+  - commits
+  - files changed
+  - checks status if available
+  - whether merge is allowed or must wait for CI
+
+### 7. Stop conditions
+
+Claude must stop and report, not guess, if:
+
+- a command would require full-access token;
+- any order/execution/live API appears;
+- `.env`/secrets would be changed;
+- a generated/user config appears tracked unexpectedly;
+- exact account-id is unclear and the command requires one;
+- a task requires new API endpoints not already confirmed read-only;
+- tests fail;
+- safety scan shows new violations;
+- branch is not clean before a merge-sensitive action.
+
+### 8. User-facing style
+
+- Give concrete next command/task, not vague options.
+- Do not ask the user what to do next if the next safe step is obvious.
+- If user action is required, state exactly what to click or paste.
+- If there are multiple safe options, recommend one default.
+
+### 9. Required final report template
+
+```
+Done / Blocked:
+
+Branch:
+HEAD:
+Files changed:
+Committed:
+Pushed:
+PR:
+Validation:
+- pytest:
+- ruff:
+- safety scan:
+- smoke:
+Git status:
+Important findings:
+Next action:
+Merge status:
+```
