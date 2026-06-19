@@ -354,6 +354,21 @@ Use this section to append new ideas before implementing them.
 - Add dashboard/report pack for human review.
 - Add data-quality warnings for suspicious dividends, one-off payments, and missing API data.
 
+### Research-backed backlog ideas
+
+Sourced from research notes in `docs/research/income_universe_research.md`. These are
+research ideas / candidates for audit / future backlog — not investment
+recommendations, and no concrete instruments enter the production universe from here.
+
+- Bond universe filter policy: rating, coupon type, maturity, offer/amortization flags, liquidity, NKD.
+- Bond risk policy: downgrade, losses, negative equity, reporting quality, refinancing dependence, legal/tax/default signals.
+- Bond cashflow ledger: separate transaction register and cashflow register.
+- Deposit / money-market benchmark scenarios for required capital.
+- OFZ-PK / floater monthly cashflow scenario.
+- Currency / quasi-currency bond profile.
+- Dividend reliability / shareholder-return score.
+- Claude Code workflow docs and minimal-context discipline.
+
 ## Decision log
 
 - Main goal is income-oriented investing, not turnover inflation.
