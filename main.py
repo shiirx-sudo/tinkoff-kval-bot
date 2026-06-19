@@ -605,10 +605,18 @@ def cmd_income_watchlist(args: argparse.Namespace) -> int:
     )
     from reports import income_reports
 
+    from modules.income_universe import resolve_watchlist
+
     config = load_income_config(getattr(args, "config_path", None))
     env: IncomeEnv = load_income_env(config)
     fdata = load_fundamental_filter()
-    raw_items = [t.strip() for t in (args.watchlist or "").split(",") if t.strip()]
+    try:
+        raw_items, _umeta = resolve_watchlist(
+            args.watchlist, getattr(args, "universe_profile", None),
+            getattr(args, "universe_path", None))
+    except ValueError as exc:
+        logger.error(str(exc))
+        return 1
     priority = [c.strip().upper() for c in
                 os.getenv("SIGNALS_CLASS_CODE_PRIORITY",
                           ",".join(DEFAULT_CLASS_CODE_PRIORITY)).split(",") if c.strip()]
@@ -720,9 +728,16 @@ def cmd_target_portfolio(args: argparse.Namespace) -> int:
     if args.months is not None:
         target_env.months = args.months
 
-    raw_items = [t.strip() for t in (args.watchlist or "").split(",") if t.strip()]
+    from modules.income_universe import resolve_watchlist
+    try:
+        raw_items, umeta = resolve_watchlist(
+            args.watchlist, getattr(args, "universe_profile", None),
+            getattr(args, "universe_path", None))
+    except ValueError as exc:
+        logger.error(str(exc))
+        return 1
     if not raw_items:
-        logger.error("Укажите --watchlist (вселенную инструментов) для target-portfolio.")
+        logger.error("Укажите --watchlist или --universe-profile для target-portfolio.")
         return 1
     priority = [c.strip().upper() for c in
                 os.getenv("SIGNALS_CLASS_CODE_PRIORITY",
@@ -737,6 +752,10 @@ def cmd_target_portfolio(args: argparse.Namespace) -> int:
     except Exception as exc:  # noqa: BLE001
         logger.error(f"Ошибка target-portfolio (read-only): {exc}")
         return 1
+
+    tp.universe_profile = umeta["universe_profile"]
+    tp.universe_path = umeta["universe_path"]
+    tp.universe_watchlist_count = umeta["universe_watchlist_count"]
 
     written = rep.write_target_portfolio(tp, "data/reports")
     print(rep.render_console(tp))
@@ -929,6 +948,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p_iw = sub.add_parser("income-watchlist",
                           help="READ-ONLY доходный обзор watchlist (аналитика, не рекомендация)")
     p_iw.add_argument("--watchlist", default="")
+    p_iw.add_argument("--universe-profile", default=None,
+                      help="Профиль вселенной из income_universe.yaml (если --watchlist пуст)")
+    p_iw.add_argument("--universe-path", default=None,
+                      help="Путь к income_universe.yaml (иначе data/config → example)")
     p_iw.add_argument("--account-id", default=None)
     p_iw.add_argument("--config-path", default=None)
 
@@ -948,6 +971,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "target-portfolio",
         help="READ-ONLY план целевого доходного портфеля и докупки (заявок нет)")
     p_tp.add_argument("--watchlist", default="", help="Вселенная инструментов через запятую")
+    p_tp.add_argument("--universe-profile", default=None,
+                      help="Профиль вселенной из income_universe.yaml (если --watchlist пуст)")
+    p_tp.add_argument("--universe-path", default=None,
+                      help="Путь к income_universe.yaml (иначе data/config → example)")
     p_tp.add_argument("--account-id", default=None,
                       help="Текущий портфель (read-only; иначе только universe)")
     p_tp.add_argument("--target-monthly-rub", type=float, default=None)

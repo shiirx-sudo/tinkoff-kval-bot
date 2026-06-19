@@ -1,0 +1,59 @@
+# Пример вселенной доходных инструментов (read-only income_universe_v1).
+#
+# Скопируйте в data/config/income_universe.yaml и отредактируйте под себя.
+# Это ТЕХНИЧЕСКИЙ список инструментов для анализа target-portfolio /
+# income-watchlist, а НЕ инвестиционная рекомендация и не гарантия выплат.
+# Заявки никогда не отправляются; только read-only аналитика.
+#
+# Профиль → список инструментов. В расчёт берутся только enabled: true.
+# Элемент watchlist формируется как CLASS:TICKER (например TQBR:SBER).
+
+profiles:
+  base_income:
+    description: "Основная вселенная для conservative/base доходного портфеля"
+    instruments:
+      - ticker: LQDT
+        class_code: TQTF
+        role: money_market
+        enabled: true
+        notes: "Фонд денежного рынка"
+      - ticker: SBER
+        class_code: TQBR
+        role: dividend_candidate
+        enabled: true
+      - ticker: VTBR
+        class_code: TQBR
+        role: dividend_candidate
+        enabled: true
+      - ticker: T
+        class_code: TQBR
+        role: dividend_candidate
+        enabled: true
+
+  extended_income:
+    description: "Расширенная вселенная для анализа"
+    instruments:
+      - ticker: LQDT
+        class_code: TQTF
+        role: money_market
+        enabled: true
+      - ticker: SBER
+        class_code: TQBR
+        role: dividend_candidate
+        enabled: true
+      - ticker: GAZP
+        class_code: TQBR
+        role: dividend_candidate
+        enabled: true
+      - ticker: LKOH
+        class_code: TQBR
+        role: dividend_candidate
+        enabled: true
+      - ticker: NVTK
+        class_code: TQBR
+        role: dividend_candidate
+        enabled: true
+      - ticker: GMKN
+        class_code: TQBR
+        role: dividend_candidate
+        enabled: true

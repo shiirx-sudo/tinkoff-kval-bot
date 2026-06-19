@@ -151,6 +151,10 @@ class TargetPortfolio:
     target_annual_net_rub: Decimal = Decimal("0")
     target_status: str = "ok"          # ok | insufficient_universe
     required_capital_rub: Decimal | None = None
+    # источник вселенной (income_universe_v1)
+    universe_profile: str = ""
+    universe_path: str = ""
+    universe_watchlist_count: int = 0
     current_total_value_rub: Decimal = Decimal("0")
     current_base_month_net_rub: Decimal = Decimal("0")
     current_estimate_month_net_rub: Decimal = Decimal("0")

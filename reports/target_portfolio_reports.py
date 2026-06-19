@@ -63,6 +63,11 @@ def _payload(tp: TargetPortfolio) -> dict:
             "status": tp.target_status,
             "required_capital_rub": tp.required_capital_rub,
         },
+        "universe": {
+            "universe_profile": tp.universe_profile,
+            "universe_path": tp.universe_path,
+            "universe_watchlist_count": tp.universe_watchlist_count,
+        },
         "current_summary": {
             "total_value_rub": tp.current_total_value_rub,
             "base_month_net_rub": tp.current_base_month_net_rub,
@@ -124,9 +129,18 @@ def write_target_portfolio(tp: TargetPortfolio,
 
 # ─── Markdown ─────────────────────────────────────────────────────────────────
 
+def _universe_line(tp: TargetPortfolio) -> str:
+    if tp.universe_profile:
+        return (f"Universe: {tp.universe_profile} "
+                f"({tp.universe_watchlist_count} instruments)"
+                + (f" [{tp.universe_path}]" if tp.universe_path else ""))
+    return f"Universe: watchlist ({tp.universe_watchlist_count} instruments)"
+
+
 def render_md(tp: TargetPortfolio) -> str:
     lines = [
         "# Target portfolio — READ ONLY", "",
+        _universe_line(tp), "",
         "Цель:",
         f"- {_money(tp.target_monthly_net_rub)}/мес net",
         f"- {_money(tp.target_annual_net_rub)}/год net",
@@ -190,6 +204,7 @@ def render_md(tp: TargetPortfolio) -> str:
 
 def render_console(tp: TargetPortfolio) -> str:
     lines = ["Target portfolio — READ ONLY", ""]
+    lines.append(_universe_line(tp))
     lines.append(f"Цель: {_money(tp.target_monthly_net_rub)}/мес net "
                  f"({_money(tp.target_annual_net_rub)}/год) | status={tp.target_status}")
     lines.append(f"Требуемый капитал (консервативно): {_money(tp.required_capital_rub)}")
