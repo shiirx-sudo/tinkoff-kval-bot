@@ -115,6 +115,27 @@ def test_max_position_cap_respected():
     assert req is not None and req > 0
 
 
+# ─── 6b. max issuer pct cap ───────────────────────────────────────────────────
+
+def test_max_issuer_cap_respected():
+    env = TargetEnv(target_monthly_rub=Decimal("100000"),
+                    max_position_pct=Decimal("60"), max_issuer_pct=Decimal("30"))
+    # два инструмента одного эмитента (одинаковый issuer)
+    elig = [
+        Candidate(ticker="SBER", issuer="SBERBANK", source_type="dividend",
+                  policy_bucket="income_reliable", fundamental_verdict="quality_pass",
+                  conservative_net_yield_pct=Decimal("10"), eligible=True, target_layer="base"),
+        Candidate(ticker="SBERP", issuer="SBERBANK", source_type="dividend",
+                  policy_bucket="income_reliable", fundamental_verdict="quality_pass",
+                  conservative_net_yield_pct=Decimal("10"), eligible=True, target_layer="base"),
+    ]
+    allocs, _, status, _ = allocate_target(elig, env)
+    assert status == "ok"
+    issuer_total = sum((a.target_weight_pct for a in allocs), Decimal("0"))
+    assert issuer_total <= env.max_issuer_pct + Decimal("0.01")
+    assert any("max_issuer_capped" in a.reason for a in allocs)
+
+
 # ─── 7. max money market pct cap ──────────────────────────────────────────────
 
 def test_max_money_market_cap_respected():
@@ -156,15 +177,29 @@ def test_current_vs_target_overweight_and_hold():
 # ─── 9. new capital plan только в eligible underweight ───────────────────────
 
 def test_new_capital_plan_distributes_to_underweight():
+    env = TargetEnv(target_monthly_rub=Decimal("100000"), cash_reserve_rub=Decimal("0"))
     allocs = [Allocation("T", target_capital_rub=Decimal("100000"),
                          net_yield_pct=Decimal("8")),
               Allocation("LQDT", target_capital_rub=Decimal("100000"),
                          net_yield_pct=Decimal("10"))]
     holdings = {"T": Decimal("100000")}   # T уже добит → только LQDT underweight
-    plan = build_new_capital_plan(allocs, holdings, Decimal("50000"), ENV)
+    plan = build_new_capital_plan(allocs, holdings, Decimal("50000"), env)
     assert plan and all(r.ticker == "LQDT" for r in plan)
     assert plan[0].planned_add_rub == Decimal("50000")
     assert plan[0].expected_extra_base_income_month_rub > 0
+
+
+def test_new_capital_plan_respects_cash_reserve():
+    env = TargetEnv(target_monthly_rub=Decimal("100000"), cash_reserve_rub=Decimal("5000"))
+    allocs = [Allocation("T", target_capital_rub=Decimal("100000"),
+                         net_yield_pct=Decimal("8")),
+              Allocation("LQDT", target_capital_rub=Decimal("100000"),
+                         net_yield_pct=Decimal("10"))]
+    holdings: dict = {}
+    plan = build_new_capital_plan(allocs, holdings, Decimal("100000"), env)
+    total = sum((r.planned_add_rub for r in plan), Decimal("0"))
+    assert total <= Decimal("95000")          # 100000 - 5000 резерва
+    assert total > 0
 
 
 # ─── 10. monthly contribution plan ───────────────────────────────────────────

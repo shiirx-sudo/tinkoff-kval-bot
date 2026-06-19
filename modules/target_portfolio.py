@@ -248,8 +248,25 @@ def allocate_target(eligible: list[Candidate], env: TargetEnv
             "target universe пуст: нет base-eligible инструментов"]
 
     cap = env.max_position_pct
+    issuer_cap = env.max_issuer_pct
     equal = Decimal("100") / Decimal(len(base))
     weights: dict[str, Decimal] = {c.ticker: min(equal, cap) for c in base}
+
+    def _issuer(c: Candidate) -> str:
+        return c.issuer or c.ticker
+
+    # cap по эмитенту: суммарный вес одного issuer не выше max_issuer_pct
+    issuer_capped: set[str] = set()
+    by_issuer: dict[str, list[Candidate]] = {}
+    for c in base:
+        by_issuer.setdefault(_issuer(c), []).append(c)
+    for grp in by_issuer.values():
+        grp_total = sum((weights[c.ticker] for c in grp), Decimal("0"))
+        if grp_total > issuer_cap and grp_total > 0:
+            scale = issuer_cap / grp_total
+            for c in grp:
+                weights[c.ticker] *= scale
+                issuer_capped.add(c.ticker)
 
     # cap на денежный рынок
     mm = [c for c in base if c.source_type == "money_market"]
@@ -260,22 +277,28 @@ def allocate_target(eligible: list[Candidate], env: TargetEnv
         for c in mm:
             weights[c.ticker] *= scale
 
-    # перераспределить освободившийся вес на не-MM ниже cap (один проход)
-    total = sum(weights.values(), Decimal("0"))
-    leftover = Decimal("100") - total
+    # перераспределить освободившийся вес на не-MM, соблюдая position- и issuer-cap
+    leftover = Decimal("100") - sum(weights.values(), Decimal("0"))
     if leftover > 0:
-        room = [(c, cap - weights[c.ticker]) for c in base
-                if c.source_type != "money_market" and cap - weights[c.ticker] > 0]
-        room_total = sum((r for _, r in room), Decimal("0"))
-        if room_total > 0:
-            add = min(leftover, room_total)
-            for c, r in room:
-                weights[c.ticker] += add * (r / room_total)
-            total = sum(weights.values(), Decimal("0"))
-            leftover = Decimal("100") - total
+        issuer_sum: dict[str, Decimal] = {}
+        for c in base:
+            issuer_sum[_issuer(c)] = issuer_sum.get(_issuer(c), Decimal("0")) + weights[c.ticker]
+        for c in base:
+            if leftover <= 0:
+                break
+            if c.source_type == "money_market":
+                continue
+            room = min(cap - weights[c.ticker], issuer_cap - issuer_sum[_issuer(c)])
+            if room <= 0:
+                continue
+            add = min(room, leftover)
+            weights[c.ticker] += add
+            issuer_sum[_issuer(c)] += add
+            leftover -= add
     if leftover > Decimal("0.01"):
         warnings.append(
-            f"диверсификация: {leftover:.1f}% не распределено (мало инструментов под лимиты)")
+            f"диверсификация: {leftover:.1f}% не распределено "
+            f"(лимиты позиции/эмитента/денежного рынка)")
 
     blended = sum(
         ((weights[c.ticker] / Decimal("100")) * ((c.conservative_net_yield_pct or Decimal("0"))
@@ -297,6 +320,8 @@ def allocate_target(eligible: list[Candidate], env: TargetEnv
         reasons = [c.policy_bucket]
         if mm_capped and c.source_type == "money_market":
             reasons.append("money_market_capped")
+        if c.ticker in issuer_capped:
+            reasons.append("max_issuer_capped")
         if w >= cap:
             reasons.append("max_position_capped")
         allocations.append(Allocation(
@@ -335,7 +360,10 @@ def build_current_vs_target(allocations: list[Allocation], holdings: dict[str, D
 
 def build_new_capital_plan(allocations: list[Allocation], holdings: dict[str, Decimal],
                            new_capital: Decimal, env: TargetEnv) -> list[PlanRow]:
-    if new_capital <= 0 or not allocations:
+    # cash_reserve_rub оставляем нераспределённым: --new-capital-rub — это общий
+    # новый капитал ДО резерва, planned_add суммарно не превышает (capital - reserve).
+    available = max(Decimal("0"), new_capital - max(Decimal("0"), env.cash_reserve_rub))
+    if available <= 0 or not allocations:
         return []
     underweights = [(a, max(Decimal("0"), a.target_capital_rub - holdings.get(a.ticker, Decimal("0"))))
                     for a in allocations]
@@ -344,11 +372,11 @@ def build_new_capital_plan(allocations: list[Allocation], holdings: dict[str, De
     if total_u <= 0:
         return []
     rows: list[PlanRow] = []
-    remaining = new_capital
+    remaining = available
     for a, u in sorted(underweights, key=lambda x: -x[1]):
         if remaining <= 0:
             break
-        share = new_capital * (u / total_u)
+        share = available * (u / total_u)
         add = min(share, u, remaining)
         if add < env.min_order_plan_rub:
             continue
@@ -453,6 +481,10 @@ def build_target_portfolio(client, *, raw_watchlist: list[str], account_id: str 
     result.current_vs_target = build_current_vs_target(allocations, holdings, target_env)
     result.new_capital_plan = build_new_capital_plan(
         allocations, holdings, target_env.new_capital_rub, target_env)
+    if target_env.new_capital_rub > 0 and target_env.cash_reserve_rub > 0:
+        result.warnings.append(
+            f"cash_reserve_applied: {target_env.cash_reserve_rub} ₽ оставлено вне "
+            f"распределения нового капитала")
     result.monthly_plan = build_monthly_plan(
         allocations, holdings, target_env.monthly_contribution_rub, target_env.months, target_env)
     return result
