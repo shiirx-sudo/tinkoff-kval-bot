@@ -680,6 +680,77 @@ def cmd_income_source_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_target_portfolio(args: argparse.Namespace) -> int:
+    import os
+    from decimal import Decimal
+
+    from api.client import ReadOnlyClient
+    from modules.fundamental_filter import load_fundamental_filter
+    from modules.income_engine import (
+        DEFAULT_CLASS_CODE_PRIORITY,
+        load_income_config,
+        load_income_env,
+    )
+    from modules.income_policy import load_policy_env
+    from modules.target_portfolio import build_target_portfolio, load_target_env
+    from reports import target_portfolio_reports as rep
+
+    config = load_income_config(getattr(args, "config_path", None))
+    income_env = load_income_env(config)
+    if args.target_monthly_rub is not None:
+        income_env.target_monthly_rub = Decimal(str(args.target_monthly_rub))
+    policy_env = load_policy_env()
+    target_env = load_target_env(income_env)
+
+    # CLI-оверрайды (read-only расчёт)
+    def _set(attr, val, cast=Decimal):
+        if val is not None:
+            setattr(target_env, attr, cast(str(val)) if cast is Decimal else cast(val))
+    _set("max_position_pct", args.max_position_pct)
+    _set("max_issuer_pct", args.max_issuer_pct)
+    _set("cash_reserve_rub", args.cash_reserve_rub)
+    _set("new_capital_rub", args.new_capital_rub)
+    _set("monthly_contribution_rub", args.monthly_contribution_rub)
+    if args.min_policy_bucket is not None:
+        target_env.min_policy_bucket = args.min_policy_bucket
+    if args.include_estimated:
+        target_env.include_estimated = True
+    if args.no_include_variable:
+        target_env.include_variable = False
+    if args.months is not None:
+        target_env.months = args.months
+
+    raw_items = [t.strip() for t in (args.watchlist or "").split(",") if t.strip()]
+    if not raw_items:
+        logger.error("Укажите --watchlist (вселенную инструментов) для target-portfolio.")
+        return 1
+    priority = [c.strip().upper() for c in
+                os.getenv("SIGNALS_CLASS_CODE_PRIORITY",
+                          ",".join(DEFAULT_CLASS_CODE_PRIORITY)).split(",") if c.strip()]
+
+    try:
+        tp = build_target_portfolio(
+            ReadOnlyClient(), raw_watchlist=raw_items, account_id=args.account_id,
+            config=config, income_env=income_env, target_env=target_env,
+            fundamental_data=load_fundamental_filter(), policy_env=policy_env,
+            priority=priority)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка target-portfolio (read-only): {exc}")
+        return 1
+
+    written = rep.write_target_portfolio(tp, "data/reports")
+    print(rep.render_console(tp))
+    for _name, path in written.items():
+        logger.info(f"Отчёт: {path}")
+
+    if getattr(args, "notify", False):
+        from notifications import telegram as tg
+        cfg = tg.load_config()
+        tg.send_telegram_message(cfg.bot_token, cfg.chat_id, rep.build_telegram(tp),
+                                 enabled=cfg.enabled, dry_run=False)
+    return 0
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="main.py", description="T-Invest Kval Bot (read-only)")
     parser.add_argument("-v", "--verbose", action="store_true", help="DEBUG-логирование")
@@ -873,6 +944,29 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p_isa.add_argument("--format", default="md", choices=("md", "json", "csv"))
     p_isa.add_argument("--config-path", default=None)
 
+    p_tp = sub.add_parser(
+        "target-portfolio",
+        help="READ-ONLY план целевого доходного портфеля и докупки (заявок нет)")
+    p_tp.add_argument("--watchlist", default="", help="Вселенная инструментов через запятую")
+    p_tp.add_argument("--account-id", default=None,
+                      help="Текущий портфель (read-only; иначе только universe)")
+    p_tp.add_argument("--target-monthly-rub", type=float, default=None)
+    p_tp.add_argument("--max-position-pct", type=float, default=None)
+    p_tp.add_argument("--max-issuer-pct", type=float, default=None)
+    p_tp.add_argument("--min-policy-bucket", default=None,
+                      choices=("income_reliable", "income_variable"))
+    p_tp.add_argument("--include-estimated", action="store_true",
+                      help="Включить income_estimated отдельным слоем")
+    p_tp.add_argument("--no-include-variable", action="store_true",
+                      help="Исключить income_variable из base target")
+    p_tp.add_argument("--cash-reserve-rub", type=float, default=None)
+    p_tp.add_argument("--new-capital-rub", type=float, default=None)
+    p_tp.add_argument("--monthly-contribution-rub", type=float, default=None)
+    p_tp.add_argument("--months", type=int, default=None)
+    p_tp.add_argument("--config-path", default=None)
+    p_tp.add_argument("--notify", action="store_true",
+                      help="Отправить краткий отчёт в Telegram (иначе только отчёты)")
+
     p_tgt = sub.add_parser(
         "telegram-test", help="Проверка Telegram bot_token/chat_id (read-only)")
     p_tgt.add_argument("--dry-run", type=_boolish, default=True, metavar="true|false",
@@ -914,6 +1008,7 @@ _HANDLERS = {
     "income-calendar": cmd_income_calendar,
     "income-watchlist": cmd_income_watchlist,
     "income-source-audit": cmd_income_source_audit,
+    "target-portfolio": cmd_target_portfolio,
     "telegram-test": cmd_telegram_test,
     "telegram-summary": cmd_telegram_summary,
     "telegram-notify": cmd_telegram_notify,
