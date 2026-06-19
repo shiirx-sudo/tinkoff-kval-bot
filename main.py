@@ -799,8 +799,9 @@ def cmd_build_income_universe(args: argparse.Namespace) -> int:
         result = builder.build_universe(
             rules=rules, mode=mode, max_bonds=args.max_bonds,
             include_disabled=args.include_disabled, output=args.output,
-            dry_run=args.dry_run, client=ReadOnlyClient(), config=config,
-            income_env=income_env, fundamental_data=fdata, policy_env=policy_env, now=now)
+            dry_run=args.dry_run, profile_set=args.profile_set, client=ReadOnlyClient(),
+            config=config, income_env=income_env, fundamental_data=fdata,
+            policy_env=policy_env, now=now)
     except Exception as exc:  # noqa: BLE001
         logger.error(f"Ошибка build-income-universe (read-only): {exc}")
         return 1
@@ -817,6 +818,8 @@ def cmd_build_income_universe(args: argparse.Namespace) -> int:
     print(f"  policy-excluded: {rep['policy_excluded_count']} | "
           f"unknown-income: {rep['unknown_income_count']}")
     print(f"  disabled by reason: {rep['disabled_by_reason']}")
+    for w in rep.get("warnings") or []:
+        logger.warning(w)
 
     if args.dry_run:
         print("DRY-RUN: ничего не записано. Заявки не отправляются.")
@@ -1090,7 +1093,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p_biu.add_argument("--include-disabled", action=argparse.BooleanOptionalAction,
                        default=True, help="Писать disabled-кандидатов (очередь на аудит)")
     p_biu.add_argument("--max-bonds", type=int, default=100)
-    p_biu.add_argument("--profile-set", default="income")
+    p_biu.add_argument("--profile-set", default="income",
+                       help="Набор профилей (пока реализован только 'income'; иначе warning)")
     p_biu.add_argument("--config-path", default=None,
                        help="Путь к income_engine config (для income policy)")
 

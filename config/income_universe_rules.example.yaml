@@ -58,12 +58,16 @@ filters:
     # Corporate bond secids/tickers; class_code is read from the API, not guessed.
     candidate_tickers: []
     allowed_class_codes: [TQCB, TQIR, TQOD]
-    max_maturity_years: 5
-    min_coupon_frequency_per_year: 2
-    allow_floaters: true
-    allow_fixed: true
-    exclude_if_no_coupon_schedule: true
-    exclude_if_unknown_currency: true
+    # Documented future filters; NOT enforced by the builder yet. Bond candidates
+    # are written disabled regardless until a coupon-calendar/income validation
+    # task implements these. Listed here so the intended policy is not lost.
+    future_filters:
+      max_maturity_years: 5
+      min_coupon_frequency_per_year: 2
+      allow_floaters: true
+      allow_fixed: true
+      exclude_if_no_coupon_schedule: true
+      exclude_if_unknown_currency: true
 
   ofz_pk:
     enabled: true

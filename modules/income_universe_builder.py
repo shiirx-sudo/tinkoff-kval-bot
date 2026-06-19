@@ -1,11 +1,13 @@
 """
 income_universe_builder_v1 — read-only генератор income universe.
 
-Собирает кандидатов из локальных правил (rules), резолвит их через УЖЕ
-существующие read-only функции проекта (income_engine.build_watchlist →
-resolve + income policy classification), и пишет YAML в формате, который умеет
-читать modules/income_universe.py. Ничего не отправляет во внешний мир, не
-меняет портфель, не использует full-токен, не скрапит и не даёт рекомендаций.
+Это RULES-DRIVEN / SEED-DRIVEN read-only билдер: он НЕ сканирует весь рынок
+T-Invest. Кандидаты берутся только из локальных правил (rules), затем резолвятся
+и классифицируются через УЖЕ существующие read-only функции проекта
+(income_engine.build_watchlist → resolve + income policy classification). Результат
+пишется в YAML, который умеет читать modules/income_universe.py. Ничего не
+отправляет во внешний мир, не меняет портфель, не использует full-токен, не
+скрапит и не даёт рекомендаций.
 
 enabled: true в сгенерированном файле означает «eligible_for_analysis», а НЕ
 инвестиционную рекомендацию. Кредитные рейтинги не выдумываются: если read-only
@@ -51,6 +53,9 @@ _DEFAULT_WARNING = "candidate_for_analysis_only; not an investment recommendatio
 _RULES_DEFAULT = "data/config/income_universe_rules.yaml"
 _RULES_EXAMPLE = "config/income_universe_rules.example.yaml"
 _BOND_BOARDS = ["TQOB", "TQCB", "TQIR", "TQOD"]
+
+# наборы профилей; пока реализован только income (остальное — future)
+SUPPORTED_PROFILE_SETS = {"income"}
 
 
 # ─── модели ───────────────────────────────────────────────────────────────────
@@ -357,7 +362,7 @@ def _header(timestamp: str, mode: str, rules_path: str) -> str:
         "# Not investment recommendations.\n"
         "# Do not edit generated sections manually; change rules/overrides instead.\n"
         f"# Generated at: {timestamp}\n"
-        "# Source: read-only T-Invest API + local rules.\n"
+        "# Source: local rules + read-only T-Invest resolution/income-policy classification.\n"
         f"# Rules: {rules_path}\n"
         f"# Enable mode: {mode}\n"
         "# enabled:true means eligible for analysis, not a recommendation.\n"
@@ -441,8 +446,8 @@ def render_report_md(report: dict) -> str:
 
 def build_universe(*, rules: dict, mode: str = MODE_DISABLED, max_bonds: int = 100,
                    include_disabled: bool = True, output: str = "", dry_run: bool = True,
-                   client=None, config: dict | None = None, income_env=None,
-                   fundamental_data: dict | None = None, policy_env=None,
+                   profile_set: str = "income", client=None, config: dict | None = None,
+                   income_env=None, fundamental_data: dict | None = None, policy_env=None,
                    watchlist_fn=None, now: _dt.datetime | None = None) -> BuilderResult:
     """
     Полный read-only прогон: seeds → resolve+classify (build_watchlist) → entries
@@ -486,6 +491,13 @@ def build_universe(*, rules: dict, mode: str = MODE_DISABLED, max_bonds: int = 1
     report = build_report(seeds, entries, profiles, mode=mode, output=output,
                           rules_path=str(rules.get("_source_path", "") or "rules"),
                           dry_run=dry_run, timestamp=timestamp)
+    report["profile_set"] = profile_set
+    warnings: list[str] = []
+    if profile_set not in SUPPORTED_PROFILE_SETS:
+        warnings.append(
+            f"profile-set '{profile_set}' reserved/future; only "
+            f"{sorted(SUPPORTED_PROFILE_SETS)} implemented — used 'income' logic")
+    report["warnings"] = warnings
     return BuilderResult(profiles=profiles, report=report, entries=entries)
 
 

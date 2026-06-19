@@ -15,6 +15,10 @@ policy buckets change, and audit notes get stale. The builder resolves seeds thr
 the read-only T-Invest API (via the existing `income-watchlist` pipeline), applies the
 current income policy, and writes a compatible YAML — deterministically and repeatably.
 
+It is a **rules-driven / seed-driven** builder: it does **not** scan the whole T-Invest
+market. Candidates come only from the rules file (and `overrides.include`); the
+read-only API is used to resolve and classify those seeds, not to discover new ones.
+
 ## Generated file vs rules file
 
 - **Rules file** (`config/income_universe_rules.example.yaml` → copy to
@@ -62,8 +66,9 @@ Both stay compatible with `modules/income_universe.py` (schema: `profiles → <n
   policy-eligible; all equities/bonds stay disabled.
 
 Other flags: `--backup`, `--force` (overwrite without backup), `--dry-run`,
-`--include-disabled/--no-include-disabled` (default include), `--max-bonds` (cap),
-`--profile-set` (currently `income`).
+`--include-disabled/--no-include-disabled` (default include), `--max-bonds` (cap).
+`--profile-set` is **reserved** — only `income` is implemented; any other value logs a
+warning and falls back to `income` logic.
 
 ## What cannot be fully automated
 
@@ -77,10 +82,12 @@ manual review and are flagged in `notes`, never used to enable a candidate:
 - **Tax treatment** — especially for FX / quasi-currency instruments.
 - **Qualified-investor availability** — eligibility is not auto-determined.
 
-Bonds (corporate, OFZ-PK, quasi-currency) are written **disabled** until their
-coupon schedule and income calculation pass a real smoke; OFZ-PK floaters currently
-classify as `income_unknown` and need a separate implementation task before they can
-be enabled.
+Bonds (corporate, OFZ-PK, quasi-currency) are always written **disabled** by the
+builder (bond/OFZ/quasi roles are never auto-enabled in any mode). An OFZ-PK can
+classify as `income_reliable` through a known coupon schedule (`api_coupon_schedule`),
+while others classify as `income_unknown`; either way the builder keeps them disabled,
+because annualizing a floater's currently-known coupon can mislead until a dedicated
+coupon-calendar validation is implemented.
 
 ## How to review the generated universe
 
