@@ -1,0 +1,118 @@
+# Example rules for build-income-universe (income_universe_builder_v1).
+#
+# This file holds SELECTION RULES and manual OVERRIDES, not a ready universe.
+# The builder reads read-only T-Invest data for the candidate seeds below,
+# classifies them with the current income policy, and writes a generated
+# income_universe.yaml (compatible with modules/income_universe.py).
+#
+# NOT an investment recommendation. Read-only only: no orders, no portfolio
+# mutation, no scraping, no full-access token. Copy to
+# data/config/income_universe_rules.yaml and edit locally.
+
+version: 1
+profile_set: income
+
+# Per-profile caps for the generated universe.
+profiles:
+  base_income:
+    max_items: 20
+  extended_income:
+    max_items: 100
+  money_market:
+    max_items: 20
+  dividend_candidates:
+    max_items: 50
+  bond_candidates:
+    max_items: 100
+  ofz_pk_candidates:
+    max_items: 100
+  quasi_currency_bond_candidates:
+    max_items: 50
+
+# Candidate seeds + selection filters per asset class. The builder resolves each
+# seed through the read-only API and reads its real class_code (never guessed).
+filters:
+  money_market:
+    enabled: true
+    role: money_market
+    candidate_tickers: [LQDT, SBMM]
+    allowed_class_codes: [TQTF]
+
+  shares:
+    enabled: true
+    role: dividend_candidate
+    candidate_tickers: [SBER, VTBR, T, LKOH, NVTK, GAZP, GMKN]
+    allowed_class_codes: [TQBR]
+    allow_policy_buckets:
+      - income_reliable
+      - income_variable
+      - income_estimated
+      - income_manual
+    exclude_policy_buckets:
+      - income_excluded
+      - income_unknown
+
+  bonds:
+    enabled: true
+    role: bond_candidate
+    # Corporate bond secids/tickers; class_code is read from the API, not guessed.
+    candidate_tickers: []
+    allowed_class_codes: [TQCB, TQIR, TQOD]
+    # Documented future filters; NOT enforced by the builder yet. Bond candidates
+    # are written disabled regardless until a coupon-calendar/income validation
+    # task implements these. Listed here so the intended policy is not lost.
+    future_filters:
+      max_maturity_years: 5
+      min_coupon_frequency_per_year: 2
+      allow_floaters: true
+      allow_fixed: true
+      exclude_if_no_coupon_schedule: true
+      exclude_if_unknown_currency: true
+
+  ofz_pk:
+    enabled: true
+    role: ofz_pk_candidate
+    allowed_class_codes: [TQOB]
+    candidate_secids:
+      - SU29024RMFS5
+      - SU29025RMFS2
+      - SU29026RMFS0
+      - SU29027RMFS8
+      - SU29023RMFS7
+      - SU29022RMFS9
+      - SU29017RMFS9
+      - SU29018RMFS7
+      - SU29009RMFS6
+      - SU29010RMFS4
+
+  quasi_currency_bonds:
+    enabled: true
+    role: quasi_currency_bond_candidate
+    include_as_disabled_candidates_only: true
+    # Verified secids/tickers only (read from API). Source short-names go in
+    # candidate_names and stay disabled until resolved.
+    candidate_secids: []
+    candidate_names:
+      - "ГазКЗ-37Д"
+      - "НОВАТЭК1Р5"
+      - "СибурХ1Р08"
+      - "НорНик1P14"
+      - "ВЭБ2Р-54В"
+      - "ФосАгро2П4"
+      - "Газпнф5P1R"
+      - "Полюс Б1P5"
+
+# Manual overrides applied after auto-classification.
+overrides:
+  include:
+    - ticker: LQDT
+      class_code: TQTF
+      role: money_market
+      notes: "manual seed; validate yield source"
+  disable:
+    - ticker: GAZP
+      class_code: TQBR
+      reason: "state_control_risk / unknown income reliability until reviewed"
+
+manual_notes:
+  default_warning: "candidate_for_analysis_only; not an investment recommendation"
