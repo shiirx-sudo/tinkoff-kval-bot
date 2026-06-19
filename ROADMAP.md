@@ -220,13 +220,20 @@ This caused:
 - diversification warning
 - required capital around 21.6M RUB for 100k RUB/month target
 
-Next work should focus on broadening and maintaining the income universe, not on changing execution logic.
+Next work should focus on filling and auditing `data/config/income_universe.yaml`, expanding eligible instruments, and comparing target scenarios, not on changing execution logic.
 
 ## Planned next actions
 
 ### Milestone A — Income universe management
 
-Status: next.
+Status: implemented.
+
+Implemented in `cd294b3`:
+
+- `config/income_universe.example.yaml`
+- `modules/income_universe.py`
+- `--universe-profile` / `--universe-path` support for `target-portfolio`
+- `--universe-profile` / `--universe-path` support for `income-watchlist`
 
 Goal: avoid passing long `--watchlist` strings manually and build a maintainable income universe.
 
@@ -337,7 +344,7 @@ If ever introduced, it must be:
 
 Use this section to append new ideas before implementing them.
 
-- Add income_universe_v1 profiles and config.
+- Done: income_universe_v1 profiles and config (`cd294b3`).
 - Add scenario comparison for target portfolio.
 - Add bond-focused income planner.
 - Add money-market alternatives comparison.
