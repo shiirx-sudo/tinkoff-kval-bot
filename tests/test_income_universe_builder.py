@@ -209,6 +209,92 @@ def test_report_fields():
         assert key in rep
 
 
+# ─── детальный per-entry список (аудит без чтения data/config/*.yaml) ─────────
+
+def test_report_has_detailed_entry_lists():
+    rep = _build(mode="policy").report
+    for key in ("entries", "enabled_entries", "disabled_entries"):
+        assert key in rep, key
+        assert isinstance(rep[key], list) and rep[key]
+    # entries покрывают все seed-кандидаты (1:1 с просканированными)
+    assert len(rep["entries"]) == rep["instruments_scanned"]
+    # enabled + disabled == все entries (без пересечений)
+    assert len(rep["enabled_entries"]) + len(rep["disabled_entries"]) == len(rep["entries"])
+
+
+def test_entries_field_schema():
+    rep = _build(mode="policy").report
+    for e in rep["entries"]:
+        assert set(e.keys()) == {"ticker", "class_code", "role", "enabled",
+                                 "policy_bucket", "excluded_reason", "notes"}
+    for e in rep["enabled_entries"]:
+        assert set(e.keys()) == {"ticker", "class_code", "role", "policy_bucket",
+                                 "source", "notes"}
+    for e in rep["disabled_entries"]:
+        assert set(e.keys()) == {"ticker", "class_code", "role", "policy_bucket",
+                                 "excluded_reason", "notes"}
+
+
+def test_enabled_entries_expose_source():
+    rep = _build(mode="policy").report
+    by = {e["ticker"]: e for e in rep["enabled_entries"]}
+    assert {"LQDT", "SBMM", "VTBR"} <= set(by)
+    assert by["LQDT"]["source"] == "manual_override"
+    assert by["SBMM"]["source"] == "trailing_30d"
+    assert by["VTBR"]["source"] == "api_known_future"
+
+
+def test_disabled_not_base_eligible_visible():
+    # NVTK классифицируется как income_estimated → disabled без excluded_reason
+    rep = _build(mode="policy").report
+    by = {e["ticker"]: e for e in rep["disabled_entries"]}
+    assert "NVTK" in by
+    assert by["NVTK"]["policy_bucket"] == "income_estimated"
+    assert by["NVTK"]["excluded_reason"] == ""        # not_base_eligible (no policy excl.)
+    assert "NVTK" not in {e["ticker"] for e in rep["enabled_entries"]}
+
+
+def test_disabled_unresolved_visible():
+    rep = _build(mode="policy").report
+    by = {e["ticker"]: e for e in rep["disabled_entries"]}
+    assert "NOCLS" in by
+    assert by["NOCLS"]["excluded_reason"] == "unresolved"
+
+
+def test_disabled_bond_ofz_quasi_visible_with_role_and_reason():
+    rep = _build(mode="policy").report
+    by = {e["ticker"]: e for e in rep["disabled_entries"]}
+    # OFZ-PK: eligible by policy but role-gated → disabled, role/reason/notes видны
+    assert "SU29024RMFS5" in by
+    ofz = by["SU29024RMFS5"]
+    assert ofz["role"] == "ofz_pk_candidate"
+    assert ofz["policy_bucket"] == "income_reliable"
+    assert "pending coupon/income validation" in ofz["notes"]
+    # quasi-currency source-name присутствует с ролью и причиной unresolved
+    quasi = [e for e in rep["disabled_entries"]
+             if e["role"] == "quasi_currency_bond_candidate"]
+    assert quasi
+    assert all(e["excluded_reason"] == "unresolved" for e in quasi)
+
+
+def test_report_is_json_serializable():
+    import json
+    rep = _build(mode="policy").report
+    dumped = json.dumps(rep, ensure_ascii=False)
+    assert "enabled_entries" in dumped and "disabled_entries" in dumped
+
+
+def test_report_md_has_entry_sections():
+    rep = _build(mode="policy").report
+    md = B.render_report_md(rep)
+    assert "## Enabled entries" in md
+    assert "## Disabled entries" in md
+    # disabled инструменты реально печатаются в markdown-таблице
+    assert "NVTK" in md and "NOCLS" in md and "SU29024RMFS5" in md
+    # enabled инструмент тоже виден
+    assert "LQDT" in md
+
+
 # ─── profile-set не игнорируется молча ───────────────────────────────────────
 
 def test_profile_set_default_no_warning():
