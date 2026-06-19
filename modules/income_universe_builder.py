@@ -78,6 +78,7 @@ class Entry:
     notes: str
     policy_bucket: str = ""
     excluded_reason: str = ""
+    source: str = ""
 
 
 @dataclass
@@ -246,14 +247,14 @@ def classify_entry(seed: Seed, item, *, mode: str, disable_index: dict[str, str]
     if seed.ticker in disable_index:
         return Entry(seed.ticker, cls or seed.class_code, role, False,
                      f"disabled: override; reason={disable_index[seed.ticker]}",
-                     policy_bucket=bucket, excluded_reason="override_disable")
+                     policy_bucket=bucket, excluded_reason="override_disable", source=src)
 
     # нерезолвибельные имена / нерезолвленные тикеры
     if not seed.resolvable or item is None or not _resolved(item):
         extra = f"; {seed.seed_notes}" if seed.seed_notes else ""
         return Entry(seed.ticker, seed.class_code, role, False,
                      f"disabled: class_code unresolved{extra}",
-                     excluded_reason="unresolved")
+                     excluded_reason="unresolved", source=src)
 
     excl = _excluded_reason(item)
     eligible = bucket in BASE_ELIGIBLE_BUCKETS
@@ -280,7 +281,7 @@ def classify_entry(seed: Seed, item, *, mode: str, disable_index: dict[str, str]
     else:
         notes = f"disabled: candidate_for_audit; {warning}"
     return Entry(seed.ticker, cls or seed.class_code, role, enabled, notes,
-                 policy_bucket=bucket, excluded_reason=excl)
+                 policy_bucket=bucket, excluded_reason=excl, source=src)
 
 
 # ─── раскладка по профилям (pure) ─────────────────────────────────────────────
@@ -389,6 +390,43 @@ def render_yaml(profiles: dict[str, list[Entry]], *, timestamp: str, mode: str,
 
 # ─── отчёт (pure) ─────────────────────────────────────────────────────────────
 
+def _entry_full(e: Entry) -> dict:
+    """Полная запись для report['entries'] (аудит без чтения data/config/*.yaml)."""
+    return {
+        "ticker": e.ticker,
+        "class_code": e.class_code,
+        "role": e.role,
+        "enabled": bool(e.enabled),
+        "policy_bucket": e.policy_bucket,
+        "excluded_reason": e.excluded_reason,
+        "notes": e.notes,
+    }
+
+
+def _entry_enabled(e: Entry) -> dict:
+    """Удобная запись для report['enabled_entries'] (с источником дохода)."""
+    return {
+        "ticker": e.ticker,
+        "class_code": e.class_code,
+        "role": e.role,
+        "policy_bucket": e.policy_bucket,
+        "source": e.source,
+        "notes": e.notes,
+    }
+
+
+def _entry_disabled(e: Entry) -> dict:
+    """Удобная запись для report['disabled_entries'] (с причиной отключения)."""
+    return {
+        "ticker": e.ticker,
+        "class_code": e.class_code,
+        "role": e.role,
+        "policy_bucket": e.policy_bucket,
+        "excluded_reason": e.excluded_reason,
+        "notes": e.notes,
+    }
+
+
 def build_report(seeds: list[Seed], entries: list[Entry],
                  profiles: dict[str, list[Entry]], *, mode: str, output: str,
                  rules_path: str, dry_run: bool, timestamp: str) -> dict:
@@ -417,8 +455,18 @@ def build_report(seeds: list[Seed], entries: list[Entry],
         "policy_excluded": policy_excluded,
         "unknown_income_count": len(unknown),
         "unknown_income": unknown,
+        # детальный per-entry список: позволяет аудировать все enabled/disabled
+        # инструменты, не читая защищённые data/config/*.yaml
+        "entries": [_entry_full(e) for e in entries],
+        "enabled_entries": [_entry_enabled(e) for e in entries if e.enabled],
+        "disabled_entries": [_entry_disabled(e) for e in entries if not e.enabled],
         "generated_profiles": list(profiles.keys()),
     }
+
+
+def _md_cell(value) -> str:
+    """Безопасная ячейка markdown-таблицы (экранируем |, схлопываем переносы)."""
+    return str(value or "").replace("|", "\\|").replace("\n", " ").strip()
 
 
 def render_report_md(report: dict) -> str:
@@ -438,6 +486,23 @@ def render_report_md(report: dict) -> str:
     lines += ["", "Disabled by reason:"]
     for r, n in sorted(report["disabled_by_reason"].items()):
         lines.append(f"- {r}: {n}")
+
+    lines += ["", "## Enabled entries", "",
+              "| ticker | class_code | role | policy_bucket | notes |",
+              "|---|---|---|---|---|"]
+    for e in report.get("enabled_entries", []):
+        lines.append(f"| {_md_cell(e.get('ticker'))} | {_md_cell(e.get('class_code'))} | "
+                     f"{_md_cell(e.get('role'))} | {_md_cell(e.get('policy_bucket'))} | "
+                     f"{_md_cell(e.get('notes'))} |")
+
+    lines += ["", "## Disabled entries", "",
+              "| ticker | class_code | role | policy_bucket | excluded_reason | notes |",
+              "|---|---|---|---|---|---|"]
+    for e in report.get("disabled_entries", []):
+        lines.append(f"| {_md_cell(e.get('ticker'))} | {_md_cell(e.get('class_code'))} | "
+                     f"{_md_cell(e.get('role'))} | {_md_cell(e.get('policy_bucket'))} | "
+                     f"{_md_cell(e.get('excluded_reason'))} | {_md_cell(e.get('notes'))} |")
+
     lines += ["", "_Generated by build-income-universe; rules-driven; read-only._", ""]
     return "\n".join(lines)
 

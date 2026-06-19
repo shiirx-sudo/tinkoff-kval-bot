@@ -89,10 +89,32 @@ while others classify as `income_unknown`; either way the builder keeps them dis
 because annualizing a floater's currently-known coupon can mislead until a dedicated
 coupon-calendar validation is implemented.
 
+## Builder report: per-entry details
+
+The builder report (`data/reports/income_universe_builder_report.json` / `.md`) is not
+just aggregate counters. It also includes a **per-entry list of every scanned
+instrument**, so you can audit exactly which instruments are enabled or disabled — and
+why — **without reading the local `data/config/*.yaml` files** (which stay
+local/user-protected behind the `Read(./data/config/*.yaml)` deny rule):
+
+- `entries` — every scanned instrument: `ticker, class_code, role, enabled,
+  policy_bucket, excluded_reason, notes`.
+- `enabled_entries` — convenience view of the enabled ones, with the income `source`:
+  `ticker, class_code, role, policy_bucket, source, notes`.
+- `disabled_entries` — convenience view of the disabled ones, with the reason:
+  `ticker, class_code, role, policy_bucket, excluded_reason, notes`.
+
+The Markdown report mirrors this with `## Enabled entries` and `## Disabled entries`
+tables. This makes disabled buckets that have no dedicated counter (e.g.
+`not_base_eligible`) directly auditable, so checking instruments like SBER / NVTK /
+GAZP / GMKN no longer requires opening the generated YAML. `data/config` remains
+local/user-protected; only the read-only report surfaces these details.
+
 ## How to review the generated universe
 
 1. Run with `--dry-run` and read the summary (scanned / included / disabled-by-reason
-   / unresolved / policy-excluded / unknown-income).
+   / unresolved / policy-excluded / unknown-income), then the per-entry
+   `enabled_entries` / `disabled_entries` lists.
 2. Inspect `disabled_research_candidates` — that's the manual-audit queue.
 3. For each `enabled: true`, confirm the `auto:` note (policy bucket + source) makes
    sense; validate yield source for money-market and trailing entries.
