@@ -770,6 +770,84 @@ def cmd_target_portfolio(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_build_income_universe(args: argparse.Namespace) -> int:
+    import json
+    import shutil
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from api.client import ReadOnlyClient
+    from modules import income_universe_builder as builder
+    from modules.fundamental_filter import load_fundamental_filter
+    from modules.income_engine import load_income_config, load_income_env
+    from modules.income_policy import load_policy_env
+
+    rules = builder.load_rules(getattr(args, "rules_path", None))
+    if not rules:
+        logger.error("Не найдены rules income_universe. Укажите --rules-path или "
+                     "создайте config/income_universe_rules.example.yaml.")
+        return 1
+    config = load_income_config(getattr(args, "config_path", None))
+    income_env = load_income_env(config)
+    policy_env = load_policy_env()
+    fdata = load_fundamental_filter()
+    mode = args.enable_mode
+    now = datetime.now(timezone.utc)
+    rules_path = str(rules.get("_source_path", "") or "rules")
+
+    try:
+        result = builder.build_universe(
+            rules=rules, mode=mode, max_bonds=args.max_bonds,
+            include_disabled=args.include_disabled, output=args.output,
+            dry_run=args.dry_run, client=ReadOnlyClient(), config=config,
+            income_env=income_env, fundamental_data=fdata, policy_env=policy_env, now=now)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка build-income-universe (read-only): {exc}")
+        return 1
+
+    rep = result.report
+    print("Income universe builder — READ ONLY")
+    print(f"  mode={rep['mode']} dry_run={rep['dry_run']} output={args.output}")
+    print(f"  rules={rules_path}")
+    print(f"  instruments scanned: {rep['instruments_scanned']}")
+    for name in rep["generated_profiles"]:
+        print(f"  {name}: {rep['included_by_profile'][name]} "
+              f"(enabled {rep['enabled_by_profile'][name]})")
+    print(f"  unresolved: {rep['unresolved']}")
+    print(f"  policy-excluded: {rep['policy_excluded_count']} | "
+          f"unknown-income: {rep['unknown_income_count']}")
+    print(f"  disabled by reason: {rep['disabled_by_reason']}")
+
+    if args.dry_run:
+        print("DRY-RUN: ничего не записано. Заявки не отправляются.")
+        return 0
+
+    out = Path(args.output)
+    if out.exists():
+        if args.backup:
+            bak = out.with_name(out.name + f".bak.{now.strftime('%Y%m%d-%H%M%S')}")
+            shutil.copy2(out, bak)
+            logger.info(f"Backup: {bak}")
+        elif not args.force:
+            logger.error(f"{out} уже существует. Используйте --backup или --force.")
+            return 1
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        builder.render_universe_yaml(result, mode=mode, rules_path=rules_path, now=now),
+        encoding="utf-8")
+    logger.info(f"Generated universe: {out}")
+
+    rep_dir = Path("data/reports")
+    rep_dir.mkdir(parents=True, exist_ok=True)
+    (rep_dir / "income_universe_builder_report.json").write_text(
+        json.dumps(rep, ensure_ascii=False, indent=2), encoding="utf-8")
+    (rep_dir / "income_universe_builder_report.md").write_text(
+        builder.render_report_md(rep), encoding="utf-8")
+    print("Заявки не отправляются. Это аналитика, не рекомендация.")
+    return 0
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="main.py", description="T-Invest Kval Bot (read-only)")
     parser.add_argument("-v", "--verbose", action="store_true", help="DEBUG-логирование")
@@ -994,6 +1072,28 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p_tp.add_argument("--notify", action="store_true",
                       help="Отправить краткий отчёт в Telegram (иначе только отчёты)")
 
+    p_biu = sub.add_parser(
+        "build-income-universe",
+        help="READ-ONLY генератор income universe из rules + T-Invest данных")
+    p_biu.add_argument("--output", default="data/config/income_universe.generated.yaml",
+                       help="Путь для сгенерированного YAML")
+    p_biu.add_argument("--rules-path", default=None,
+                       help="Локальные правила (иначе data/config → example)")
+    p_biu.add_argument("--enable-mode", default="disabled",
+                       choices=("disabled", "policy", "conservative"))
+    p_biu.add_argument("--backup", action="store_true",
+                       help="Сделать backup существующего output перед записью")
+    p_biu.add_argument("--force", action="store_true",
+                       help="Перезаписать существующий output без backup")
+    p_biu.add_argument("--dry-run", action="store_true",
+                       help="Ничего не записывать, только summary")
+    p_biu.add_argument("--include-disabled", action=argparse.BooleanOptionalAction,
+                       default=True, help="Писать disabled-кандидатов (очередь на аудит)")
+    p_biu.add_argument("--max-bonds", type=int, default=100)
+    p_biu.add_argument("--profile-set", default="income")
+    p_biu.add_argument("--config-path", default=None,
+                       help="Путь к income_engine config (для income policy)")
+
     p_tgt = sub.add_parser(
         "telegram-test", help="Проверка Telegram bot_token/chat_id (read-only)")
     p_tgt.add_argument("--dry-run", type=_boolish, default=True, metavar="true|false",
@@ -1036,6 +1136,7 @@ _HANDLERS = {
     "income-watchlist": cmd_income_watchlist,
     "income-source-audit": cmd_income_source_audit,
     "target-portfolio": cmd_target_portfolio,
+    "build-income-universe": cmd_build_income_universe,
     "telegram-test": cmd_telegram_test,
     "telegram-summary": cmd_telegram_summary,
     "telegram-notify": cmd_telegram_notify,

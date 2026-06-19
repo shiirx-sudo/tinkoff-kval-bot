@@ -257,6 +257,26 @@ Expected result:
 - easier iteration on candidate instruments
 - no hardcoded recommendations in code
 
+### Milestone A2 — Income universe builder
+
+Status: in progress (PR `feature/income-universe-builder-v1`, not yet merged).
+
+Goal: stop hand-maintaining `data/config/income_universe.yaml`; generate it from
+read-only T-Invest data + local rules/overrides.
+
+Work in this PR:
+
+- `modules/income_universe_builder.py` (read-only; reuses `income-watchlist` resolution + income policy).
+- `build-income-universe` CLI with `--enable-mode disabled|policy|conservative`, `--dry-run`, `--backup`/`--force`, `--include-disabled`, `--max-bonds`.
+- `config/income_universe_rules.example.yaml` (rules/overrides; tracked example).
+- `docs/income_universe_builder.md`.
+- Generated YAML stays compatible with `modules/income_universe.py`.
+
+Not automated (flagged in notes, never auto-enabled): credit ratings, issuer
+qualitative risk, one-off dividend detection, tax treatment, qualified-investor
+availability. Bonds/OFZ-PK/quasi-currency stay disabled until coupon/income smoke
+passes (separate task).
+
 ### Milestone B — Expand eligible instruments
 
 Status: planned.
