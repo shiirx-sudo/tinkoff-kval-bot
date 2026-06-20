@@ -23,7 +23,9 @@ DISCLAIMER_LINES = [
 
 ALLOCATION_COLUMNS = [
     "ticker", "target_layer", "target_weight_pct", "target_capital_rub",
-    "expected_base_income_month_rub", "net_yield_pct", "reason",
+    "expected_base_income_month_rub", "net_yield_pct",
+    "capital_share_pct", "income_share_pct", "income_efficiency_ratio",
+    "yield_vs_blended_ratio", "low_yield_slot", "reason",
 ]
 PLAN_COLUMNS = [
     "kind", "ticker", "month", "planned_add_rub",
@@ -43,6 +45,14 @@ def _money(v) -> str:
 
 def _pct(v) -> str:
     return "n/a" if v is None else f"{Decimal(str(v)):.2f}%"
+
+
+def _ratio(v) -> str:
+    return "n/a" if v is None else f"{Decimal(str(v)):.2f}"
+
+
+def _yesno(v) -> str:
+    return "да" if v else "нет"
 
 
 def _dec_to_str(obj):
@@ -165,12 +175,18 @@ def render_md(tp: TargetPortfolio) -> str:
     for c in tp.excluded_universe:
         lines.append(f"| {c.ticker} | {c.policy_bucket} | {c.excluded_reason} |")
     lines += ["", "Target allocation:",
-              "| ticker | target_weight | target_capital | base_income/мес | reason |",
-              "|---|---|---|---|---|"]
+              "| ticker | weight_pct | conservative_net_yield_pct | "
+              "expected_monthly_income | capital_share_pct | income_share_pct | "
+              "income_efficiency_ratio | yield_vs_blended_ratio | low_yield_slot | reason |",
+              "|---|---|---|---|---|---|---|---|---|---|"]
     for a in tp.target_allocation:
         lines.append(f"| {a.ticker} | {_pct(a.target_weight_pct)} | "
-                     f"{_money(a.target_capital_rub)} | "
-                     f"{_money(a.expected_base_income_month_rub)} | {a.reason} |")
+                     f"{_pct(a.net_yield_pct)} | "
+                     f"{_money(a.expected_base_income_month_rub)} | "
+                     f"{_pct(a.capital_share_pct)} | {_pct(a.income_share_pct)} | "
+                     f"{_ratio(a.income_efficiency_ratio)} | "
+                     f"{_ratio(a.yield_vs_blended_ratio)} | "
+                     f"{_yesno(a.low_yield_slot)} | {a.reason} |")
     lines += ["", "Current vs target:",
               "| ticker | current_value | target_value | diff_value | action_hint |",
               "|---|---|---|---|---|"]
@@ -214,9 +230,12 @@ def render_console(tp: TargetPortfolio) -> str:
     lines.append("")
     lines.append("Target allocation:")
     for a in tp.target_allocation:
+        low = " ⚠ low_yield_slot" if a.low_yield_slot else ""
         lines.append(f"  {a.ticker:8} weight={_pct(a.target_weight_pct)} "
                      f"cap={_money(a.target_capital_rub)} "
-                     f"base_income={_money(a.expected_base_income_month_rub)}/мес [{a.reason}]")
+                     f"base_income={_money(a.expected_base_income_month_rub)}/мес "
+                     f"eff={_ratio(a.income_efficiency_ratio)} "
+                     f"y/blended={_ratio(a.yield_vs_blended_ratio)} [{a.reason}]{low}")
     if not tp.target_allocation:
         lines.append("  — (нет eligible инструментов)")
     lines.append("")
