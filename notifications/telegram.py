@@ -125,12 +125,93 @@ def _money(v) -> str:
     return f"{Decimal(str(v)):,.0f} ₽".replace(",", " ")
 
 
+def _weight(v) -> str:
+    if v in (None, ""):
+        return "—"
+    try:
+        return f"{Decimal(str(v)):.0f}%"
+    except Exception:  # noqa: BLE001
+        return "—"
+
+
+# Маркер диагностики низкодоходного слота в тексте warnings target_portfolio.
+_LOW_YIELD_PREFIX = "Низкодоходный слот"
+
+
+def _read_target_portfolio(reports_dir: str | Path) -> dict[str, Any] | None:
+    """Читает target_portfolio.json (read-only). Возвращает компактную сводку.
+
+    Нет файла → None (digest работает как раньше). Повреждённый JSON →
+    {"malformed": True} (digest не падает, блок помечается как пропущенный).
+    """
+    path = Path(reports_dir) / "target_portfolio.json"
+    if not path.exists():
+        return None
+    raw = _load_json(path)
+    if raw is None:
+        return {"malformed": True}
+    target = raw.get("target") or {}
+    allocation = []
+    for a in raw.get("target_allocation") or []:
+        allocation.append({
+            "ticker": str(a.get("ticker", "")),
+            "weight_pct": a.get("target_weight_pct"),
+            "low_yield_slot": bool(a.get("low_yield_slot")),
+        })
+    return {
+        "malformed": False,
+        "status": str(target.get("status", "")),
+        "monthly_net_rub": target.get("monthly_net_rub"),
+        "required_capital_rub": target.get("required_capital_rub"),
+        "allocation": allocation,
+        "warnings": [str(w) for w in (raw.get("warnings") or [])],
+    }
+
+
+def _target_portfolio_lines(tp: dict[str, Any] | None) -> list[str]:
+    """Строит компактный read-only блок целевого портфеля для digest.
+
+    Только аналитика/диагностика — никаких рекомендаций и заявок.
+    """
+    if not tp:
+        return []
+    if tp.get("malformed"):
+        return ["", "🎯 Целевой портфель (план)",
+                "⚠️ target_portfolio.json повреждён — блок диагностики пропущен."]
+
+    lines = [
+        "",
+        "🎯 Целевой портфель (план)",
+        f"Статус: {tp.get('status') or '—'}",
+        f"Целевой доход: {_money(tp.get('monthly_net_rub'))}/мес",
+        f"Требуемый капитал: {_money(tp.get('required_capital_rub'))}",
+    ]
+    allocation = tp.get("allocation") or []
+    if allocation:
+        parts = []
+        for a in allocation:
+            mark = " ⚠️" if a.get("low_yield_slot") else ""
+            parts.append(f"{a.get('ticker', '')} {_weight(a.get('weight_pct'))}{mark}")
+        lines.append("Доли капитала: " + ", ".join(parts))
+
+    warnings = tp.get("warnings") or []
+    # Диагностику низкодоходных слотов показываем первой, затем прочее; максимум 3.
+    ordered = ([w for w in warnings if w.startswith(_LOW_YIELD_PREFIX)]
+               + [w for w in warnings if not w.startswith(_LOW_YIELD_PREFIX)])
+    if ordered:
+        lines.append("Диагностика:")
+        lines += [f"⚠️ {w}" for w in ordered[:3]]
+    lines.append("Это аналитика, не рекомендация. Заявки не отправляются.")
+    return lines
+
+
 def read_reports(reports_dir: str | Path) -> dict[str, Any]:
     """Собирает данные из готовых JSON-отчётов (read-only)."""
     d = Path(reports_dir)
     preflight = _load_json(d / "execution_preflight.json")
     plan = _load_json(d / "kval_plan.json")
     scan = _load_json(d / "instrument_scan.json")
+    target_portfolio = _read_target_portfolio(d)
 
     if preflight is None:
         return {
@@ -141,6 +222,7 @@ def read_reports(reports_dir: str | Path) -> dict[str, Any]:
             "instrument": {}, "period": "", "check_date": "", "spread": "—",
             "side_notional": None, "broker_trade_count_missing": 0,
             "roundtrip_cycle_count_required": 0,
+            "target_portfolio": target_portfolio,
         }
 
     instr = preflight.get("instrument") or {}
@@ -173,6 +255,7 @@ def read_reports(reports_dir: str | Path) -> dict[str, Any]:
         "projected_total_trades": sizing.get("projected_total_trades", 0),
         "kval_min_total_trades": sizing.get("kval_min_total_trades", 41),
         "warnings": warnings,
+        "target_portfolio": target_portfolio,
     }
 
 
@@ -211,6 +294,7 @@ def build_summary_message(data: dict[str, Any], today: date | None = None) -> st
     if data.get("warnings"):
         lines += ["", "⚠️ Причины:"]
         lines += [f"• {w}" for w in data["warnings"][:6]]
+    lines += _target_portfolio_lines(data.get("target_portfolio"))
     lines += [
         "",
         f"Следующая проверка: {data.get('check_date') or '—'}",

@@ -220,3 +220,115 @@ def test_load_config_does_not_override_os_env(tmp_path, monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "FROM_OS_ENV")
     cfg = tg.load_config()
     assert cfg.bot_token == "FROM_OS_ENV"
+
+
+# ─── target-portfolio блок в digest (read-only) ──────────────────────────────
+
+# Запрещённые рекомендационные формулировки в новом блоке digest.
+_FORBIDDEN_WORDS = ("купить", "продать", "исключить", "buy", "sell")
+
+
+def _target_portfolio_report():
+    return {
+        "target": {
+            "monthly_net_rub": "100000.0",
+            "annual_net_rub": "1200000.0",
+            "status": "ok",
+            "required_capital_rub": "16796234.73616309917239559702",
+        },
+        "target_allocation": [
+            {"ticker": "VTBR", "target_weight_pct": "25", "low_yield_slot": False},
+            {"ticker": "T", "target_weight_pct": "25", "low_yield_slot": True},
+            {"ticker": "SBMM", "target_weight_pct": "20.0", "low_yield_slot": False},
+            {"ticker": "LQDT", "target_weight_pct": "20.0", "low_yield_slot": False},
+        ],
+        "warnings": [
+            "диверсификация: 10.0% не распределено (лимиты позиции/эмитента/денежного рынка)",
+            "Низкодоходный слот: T занимает 25.00% капитала, но даёт лишь ~4.99% "
+            "ожидаемого дохода; его консервативная доходность 1.43% существенно ниже "
+            "смешанной 7.14%. Это диагностическое предупреждение, не рекомендация. "
+            "Веса распределения не изменялись.",
+            "cash_reserve_applied: 5000 ₽ оставлено вне распределения нового капитала",
+        ],
+    }
+
+
+def _write_full_reports(d: Path):
+    """Минимальный preflight, чтобы read_reports не вернул MISSING_REPORTS."""
+    (d / "execution_preflight.json").write_text(json.dumps({
+        "status": "READY_DRY_RUN", "instrument": {"ticker": "LQDT"},
+        "period": "2026-07", "checks": [], "errors": [],
+    }), encoding="utf-8")
+
+
+# A: без target_portfolio.json digest работает как раньше.
+def test_summary_without_target_portfolio_unchanged(tmp_path):
+    _write_full_reports(tmp_path)
+    data = tg.read_reports(tmp_path)
+    assert data.get("target_portfolio") is None
+    text = tg.build_summary_message(data, today=date(2026, 6, 16))
+    assert "🎯 Целевой портфель" not in text
+    assert "Реальных заявок нет." in text
+
+
+# B: с target_portfolio.json появляется target-блок.
+def test_summary_with_target_portfolio_block(tmp_path):
+    _write_full_reports(tmp_path)
+    (tmp_path / "target_portfolio.json").write_text(
+        json.dumps(_target_portfolio_report()), encoding="utf-8")
+    data = tg.read_reports(tmp_path)
+    assert data["target_portfolio"]["status"] == "ok"
+    text = tg.build_summary_message(data, today=date(2026, 6, 16))
+    assert "🎯 Целевой портфель (план)" in text
+    assert "Статус: ok" in text
+    assert "100 000 ₽/мес" in text
+    assert "Требуемый капитал:" in text
+    assert "VTBR 25%" in text
+    assert "T 25% ⚠️" in text  # маркер низкодоходного слота
+    assert "не рекомендация" in text
+    assert "Заявки не отправляются." in text
+
+
+# C: low-yield warning из target_portfolio.json попадает в summary.
+def test_summary_surfaces_low_yield_warning(tmp_path):
+    _write_full_reports(tmp_path)
+    (tmp_path / "target_portfolio.json").write_text(
+        json.dumps(_target_portfolio_report()), encoding="utf-8")
+    data = tg.read_reports(tmp_path)
+    text = tg.build_summary_message(data, today=date(2026, 6, 16))
+    assert "Диагностика:" in text
+    assert "Низкодоходный слот: T занимает 25.00% капитала" in text
+
+
+# D: новый блок не содержит рекомендационных формулировок.
+def test_summary_target_block_has_no_recommendation_words(tmp_path):
+    _write_full_reports(tmp_path)
+    (tmp_path / "target_portfolio.json").write_text(
+        json.dumps(_target_portfolio_report()), encoding="utf-8")
+    data = tg.read_reports(tmp_path)
+    text = tg.build_summary_message(data, today=date(2026, 6, 16)).lower()
+    for word in _FORBIDDEN_WORDS:
+        assert word not in text, word
+
+
+# F: повреждённый target_portfolio.json не ломает summary.
+def test_summary_malformed_target_portfolio(tmp_path):
+    _write_full_reports(tmp_path)
+    (tmp_path / "target_portfolio.json").write_text("{ broken json", encoding="utf-8")
+    data = tg.read_reports(tmp_path)
+    assert data["target_portfolio"] == {"malformed": True}
+    text = tg.build_summary_message(data, today=date(2026, 6, 16))
+    assert "🎯 Целевой портфель (план)" in text
+    assert "повреждён" in text
+    assert "Реальных заявок нет." in text
+
+
+# Low-yield диагностика видна даже без preflight (MISSING_REPORTS).
+def test_summary_target_block_without_preflight(tmp_path):
+    (tmp_path / "target_portfolio.json").write_text(
+        json.dumps(_target_portfolio_report()), encoding="utf-8")
+    data = tg.read_reports(tmp_path)
+    assert data["status"] == "MISSING_REPORTS"
+    text = tg.build_summary_message(data, today=date(2026, 6, 16))
+    assert "🎯 Целевой портфель (план)" in text
+    assert "Низкодоходный слот: T" in text
