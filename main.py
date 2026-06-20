@@ -770,6 +770,39 @@ def cmd_target_portfolio(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_income_universe_audit(args: argparse.Namespace) -> int:
+    from modules import income_universe_audit as audit
+
+    try:
+        result = audit.run_audit(
+            builder_report_path=args.builder_report,
+            output_json=args.output_json,
+            output_md=args.output_md,
+        )
+    except audit.AuditError as exc:
+        logger.error(str(exc))
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка income-universe-audit (read-only): {exc}")
+        return 1
+
+    s = result["summary"]
+    gc = s["group_counts"]
+    print("Income universe disabled audit — READ ONLY")
+    print("Аналитика, не рекомендация. Заявки не отправляются.")
+    print(f"  total disabled: {s['total_disabled']}")
+    print(f"  A manual-audit={gc['A']} B policy-review={gc['B']} "
+          f"C coupon-validation={gc['C']} D resolver-mapping={gc['D']} "
+          f"E keep-disabled={gc['E']}")
+    print(f"  auto_enable_allowed: {s['auto_enable_allowed_count']} "
+          f"(ни один кандидат не включается автоматически)")
+    print(f"  requires code PR: {s['requires_code_pr_count']} | "
+          f"requires local rules: {s['requires_local_rules_count']}")
+    logger.info(f"Отчёт: {result['_output_json']}")
+    logger.info(f"Отчёт: {result['_output_md']}")
+    return 0
+
+
 def cmd_build_income_universe(args: argparse.Namespace) -> int:
     import json
     import shutil
@@ -1075,6 +1108,22 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p_tp.add_argument("--notify", action="store_true",
                       help="Отправить краткий отчёт в Telegram (иначе только отчёты)")
 
+    p_iua = sub.add_parser(
+        "income-universe-audit",
+        help="READ-ONLY диагностика disabled-кандидатов income universe (A/B/C/D/E)")
+    p_iua.add_argument(
+        "--builder-report",
+        default="data/reports/income_universe_builder_report.json",
+        help="Путь к income_universe_builder_report.json (только чтение)")
+    p_iua.add_argument(
+        "--output-json", dest="output_json",
+        default="data/reports/income_universe_disabled_audit.json",
+        help="Путь для JSON-отчёта аудита")
+    p_iua.add_argument(
+        "--output-md", dest="output_md",
+        default="data/reports/income_universe_disabled_audit.md",
+        help="Путь для Markdown-отчёта аудита")
+
     p_biu = sub.add_parser(
         "build-income-universe",
         help="READ-ONLY генератор income universe из rules + T-Invest данных")
@@ -1140,6 +1189,7 @@ _HANDLERS = {
     "income-watchlist": cmd_income_watchlist,
     "income-source-audit": cmd_income_source_audit,
     "target-portfolio": cmd_target_portfolio,
+    "income-universe-audit": cmd_income_universe_audit,
     "build-income-universe": cmd_build_income_universe,
     "telegram-test": cmd_telegram_test,
     "telegram-summary": cmd_telegram_summary,

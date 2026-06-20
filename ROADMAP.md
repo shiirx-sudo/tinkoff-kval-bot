@@ -289,6 +289,27 @@ qualitative risk, one-off dividend detection, tax treatment, qualified-investor
 availability. Bonds/OFZ-PK/quasi-currency stay disabled until coupon/income smoke
 passes (separate task).
 
+### Milestone A3 — Disabled-candidate audit (report only)
+
+Status: implemented.
+
+Goal: безопасно разобрать, почему конкретные кандидаты остаются disabled, не меняя
+никакой логики включения.
+
+Work:
+
+- `modules/income_universe_audit.py` — read-only классификатор disabled-кандидатов.
+- `income-universe-audit` CLI: читает только `income_universe_builder_report.json`,
+  пишет `income_universe_disabled_audit.json` / `.md`.
+- Группы A/B/C/D/E: manual audit, policy review, coupon validation,
+  resolver/mapping, keep disabled.
+- `docs/income_universe_audit.md`.
+
+Гарантии: не вызывает API, не читает `data/config`, не меняет income policy /
+target portfolio / builder enable logic / resolver; `auto_enable_allowed=false`
+для всех кандидатов. Следующие кандидаты на реализацию (отдельными PR):
+coupon-validation, resolver/mapping, manual-income policy.
+
 ### Milestone B — Expand eligible instruments
 
 Status: planned.
