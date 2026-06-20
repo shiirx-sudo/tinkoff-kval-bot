@@ -393,6 +393,63 @@ If ever introduced, it must be:
 - confirmation per action
 - strong preflight and kill switch
 
+### Milestone R1 — Automated investment research intake
+
+Status: planned.
+
+Goal:
+автоматически находить, собирать и анализировать инвестиционные материалы как
+research input для income universe и риск-контроля, без торговых действий и без
+авто-включения инструментов.
+
+Useful ideas from article archive:
+
+- Bond / OFZ research:
+  - coupon schedule validation;
+  - floating coupon handling for OFZ-PK;
+  - maturity / liquidity / tax assumptions;
+  - inflation and deposit-rate benchmark;
+  - high-yield bond risk filters.
+- Dividend / equity income research:
+  - dividend stability checklist;
+  - FCF / debt / payout sustainability;
+  - distinguish announced future dividends from trailing/manual estimates;
+  - keep manual/estimated income as diagnostics, not auto-enabled.
+- Risk and behavior:
+  - Pump & Dump / hype detection as risk flag;
+  - avoid social-signal based auto-selection;
+  - tilt / drawdown behavior notes;
+  - falling-market mistake checklist;
+  - broker / operational risk checklist.
+- Automation / tooling:
+  - local article/archive ingestion;
+  - source reliability scoring;
+  - ticker/entity extraction;
+  - research digest JSON/MD;
+  - Telegram research digest, no send by default;
+  - candidates go to disabled/research audit only, never directly to enabled universe.
+- Non-goals:
+  - no trading signals;
+  - no investment recommendations;
+  - no auto-enable;
+  - no scraping-based financial decisions;
+  - no portfolio mutation;
+  - no config mutation.
+
+First implementation candidate:
+`research-ingest` + `research-analyze` commands that process local files/RSS/API
+sources into a read-only research digest. Output should be candidate ideas and
+risk tags only. Any instrument must still pass current official/read-only
+validation before appearing in income universe analysis.
+
+Future backlog:
+
+1. research-ingest: local ZIP/HTML/MD input, metadata extraction.
+2. research-analyze: topic classification, ticker/entity extraction, risk tags.
+3. research-digest: JSON/MD report with source reliability and candidate implications.
+4. research-to-universe bridge: only disabled/research candidates, no auto-enable.
+5. telegram research summary: optional digest, no send by default.
+
 ## Ideas inbox
 
 Use this section to append new ideas before implementing them.
