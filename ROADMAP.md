@@ -203,6 +203,18 @@ Known behavior:
 
 - if eligible universe is too small, target plan leaves some weight idle and raises diversification warnings
 - required capital depends heavily on eligible universe and conservative yield
+- allocation uses transparent cap-based equal weights; yield affects required capital and expected income, not the weights
+
+Low-yield diagnostics (read-only):
+
+- each allocation now reports `capital_share_pct`, `income_share_pct`,
+  `income_efficiency_ratio`, `yield_vs_blended_ratio` and a `low_yield_slot` flag
+- a slot is flagged `low_yield_slot` when it holds a large share of capital
+  (`capital_share_pct >= 10`) yet its conservative net yield is far below the
+  blended portfolio yield (`yield_vs_blended_ratio < 0.30`)
+- flagged slots add a Russian analytical warning to the report
+- diagnostics are warnings only: they do not change weights, do not auto-exclude
+  instruments, and are not investment advice or a recommendation
 
 ## Current strategic issue
 

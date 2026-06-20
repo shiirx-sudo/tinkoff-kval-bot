@@ -22,6 +22,13 @@ from decimal import Decimal
 # policy-бакеты, допустимые в base target по умолчанию
 BASE_BUCKETS = ("income_reliable", "income_variable")
 
+# ─── low-yield диагностика (read-only) ──────────────────────────────────────────
+# Слот считается «низкодоходным», если он занимает существенную долю капитала, но
+# его консервативная доходность сильно ниже смешанной доходности портфеля. Это
+# только аналитический флаг: веса распределения он НЕ меняет.
+LOW_YIELD_MIN_CAPITAL_SHARE_PCT = Decimal("10")
+LOW_YIELD_TO_BLENDED_RATIO = Decimal("0.30")
+
 
 def _dec(v) -> Decimal | None:
     if v in (None, ""):
@@ -118,6 +125,12 @@ class Allocation:
     expected_base_income_month_rub: Decimal = Decimal("0")
     net_yield_pct: Decimal | None = None
     reason: str = ""
+    # read-only диагностика эффективности слота (веса не меняет)
+    capital_share_pct: Decimal = Decimal("0")
+    income_share_pct: Decimal = Decimal("0")
+    income_efficiency_ratio: Decimal | None = None
+    yield_vs_blended_ratio: Decimal | None = None
+    low_yield_slot: bool = False
 
 
 @dataclass
@@ -332,7 +345,48 @@ def allocate_target(eligible: list[Candidate], env: TargetEnv
             ticker=c.ticker, target_layer="base", target_weight_pct=w,
             target_capital_rub=tcap, expected_base_income_month_rub=inc_m,
             net_yield_pct=ynet, reason="|".join(reasons)))
+
+    # read-only диагностика низкодоходных слотов; allocation math не меняется
+    warnings.extend(annotate_low_yield_diagnostics(allocations, blended * Decimal("100")))
     return allocations, required_capital, "ok", warnings
+
+
+# ─── low-yield диагностика (read-only, веса не меняет) ──────────────────────────
+
+def annotate_low_yield_diagnostics(allocations: list[Allocation],
+                                   blended_yield_pct: Decimal | None) -> list[str]:
+    """
+    Проставляет на каждом allocation метрики эффективности слота и помечает
+    низкодоходные слоты. Возвращает список user-facing предупреждений (рус.).
+
+    Это аналитика, не рекомендация: веса распределения здесь НЕ пересчитываются.
+    Деление на ноль безопасно — при нулевом доходе/доходности ratios = None.
+    """
+    blended = blended_yield_pct or Decimal("0")
+    total_income = sum((a.expected_base_income_month_rub for a in allocations), Decimal("0"))
+    warnings: list[str] = []
+    for a in allocations:
+        cap_share = a.target_weight_pct
+        a.capital_share_pct = cap_share
+        a.income_share_pct = (
+            a.expected_base_income_month_rub / total_income * Decimal("100")
+            if total_income > 0 else Decimal("0"))
+        a.income_efficiency_ratio = (
+            a.income_share_pct / cap_share if cap_share > 0 else None)
+        ynet = a.net_yield_pct or Decimal("0")
+        a.yield_vs_blended_ratio = (ynet / blended if blended > 0 else None)
+        a.low_yield_slot = bool(
+            cap_share >= LOW_YIELD_MIN_CAPITAL_SHARE_PCT
+            and a.yield_vs_blended_ratio is not None
+            and a.yield_vs_blended_ratio < LOW_YIELD_TO_BLENDED_RATIO)
+        if a.low_yield_slot:
+            warnings.append(
+                f"Низкодоходный слот: {a.ticker} занимает {cap_share:.2f}% капитала, "
+                f"но даёт лишь ~{a.income_share_pct:.2f}% ожидаемого дохода; его "
+                f"консервативная доходность {ynet:.2f}% существенно ниже смешанной "
+                f"{blended:.2f}%. Это диагностическое предупреждение, не рекомендация. "
+                f"Веса распределения не изменялись.")
+    return warnings
 
 
 # ─── current vs target ────────────────────────────────────────────────────────

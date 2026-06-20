@@ -9,11 +9,13 @@ from pathlib import Path
 
 from modules.income_engine import IncomeEnv
 from modules.target_portfolio import (
+    LOW_YIELD_TO_BLENDED_RATIO,
     Allocation,
     Candidate,
     TargetEnv,
     TargetPortfolio,
     allocate_target,
+    annotate_low_yield_diagnostics,
     build_current_vs_target,
     build_monthly_plan,
     build_new_capital_plan,
@@ -355,6 +357,110 @@ def test_build_target_portfolio_empty_universe():
         config={}, income_env=income_env, target_env=target_env)
     assert tp.target_status == "insufficient_universe"
     assert tp.target_allocation == []
+
+
+# ─── 13b. low-yield диагностика ──────────────────────────────────────────────
+
+def test_low_yield_slot_flagged_for_high_weight_low_yield():
+    # 4 eligible инструмента → equal weight 25% каждый (под cap 25%).
+    # T с доходностью ~1.4% получает много капитала, но мало дохода.
+    elig = [_cand("VTBR", "income_reliable", cons_net=11),
+            _cand("SBMM", "income_reliable", cons_net=9),
+            _cand("LQDT", "income_reliable", cons_net=10),
+            _cand("T", "income_reliable", cons_net="1.4")]
+    for c in elig:
+        classify_eligibility(c, ENV)
+    allocs, _, status, warns = allocate_target(elig, ENV)
+    assert status == "ok"
+    by = {a.ticker: a for a in allocs}
+    # allocation math не изменилась: равные веса 25%
+    for a in allocs:
+        assert a.target_weight_pct == Decimal("25")
+    # T помечен низкодоходным слотом
+    assert by["T"].low_yield_slot is True
+    assert by["T"].capital_share_pct == Decimal("25")
+    assert by["T"].yield_vs_blended_ratio is not None
+    assert by["T"].yield_vs_blended_ratio < LOW_YIELD_TO_BLENDED_RATIO
+    assert by["T"].income_share_pct < by["T"].capital_share_pct
+    # высокодоходные слоты не помечены
+    assert by["VTBR"].low_yield_slot is False
+    # warning есть и упоминает T, без order-wording / без «исключите/продайте»
+    low_warns = [w for w in warns if "Низкодоходный слот" in w]
+    assert low_warns and any("T" in w for w in low_warns)
+    joined = " ".join(low_warns).lower()
+    assert "не рекомендация" in joined
+    for w in ("купить", "продать", "исключите", "купите", "buy", "sell"):
+        assert w not in joined
+
+
+def test_no_low_yield_slot_when_yields_similar():
+    elig = [_cand("A", "income_reliable", cons_net=9),
+            _cand("B", "income_reliable", cons_net="9.5"),
+            _cand("C", "income_reliable", cons_net=10),
+            _cand("D", "income_reliable", cons_net="8.5")]
+    for c in elig:
+        classify_eligibility(c, ENV)
+    allocs, _, status, warns = allocate_target(elig, ENV)
+    assert status == "ok"
+    assert all(a.low_yield_slot is False for a in allocs)
+    assert not [w for w in warns if "Низкодоходный слот" in w]
+
+
+def test_low_yield_diagnostics_zero_income_safe():
+    # total_expected_monthly_income = 0 → ratios без падения
+    allocs = [Allocation("X", target_weight_pct=Decimal("25"),
+                         net_yield_pct=Decimal("8"),
+                         expected_base_income_month_rub=Decimal("0")),
+              Allocation("Y", target_weight_pct=Decimal("25"),
+                         net_yield_pct=Decimal("9"),
+                         expected_base_income_month_rub=Decimal("0"))]
+    warns = annotate_low_yield_diagnostics(allocs, Decimal("8.5"))
+    assert warns == []
+    for a in allocs:
+        assert a.income_share_pct == Decimal("0")
+        assert a.low_yield_slot is False
+
+
+def test_low_yield_diagnostics_zero_blended_safe():
+    # blended_yield_pct = 0 → yield_vs_blended_ratio = None, без падения
+    allocs = [Allocation("X", target_weight_pct=Decimal("25"),
+                         net_yield_pct=Decimal("1"),
+                         expected_base_income_month_rub=Decimal("100"))]
+    warns = annotate_low_yield_diagnostics(allocs, Decimal("0"))
+    assert warns == []
+    assert allocs[0].yield_vs_blended_ratio is None
+    assert allocs[0].low_yield_slot is False
+    # None blended тоже безопасно
+    annotate_low_yield_diagnostics(allocs, None)
+    assert allocs[0].yield_vs_blended_ratio is None
+
+
+def test_low_yield_diagnostics_in_reports(tmp_path):
+    import json
+
+    from reports import target_portfolio_reports as rep
+    elig = [_cand("VTBR", "income_reliable", cons_net=11),
+            _cand("SBMM", "income_reliable", cons_net=9),
+            _cand("LQDT", "income_reliable", cons_net=10),
+            _cand("T", "income_reliable", cons_net="1.4")]
+    for c in elig:
+        classify_eligibility(c, ENV)
+    allocs, req, status, warns = allocate_target(elig, ENV)
+    tp = TargetPortfolio(target_status=status, required_capital_rub=req,
+                         target_allocation=allocs, warnings=warns)
+    rep.write_target_portfolio(tp, tmp_path)
+
+    payload = json.loads((tmp_path / "target_portfolio.json").read_text(encoding="utf-8"))
+    t_row = next(a for a in payload["target_allocation"] if a["ticker"] == "T")
+    for key in ("capital_share_pct", "income_share_pct", "income_efficiency_ratio",
+                "yield_vs_blended_ratio", "low_yield_slot"):
+        assert key in t_row, key
+    assert t_row["low_yield_slot"] is True
+
+    csv_text = (tmp_path / "target_portfolio.csv").read_text(encoding="utf-8-sig")
+    assert "low_yield_slot" in csv_text.splitlines()[0]
+    md = (tmp_path / "target_portfolio.md").read_text(encoding="utf-8")
+    assert "low_yield_slot" in md and "yield_vs_blended_ratio" in md
 
 
 # ─── 14. safety scan ─────────────────────────────────────────────────────────
