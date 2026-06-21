@@ -853,6 +853,39 @@ def cmd_income_coupon_validation(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_income_floating_coupon_policy(args: argparse.Namespace) -> int:
+    from modules import floating_coupon_policy as fcp
+
+    try:
+        result = fcp.run(
+            input_json=args.input_json,
+            output_json=args.output_json,
+            output_md=args.output_md,
+        )
+    except fcp.FloatingCouponPolicyError as exc:
+        logger.error(str(exc))
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка income-floating-coupon-policy (read-only): {exc}")
+        return 1
+
+    s = result["summary"]
+    print("Income floating coupon policy — READ ONLY")
+    print("Аналитика, не рекомендация. Заявки не отправляются.")
+    print(f"  total candidates: {s['total_candidates']}")
+    print(f"  floating coupon candidates: {s['floating_coupon_candidates']}")
+    print(f"  annualization_allowed: {s['annualization_allowed_count']} | "
+          f"forecast_allowed: {s['forecast_allowed_count']} | "
+          f"auto_enable_allowed: {s['auto_enable_allowed_count']}")
+    print(f"  by_policy_status: {s['by_policy_status']}")
+    print(f"  by_readiness: {s['by_readiness']}")
+    print("  forecast_method=not_supported_yet "
+          "(ни один кандидат не включается и не прогнозируется автоматически)")
+    logger.info(f"Отчёт: {result['_output_json']}")
+    logger.info(f"Отчёт: {result['_output_md']}")
+    return 0
+
+
 def cmd_build_income_universe(args: argparse.Namespace) -> int:
     import json
     import shutil
@@ -1197,6 +1230,23 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--offline", action="store_true",
         help="Работать только по локальным отчётам, без read-only API")
 
+    p_fcp = sub.add_parser(
+        "income-floating-coupon-policy",
+        help="READ-ONLY floating-coupon policy диагностика ОФЗ-ПК кандидатов "
+             "из coupon-validation")
+    p_fcp.add_argument(
+        "--input-json", dest="input_json",
+        default="data/reports/income_coupon_validation.json",
+        help="Путь к income_coupon_validation.json (только чтение)")
+    p_fcp.add_argument(
+        "--output-json", dest="output_json",
+        default="data/reports/income_floating_coupon_policy.json",
+        help="Путь для JSON-отчёта floating-coupon policy")
+    p_fcp.add_argument(
+        "--output-md", dest="output_md",
+        default="data/reports/income_floating_coupon_policy.md",
+        help="Путь для Markdown-отчёта floating-coupon policy")
+
     p_biu = sub.add_parser(
         "build-income-universe",
         help="READ-ONLY генератор income universe из rules + T-Invest данных")
@@ -1264,6 +1314,7 @@ _HANDLERS = {
     "target-portfolio": cmd_target_portfolio,
     "income-universe-audit": cmd_income_universe_audit,
     "income-coupon-validation": cmd_income_coupon_validation,
+    "income-floating-coupon-policy": cmd_income_floating_coupon_policy,
     "build-income-universe": cmd_build_income_universe,
     "telegram-test": cmd_telegram_test,
     "telegram-summary": cmd_telegram_summary,

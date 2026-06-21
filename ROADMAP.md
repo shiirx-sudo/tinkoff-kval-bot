@@ -347,6 +347,36 @@ dividend/equity VTBR/T) больше не попадают в coupon-validation 
 - отдельный floating-coupon / future policy review для инструментов,
   провалидированных этим отчётом.
 
+### Milestone C2 — Floating coupon policy diagnostics for OFZ-ПК
+
+Status: implemented.
+
+Goal: безопасно зафиксировать, что делать с floating-coupon кандидатами (ОФЗ-ПК /
+`SU29…`) из coupon-validation, не включая их, не прогнозируя доходность как факт
+и не меняя enable logic.
+
+Work:
+
+- `modules/floating_coupon_policy.py` — read-only селектор floating-coupon
+  кандидатов из `income_coupon_validation.json` с policy-диагностикой.
+- `income-floating-coupon-policy` CLI: читает `income_coupon_validation.json`,
+  пишет `income_floating_coupon_policy.json` / `.md`.
+- `docs/income_floating_coupon_policy.md`.
+- tests `tests/test_floating_coupon_policy.py`.
+
+Гарантии: нет сети/API/order/execution/live/full-access; не меняет income policy /
+target portfolio / builder enable logic / resolver / Telegram; не пишет в
+`data/config`. Для каждого кандидата `annualization_allowed=false`,
+`forecast_allowed=false`, `auto_enable_allowed=false`,
+`forecast_method=not_supported_yet`, `policy_status=needs_floating_coupon_policy`,
+`readiness=policy_required`.
+
+Следующие кандидаты на реализацию (отдельными PR):
+
+- official reference-rate policy design (формула купона / RUONIA / ключевая ставка);
+- resolver/mapping PR для group D;
+- manual-income policy PR для group A/B.
+
 ### Milestone B — Expand eligible instruments
 
 Status: planned.
