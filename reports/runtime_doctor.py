@@ -24,9 +24,25 @@ class DoctorReport:
         return all(status == "ok" for _, status, _ in self.checks)
 
 
+def _load_dotenv_safe() -> None:
+    """Подхватывает .env для diagnostics, не перетирая уже заданные OS env.
+
+    override=False — явно заданный shell env приоритетнее .env. Если
+    python-dotenv недоступен, продолжаем diagnostics с текущим окружением,
+    не падая. Значение токена при этом нигде не печатается.
+    """
+    try:
+        from dotenv import find_dotenv, load_dotenv
+    except ImportError:
+        return
+    load_dotenv(find_dotenv(usecwd=True), override=False)
+
+
 def run_doctor() -> DoctorReport:
     """Проверяет токен, режим LIVE и доступность зависимостей."""
     rep = DoctorReport()
+
+    _load_dotenv_safe()
 
     token = (os.getenv("TINKOFF_READ_TOKEN") or os.getenv("TINKOFF_TOKEN") or "").strip()
     rep.add("token_present", bool(token),
