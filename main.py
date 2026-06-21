@@ -886,6 +886,57 @@ def cmd_income_floating_coupon_policy(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_income_resolver_mapping_diagnostics(args: argparse.Namespace) -> int:
+    from modules import resolver_mapping_diagnostics as rmd
+
+    client = None
+    offline = bool(getattr(args, "offline", False))
+    if not offline:
+        # read-only API-обогащение опционально: без токена/ошибки → offline-like
+        try:
+            from api.client import ReadOnlyClient
+            client = ReadOnlyClient()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"API недоступен ({exc}); resolver-mapping-diagnostics работает "
+                f"offline только по локальному audit-отчёту.")
+            client = None
+            offline = True
+
+    try:
+        result = rmd.run(
+            input_json=args.input_json,
+            output_json=args.output_json,
+            output_md=args.output_md,
+            offline=offline,
+            client=client,
+        )
+    except rmd.ResolverMappingError as exc:
+        logger.error(str(exc))
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            f"Ошибка income-resolver-mapping-diagnostics (read-only): {exc}")
+        return 1
+
+    s = result["summary"]
+    print("Income resolver/mapping diagnostics — READ ONLY (group D)")
+    print("Аналитика, не рекомендация. Заявки не отправляются.")
+    print(f"  mode: {result['mode']}")
+    print(f"  total_candidates: {s['total_candidates']}")
+    print(f"  unresolved: {s['unresolved_count']} | "
+          f"candidate_matches: {s['candidate_matches_found_count']} | "
+          f"ambiguous: {s['ambiguous_matches_count']} | "
+          f"no_matches: {s['no_matches_count']}")
+    print(f"  by_mapping_status: {s['by_mapping_status']}")
+    print(f"  auto_mapping_allowed: {s['auto_mapping_allowed_count']} | "
+          f"auto_enable_allowed: {s['auto_enable_allowed_count']} "
+          f"(ничего не маппится и не включается автоматически)")
+    logger.info(f"Отчёт: {result['_output_json']}")
+    logger.info(f"Отчёт: {result['_output_md']}")
+    return 0
+
+
 def cmd_build_income_universe(args: argparse.Namespace) -> int:
     import json
     import shutil
@@ -1247,6 +1298,26 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default="data/reports/income_floating_coupon_policy.md",
         help="Путь для Markdown-отчёта floating-coupon policy")
 
+    p_rmd = sub.add_parser(
+        "income-resolver-mapping-diagnostics",
+        help="READ-ONLY resolver/mapping диагностика неразрешённых income "
+             "кандидатов (audit group D); не маппит и не включает автоматически")
+    p_rmd.add_argument(
+        "--input-json", dest="input_json",
+        default="data/reports/income_universe_disabled_audit.json",
+        help="Путь к income_universe_disabled_audit.json (только чтение)")
+    p_rmd.add_argument(
+        "--output-json", dest="output_json",
+        default="data/reports/income_resolver_mapping_diagnostics.json",
+        help="Путь для JSON-отчёта resolver/mapping диагностики")
+    p_rmd.add_argument(
+        "--output-md", dest="output_md",
+        default="data/reports/income_resolver_mapping_diagnostics.md",
+        help="Путь для Markdown-отчёта resolver/mapping диагностики")
+    p_rmd.add_argument(
+        "--offline", action="store_true",
+        help="Работать только по audit-отчёту, без read-only API enrichment")
+
     p_biu = sub.add_parser(
         "build-income-universe",
         help="READ-ONLY генератор income universe из rules + T-Invest данных")
@@ -1315,6 +1386,7 @@ _HANDLERS = {
     "income-universe-audit": cmd_income_universe_audit,
     "income-coupon-validation": cmd_income_coupon_validation,
     "income-floating-coupon-policy": cmd_income_floating_coupon_policy,
+    "income-resolver-mapping-diagnostics": cmd_income_resolver_mapping_diagnostics,
     "build-income-universe": cmd_build_income_universe,
     "telegram-test": cmd_telegram_test,
     "telegram-summary": cmd_telegram_summary,
