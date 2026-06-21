@@ -71,6 +71,98 @@ def test_ofz_pk_income_unknown_still_group_c():
     assert _group(e) == "C"
 
 
+# ─── C2. bond_candidate с pending coupon → group C ────────────────────────────
+
+def test_bond_candidate_pending_coupon_group_c():
+    e = _entry("RU000A100ABC", class_code="TQCB", role=audit.ROLE_BOND,
+               policy_bucket="income_reliable",
+               notes="disabled: bond_candidate pending coupon/income validation")
+    assert _group(e) == "C"
+
+
+# ─── C3. non-coupon роли НЕ попадают в group C ────────────────────────────────
+
+def test_money_market_pending_income_validation_not_group_c():
+    # LQDT/SBMM: money_market с notes о coupon/income validation НЕ должен быть C —
+    # это не облигация, купонного календаря у фонда нет.
+    e = _entry("LQDT", class_code="TQTF", role="money_market",
+               policy_bucket="income_variable",
+               notes="disabled: money_market pending coupon/income validation; "
+                     "income_policy=income_variable; source=manual_override")
+    row = audit.audit_row(e)
+    assert row["audit_group"] != "C"
+    assert row["audit_group"] == "A"  # аудит источника дохода
+    assert row["auto_enable_allowed"] is False
+
+
+def test_money_market_income_unknown_not_group_c():
+    e = _entry("SBMM", class_code="TQTF", role="money_market",
+               policy_bucket="income_unknown", excluded_reason="income_unknown",
+               notes="disabled: income_unknown")
+    g = _group(e)
+    assert g != "C"
+    assert g == "E"  # явный income_unknown guard
+
+
+def test_dividend_pending_income_validation_not_group_c():
+    # VTBR/T: dividend_candidate с notes о coupon/income validation НЕ должен быть C.
+    e = _entry("VTBR", class_code="TQBR", role=audit.ROLE_DIVIDEND,
+               policy_bucket="income_reliable",
+               notes="disabled: dividend_candidate pending coupon/income validation; "
+                     "income_policy=income_reliable; source=api_known_future")
+    row = audit.audit_row(e)
+    assert row["audit_group"] != "C"
+    assert row["audit_group"] == "A"
+    assert row["auto_enable_allowed"] is False
+
+
+def test_dividend_income_unknown_not_group_c():
+    e = _entry("GMKN", role=audit.ROLE_DIVIDEND, policy_bucket="income_unknown",
+               excluded_reason="income_unknown")
+    g = _group(e)
+    assert g != "C"
+    assert g == "E"
+
+
+def test_share_candidate_with_income_validation_not_group_c():
+    e = _entry("XXXX", class_code="TQBR", role="share_candidate",
+               notes="pending income validation")
+    assert _group(e) != "C"
+
+
+def test_non_coupon_excluded_from_group_c_summary():
+    # Фикстура из реальных post-merge инструментов: LQDT/SBMM/VTBR/T не должны
+    # попадать в group C; в C остаются только OFZ/bond-like кандидаты.
+    report = {
+        "disabled_entries": [
+            _entry("LQDT", class_code="TQTF", role="money_market",
+                   policy_bucket="income_variable",
+                   notes="money_market pending coupon/income validation"),
+            _entry("SBMM", class_code="TQTF", role="money_market",
+                   policy_bucket="income_variable",
+                   notes="money_market pending coupon/income validation"),
+            _entry("VTBR", class_code="TQBR", role=audit.ROLE_DIVIDEND,
+                   policy_bucket="income_reliable",
+                   notes="dividend_candidate pending coupon/income validation"),
+            _entry("T", class_code="TQBR", role=audit.ROLE_DIVIDEND,
+                   policy_bucket="income_reliable",
+                   notes="dividend_candidate pending coupon/income validation"),
+            _entry("SU29009RMFS6", class_code="TQOB", role=audit.ROLE_OFZ,
+                   policy_bucket="income_reliable",
+                   notes="ofz_pk_candidate pending coupon/income validation"),
+            _entry("SU29024RMFS5", class_code="TQOB", role=audit.ROLE_OFZ,
+                   policy_bucket="income_unknown", excluded_reason="income_unknown"),
+        ]
+    }
+    res = audit.build_audit(report)
+    c_tickers = {r["ticker"] for r in res["candidates"] if r["audit_group"] == "C"}
+    assert c_tickers == {"SU29009RMFS6", "SU29024RMFS5"}
+    assert not ({"LQDT", "SBMM", "VTBR", "T"} & c_tickers)
+    assert res["summary"]["group_counts"]["C"] == 2
+    assert res["summary"]["auto_enable_allowed_count"] == 0
+    assert all(r["auto_enable_allowed"] is False for r in res["candidates"])
+
+
 # ─── D. quasi short-name unresolved → group D ─────────────────────────────────
 
 def test_quasi_unresolved_group_d():

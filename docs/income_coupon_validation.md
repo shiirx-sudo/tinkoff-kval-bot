@@ -10,7 +10,9 @@
 - читает только локальные отчёты:
   - `data/reports/income_universe_builder_report.json` (результат `build-income-universe`);
   - `data/reports/income_universe_disabled_audit.json` (результат `income-universe-audit`);
-- выбирает кандидатов **только из audit group C**;
+- выбирает кандидатов **только из audit group C** — а group C, в свою очередь,
+  содержит только bond-like (coupon-capable) кандидатов (ОФЗ/облигации); не-купонные
+  инструменты (money-market, dividend/equity) сюда не попадают;
 - классифицирует купон: `floating` / `fixed` / `unknown`;
 - определяет `coupon_validation_status` и `income_readiness`;
 - блокирует наивную annualization для floating и неполных данных
