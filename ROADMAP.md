@@ -310,6 +310,36 @@ target portfolio / builder enable logic / resolver; `auto_enable_allowed=false`
 для всех кандидатов. Следующие кандидаты на реализацию (отдельными PR):
 coupon-validation, resolver/mapping, manual-income policy.
 
+### Milestone C1 — Coupon validation report for group C
+
+Status: implemented.
+
+Goal: безопасно разобрать купонных/облигационных кандидатов из audit group C
+(coupon-validation), не включая их и не меняя enable logic.
+
+Work:
+
+- `modules/income_coupon_validation.py` — read-only классификатор купонов
+  (floating/fixed/unknown) с annualization guard.
+- `income-coupon-validation` CLI: читает `income_universe_builder_report.json` и
+  `income_universe_disabled_audit.json`, пишет `income_coupon_validation.json` /
+  `.md`. `--offline` работает только по отчётам; API-режим использует read-only
+  методы (резолв инструмента, купонный календарь, последняя цена).
+- `docs/income_coupon_validation.md`.
+- tests `tests/test_income_coupon_validation.py`.
+
+Гарантии: не отправляет/не исполняет заявки, нет live/full-access; не меняет
+income policy / target portfolio / builder enable logic / resolver; не пишет в
+`data/config`; floating и неполные данные не annualize-ятся;
+`auto_enable_allowed=false` для всех кандидатов.
+
+Следующие кандидаты на реализацию (отдельными PR):
+
+- resolver/mapping PR для group D;
+- manual-income policy PR для group A/B;
+- отдельный floating-coupon / future policy review для инструментов,
+  провалидированных этим отчётом.
+
 ### Milestone B — Expand eligible instruments
 
 Status: planned.

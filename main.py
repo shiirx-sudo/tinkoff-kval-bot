@@ -803,6 +803,56 @@ def cmd_income_universe_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_income_coupon_validation(args: argparse.Namespace) -> int:
+    from modules import income_coupon_validation as cv
+
+    client = None
+    offline = bool(getattr(args, "offline", False))
+    if not offline:
+        # read-only API-обогащение опционально: без токена/ошибки → offline-like
+        try:
+            from api.client import ReadOnlyClient
+            client = ReadOnlyClient()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"API недоступен ({exc}); coupon-validation работает offline "
+                f"только по локальным отчётам.")
+            client = None
+            offline = True
+
+    try:
+        result = cv.run(
+            builder_report_path=args.builder_report,
+            audit_report_path=args.audit_report,
+            output_json=args.output_json,
+            output_md=args.output_md,
+            offline=offline,
+            client=client,
+        )
+    except cv.CouponValidationError as exc:
+        logger.error(str(exc))
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка income-coupon-validation (read-only): {exc}")
+        return 1
+
+    s = result["summary"]
+    print("Income coupon validation — READ ONLY")
+    print("Аналитика, не рекомендация. Заявки не отправляются.")
+    print(f"  total candidates: {s['total_candidates']}")
+    print(f"  floating coupon: {s['floating_coupon_count']} | "
+          f"fixed coupon: {s['fixed_coupon_count']} | "
+          f"missing data: {s['missing_data_count']}")
+    print(f"  by_status: {s['by_status']}")
+    print(f"  by_readiness: {s['by_readiness']}")
+    print(f"  annualization_allowed: {s['annualization_allowed_count']}")
+    print(f"  auto_enable_allowed: {s['auto_enable_allowed_count']} "
+          f"(ни один кандидат не включается автоматически)")
+    logger.info(f"Отчёт: {result['_output_json']}")
+    logger.info(f"Отчёт: {result['_output_md']}")
+    return 0
+
+
 def cmd_build_income_universe(args: argparse.Namespace) -> int:
     import json
     import shutil
@@ -1124,6 +1174,29 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default="data/reports/income_universe_disabled_audit.md",
         help="Путь для Markdown-отчёта аудита")
 
+    p_icv = sub.add_parser(
+        "income-coupon-validation",
+        help="READ-ONLY coupon-validation диагностика disabled-кандидатов группы C")
+    p_icv.add_argument(
+        "--builder-report",
+        default="data/reports/income_universe_builder_report.json",
+        help="Путь к income_universe_builder_report.json (только чтение)")
+    p_icv.add_argument(
+        "--audit-report", dest="audit_report",
+        default="data/reports/income_universe_disabled_audit.json",
+        help="Путь к income_universe_disabled_audit.json (только чтение)")
+    p_icv.add_argument(
+        "--output-json", dest="output_json",
+        default="data/reports/income_coupon_validation.json",
+        help="Путь для JSON-отчёта coupon-validation")
+    p_icv.add_argument(
+        "--output-md", dest="output_md",
+        default="data/reports/income_coupon_validation.md",
+        help="Путь для Markdown-отчёта coupon-validation")
+    p_icv.add_argument(
+        "--offline", action="store_true",
+        help="Работать только по локальным отчётам, без read-only API")
+
     p_biu = sub.add_parser(
         "build-income-universe",
         help="READ-ONLY генератор income universe из rules + T-Invest данных")
@@ -1190,6 +1263,7 @@ _HANDLERS = {
     "income-source-audit": cmd_income_source_audit,
     "target-portfolio": cmd_target_portfolio,
     "income-universe-audit": cmd_income_universe_audit,
+    "income-coupon-validation": cmd_income_coupon_validation,
     "build-income-universe": cmd_build_income_universe,
     "telegram-test": cmd_telegram_test,
     "telegram-summary": cmd_telegram_summary,
