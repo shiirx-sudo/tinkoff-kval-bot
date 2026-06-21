@@ -40,16 +40,25 @@ python main.py income-universe-audit
 под несколько условий, действует приоритет:
 
 ```
-D unresolved → C coupon_validation → E explicit guards → A manual → B estimated → E keep_disabled
+D unresolved → C coupon_validation (только bond-like) → E explicit guards →
+A manual → B estimated → A non-coupon income-validation pending → E keep_disabled
 ```
 
 | Группа | Имя | Когда | Что нужно дальше |
 |---|---|---|---|
-| A | manual audit | `role=dividend_candidate`, `policy_bucket=income_manual` (напр. SBER) | manual audit / дизайн доверенного источника дохода; local rules сами по себе не меняют bucket |
+| A | manual audit | `role=dividend_candidate`, `policy_bucket=income_manual` (напр. SBER); **либо** не-купонный кандидат с невалидированным доходом (money_market/dividend «pending coupon/income validation», `income_variable`, напр. LQDT/SBMM/VTBR/T) | manual audit / дизайн доверенного источника дохода; local rules сами по себе не меняют bucket |
 | B | policy review | `policy_bucket=income_estimated` (напр. NVTK) | отдельное policy-решение |
-| C | coupon validation | `role` ∈ {`ofz_pk_candidate`, `bond_candidate`}, либо pending coupon, либо OFZ-PK/`SU29…` | валидация купонного календаря / floating coupon / annualization guard (отдельный PR) |
+| C | coupon validation | **только bond-like (coupon-capable)**: `role` ∈ {`ofz_pk_candidate`, `bond_candidate`}, роль с `bond`, `instrument_type=bond` или OFZ-PK/`SU29…`. Не-купонные роли (money_market, dividend, share, fund) сюда **не** попадают, даже если notes содержат income/coupon validation | валидация купонного календаря / floating coupon / annualization guard (отдельный PR) |
 | D | resolver/mapping | `excluded_reason=unresolved`, пустой `class_code`, либо short-name (напр. ГазКЗ-37Д) | проверенный secid/ISIN/ticker/class_code mapping (resolver/mapping PR или data cleanup) |
 | E | keep disabled | `excluded_reason` ∈ {`override_disable`, `trailing_yield_above_cap`, `income_unknown`} (GAZP/LKOH/GMKN) | оставить disabled; cap/override не менять без отдельного review |
+
+**Почему group C — только bond-like.** Coupon-validation проверяет купонный
+календарь/тип купона, а у money-market фондов и дивидендных акций купонов нет.
+Поэтому такие инструменты (LQDT, SBMM — money_market; VTBR, T — dividend/equity)
+направляются на аудит источника дохода (group A), а не в coupon-validation. Это
+держит `income-coupon-validation` чистым (только облигации/ОФЗ) и не вызывает
+`GetBondCoupons` для не-облигаций. Auto-enable при этом по-прежнему запрещён для
+всех кандидатов.
 
 ## Поля audit-строки
 

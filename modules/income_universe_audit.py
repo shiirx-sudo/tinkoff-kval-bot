@@ -151,13 +151,43 @@ def _looks_ofz(ticker: str) -> bool:
     return t.startswith("SU29") or (t.startswith("SU") and t[2:5].isdigit())
 
 
+def _is_coupon_capable(*, role: str, ticker: str, instrument_type: str = "") -> bool:
+    """True только для bond-like инструментов — кандидатов group C coupon-validation.
+
+    Coupon-capable: `ofz_pk_candidate` / `bond_candidate` / любая роль, содержащая
+    `bond` (напр. `quasi_currency_bond_candidate`), `instrument_type == "bond"`
+    (если такое поле есть), либо OFZ-PK secid (`SU29…`).
+
+    НЕ coupon-capable: `money_market`, `dividend_candidate`, share/equity, fund —
+    даже если notes/reason упоминают income/coupon validation. Их доход зависит не
+    от купонного календаря, а от аудита источника дохода, поэтому в group C они
+    попадать не должны.
+    """
+    r = (role or "").strip().lower()
+    itype = (instrument_type or "").strip().lower()
+    if r in (ROLE_OFZ, ROLE_BOND):
+        return True
+    if "bond" in r:  # bond_candidate, quasi_currency_bond_candidate, ...
+        return True
+    if itype == "bond":
+        return True
+    return _looks_ofz(ticker)
+
+
 def classify_group(entry: dict) -> str:
     """
     Возвращает группу A/B/C/D/E для disabled-кандидата.
 
     Приоритет (если подходит под несколько условий):
-        D unresolved → C coupon_validation → E explicit guards →
-        A manual → B estimated → E keep_disabled.
+        D unresolved → C coupon_validation (ТОЛЬКО bond-like) → E explicit guards →
+        A manual → B estimated → A non-coupon income-validation pending →
+        E keep_disabled.
+
+    Важно: group C (coupon validation) применяется ТОЛЬКО к coupon-capable
+    (bond-like) кандидатам (см. `_is_coupon_capable`). Не-купонные роли
+    (money_market, dividend, share, fund) в C не попадают, даже если notes/reason
+    содержат income/coupon validation — их доход валидируется аудитом источника
+    дохода (group A), а не купонным календарём.
     """
     ticker = str(entry.get("ticker") or "").strip()
     class_code = str(entry.get("class_code") or "").strip()
@@ -165,6 +195,7 @@ def classify_group(entry: dict) -> str:
     bucket = str(entry.get("policy_bucket") or "").strip()
     reason = str(entry.get("excluded_reason") or "").strip()
     notes = str(entry.get("notes") or "").lower()
+    instrument_type = str(entry.get("instrument_type") or "").strip()
 
     is_unresolved = (
         reason == "unresolved"
@@ -172,16 +203,19 @@ def classify_group(entry: dict) -> str:
         or "class_code unresolved" in notes
         or "short-name" in notes
     )
-    is_coupon = (
-        role in (ROLE_OFZ, ROLE_BOND)
-        or "pending coupon" in notes
-        or "coupon/income validation" in notes
-        or "income validation" in notes
-        or _looks_ofz(ticker)
-    )
+    is_coupon = _is_coupon_capable(
+        role=role, ticker=ticker, instrument_type=instrument_type)
     is_guard = reason in ("override_disable", "trailing_yield_above_cap", "income_unknown")
     is_manual = role == ROLE_DIVIDEND and bucket == "income_manual"
     is_estimated = bucket == "income_estimated"
+    # Не-купонный кандидат с невалидированным доходом (money_market/dividend
+    # «pending coupon/income validation», bucket income_variable): нужен аудит
+    # источника дохода (manual audit, group A), не coupon-валидация.
+    needs_income_audit = (
+        "income validation" in notes
+        or "pending coupon" in notes
+        or bucket == "income_variable"
+    )
 
     if is_unresolved:
         return "D"
@@ -193,6 +227,8 @@ def classify_group(entry: dict) -> str:
         return "A"
     if is_estimated:
         return "B"
+    if needs_income_audit:
+        return "A"
     return "E"
 
 
