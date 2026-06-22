@@ -746,9 +746,70 @@ Guarantees:
   `live_orders_service_used=false`, `full_access_live_token_used=false`,
   `portfolio_mutated=false`, `config_mutated=false`, `manual_confirmation_required=true`.
 
+Next: F3.1 verified sandbox transport wrapper (этот PR), затем F4 tiny live —
+отдельный PR и отдельное одобрение.
+
+### Milestone F3.1 — Verified sandbox transport wrapper
+
+Status: implemented after this PR (sandbox contract verified).
+
+Command: `income-sandbox-execute-preview --sandbox-transport verified-rest …`.
+
+F3 (PR #23) дал scaffold/dry-run с adapter-seam `SandboxOrderAdapter` и
+`UnconfiguredSandboxAdapter` (реальная отправка намеренно не работала — контракт не
+угадывали). F3.1 подключает **проверенный** sandbox-транспорт только после
+подтверждения официального контракта.
+
+Подтверждённый источник контракта (не догадка):
+
+- транспорт — тот же gRPC-over-REST pattern, что у read-only
+  `brokers/tinkoff/rest_client.py` (source 3: существующий проверенный REST pattern);
+- сервис/методы/поля — официальные proto RussianInvestments/investAPI (source 2):
+  `sandbox.proto` (`SandboxService.PostSandboxOrder` /
+  `GetSandboxOrderState`, пакет `tinkoff.public.invest.api.contract.v1`) и
+  `orders.proto` (`PostOrderRequest`/`PostOrderResponse`/`OrderDirection`/
+  `OrderType`/`GetOrderStateRequest`).
+
+Work:
+
+- `modules/tinvest_sandbox_transport.py` — `VerifiedSandboxRestAdapter`
+  (BUY/LIMIT only; MARKET/не-BUY → hard fail; токен только в Authorization header,
+  не печатается; payload по подтверждённым полям `quantity`=лоты/`price`/`direction`/
+  `accountId`/`orderType`/`orderId`/`instrumentId`); read-only `GetSandboxOrderState`.
+- `modules/income_sandbox_execution.py` — `--sandbox-transport` resolver
+  (`unconfigured`/`verified-rest`/`verified-sdk`), блокировки
+  `SANDBOX_TRANSPORT_UNCONFIGURED` / `SANDBOX_SDK_NOT_AVAILABLE`, отчётные поля
+  `sandbox_transport`, `sandbox_order_request_sanitized`,
+  `sandbox_order_response_sanitized`, `sandbox_order_state_sanitized`, guards
+  `token_printed=false`/`live_token_used=false`.
+- `income-sandbox-execute-preview` CLI: новый флаг `--sandbox-transport`.
+- tests `tests/test_tinvest_sandbox_transport.py` + дополнения в
+  `tests/test_income_sandbox_execution.py` (только моки; реальный sandbox API в
+  тестах/smoke/CI не вызывается).
+- docs `docs/income_sandbox_execution.md`.
+
+Guarantees: sandbox only; live-заявки запрещены; no live order-endpoint, no live
+`Orders`-сервис, no full-access live token; sandbox-токен только из
+`TINKOFF_SANDBOX_TOKEN`, никогда не печатается; no live account; no autonomous
+execution; no market order; no portfolio/config mutation; dry-run по умолчанию; один
+запуск = максимум одна sandbox-заявка; реальная sandbox-отправка только вручную
+(`--sandbox-transport verified-rest` + `--send-sandbox` + sandbox account id + точная
+фраза `--confirm`), отдельной командой после PR.
+
 Next: F4 tiny live manual-confirmed order — отдельный PR и отдельное одобрение.
 
 ### Milestone F4 — Tiny live manual-confirmed order
+
+Status: blocked — отдельный PR и отдельное одобрение. Допускается только после
+того, как все условия выполнены по порядку:
+
+1. F2 preview существует (implemented);
+2. F3 dry-run проходит (implemented);
+3. F3.1 verified sandbox transport существует (implemented этим PR);
+4. хотя бы одна реальная sandbox-заявка прогнана **вручную** и зафиксирована в
+   отчёте (manual one-shot, не CI);
+5. одобрен отдельный F4 PR.
+
 
 Goal:
 

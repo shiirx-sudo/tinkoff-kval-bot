@@ -89,20 +89,28 @@ class _FakeClient:
 class _FakeSandboxAdapter(ise.SandboxOrderAdapter):
     """Sandbox-only адаптер для тестов: фиксирует запрос, возвращает sandbox-ответ."""
 
-    def __init__(self):
+    def __init__(self, *, state_raises=False):
         self.received = None
+        self.post_calls = 0
         self.state_calls = 0
+        self._state_raises = state_raises
 
     def post_sandbox_order(self, *, request, account_id, token):
+        self.post_calls += 1
         self.received = {"request": request, "account_id": account_id, "token": token}
         return {
             "orderId": "sb-order-1",
             "executionReportStatus": "EXECUTION_REPORT_STATUS_FILL",
+            "lotsRequested": 3,
+            "lotsExecuted": 3,
+            "totalOrderAmount": {"currency": "rub", "units": "826", "nano": 500000000},
             "secretToken": "SHOULD-NOT-LEAK",
         }
 
     def get_sandbox_order_state(self, *, account_id, order_id, token):
         self.state_calls += 1
+        if self._state_raises:
+            raise RuntimeError("sandbox state read failed")
         return {"order_state": "EXECUTION_REPORT_STATUS_FILL"}
 
 
@@ -384,3 +392,124 @@ def test_decimal_to_quotation_roundtrip():
     q = ise.decimal_to_quotation(Decimal("275.5"))
     assert q["units"] == "275"
     assert q["nano"] == 500000000
+
+
+# ─── F3.1 verified sandbox transport (оркестрация) ────────────────────────────
+
+def test_send_with_unconfigured_transport_blocks_with_code(tmp_path):
+    # без адаптера и transport=unconfigured → SANDBOX_TRANSPORT_UNCONFIGURED
+    rep = _run(tmp_path, [_preview_row()], client=None,
+               sandbox_transport=ise.TRANSPORT_UNCONFIGURED, **_SEND_KW)
+    assert rep["guards"]["sandbox_order_sent"] is False
+    assert rep["sandbox_transport"]["selected_transport"] == "unconfigured"
+    assert rep["sandbox_transport"]["configured"] is False
+    assert any("SANDBOX_TRANSPORT_UNCONFIGURED" in e for e in rep["errors"])
+    assert rep["_exit_code"] == 1
+
+
+def test_send_with_verified_sdk_unavailable_blocks(tmp_path):
+    rep = _run(tmp_path, [_preview_row()], client=None,
+               sandbox_transport=ise.TRANSPORT_VERIFIED_SDK, **_SEND_KW)
+    assert rep["guards"]["sandbox_order_sent"] is False
+    assert rep["sandbox_transport"]["selected_transport"] == "verified-sdk"
+    assert rep["sandbox_transport"]["configured"] is False
+    assert any("SANDBOX_SDK_NOT_AVAILABLE" in e for e in rep["errors"])
+    assert rep["_exit_code"] == 1
+
+
+def test_verified_rest_transport_metadata_in_report(tmp_path):
+    # dry-run, но transport=verified-rest → metadata configured + contract_source
+    rep = _run(tmp_path, [_preview_row()],
+               sandbox_transport=ise.TRANSPORT_VERIFIED_REST)
+    tr = rep["sandbox_transport"]
+    assert tr["selected_transport"] == "verified-rest"
+    assert tr["configured"] is True
+    assert tr["adapter_class"] == "VerifiedSandboxRestAdapter"
+    assert tr["contract_source"]
+    assert "proto" in tr["contract_source"]
+
+
+def test_send_exact_confirm_sends_exactly_one_order(tmp_path):
+    adapter = _FakeSandboxAdapter()
+    rep = _run(tmp_path, [_preview_row()], adapter=adapter, client=None, **_SEND_KW)
+    assert adapter.post_calls == 1
+    assert rep["guards"]["sandbox_order_sent"] is True
+
+
+def test_price_deviation_above_cap_adapter_not_called(tmp_path):
+    adapter = _FakeSandboxAdapter()
+    rep = _run(tmp_path, [_preview_row()], adapter=adapter,
+               client=_FakeClient("400"), max_price_deviation_bps=100, **_SEND_KW)
+    assert adapter.post_calls == 0
+    assert adapter.received is None
+    assert rep["guards"]["sandbox_order_sent"] is False
+
+
+def test_wrong_confirm_adapter_not_called(tmp_path):
+    adapter = _FakeSandboxAdapter()
+    kw = dict(_SEND_KW)
+    kw["confirm"] = "CONFIRM SANDBOX BUY T 99 LOTS MAX 1000 RUB"
+    _run(tmp_path, [_preview_row()], adapter=adapter, client=None, **kw)
+    assert adapter.post_calls == 0
+
+
+def test_missing_account_adapter_not_called(tmp_path):
+    adapter = _FakeSandboxAdapter()
+    kw = dict(_SEND_KW)
+    kw["sandbox_account_id"] = None
+    _run(tmp_path, [_preview_row()], adapter=adapter, client=None, **kw)
+    assert adapter.post_calls == 0
+
+
+def test_adapter_receives_sandbox_account_and_token_not_live(tmp_path, monkeypatch):
+    # live-токен в окружении не должен использоваться адаптером
+    monkeypatch.setenv("TINKOFF_TOKEN", "LIVE-SHOULD-NOT-BE-USED")
+    monkeypatch.setenv("TINKOFF_READ_TOKEN", "READ-SHOULD-NOT-BE-USED")
+    adapter = _FakeSandboxAdapter()
+    _run(tmp_path, [_preview_row()], adapter=adapter, client=None, **_SEND_KW)
+    assert adapter.received["account_id"] == "sandbox-acc-007"
+    assert adapter.received["token"] == "sbx-secret-token"
+    assert adapter.received["token"] != "LIVE-SHOULD-NOT-BE-USED"
+    assert adapter.received["token"] != "READ-SHOULD-NOT-BE-USED"
+    inst = adapter.received["request"]["instrument"]
+    assert inst["figi"] == "FIGI-T"
+
+
+def test_adapter_receives_all_prepared_safe_params(tmp_path):
+    adapter = _FakeSandboxAdapter()
+    _run(tmp_path, [_preview_row()], adapter=adapter, client=None, **_SEND_KW)
+    req = adapter.received["request"]
+    assert req["instrument"]["ticker"] == "T"
+    assert req["lots"] == 3
+    assert req["limit_price"] == Decimal("275.5")
+    assert req["client_order_id"].startswith("sandbox-f3-T-")
+    assert req["sandbox_account_id_masked"] != "sandbox-acc-007"
+
+
+def test_state_read_failure_becomes_warning_no_retry_loop(tmp_path):
+    adapter = _FakeSandboxAdapter(state_raises=True)
+    rep = _run(tmp_path, [_preview_row()], adapter=adapter, client=None, **_SEND_KW)
+    assert rep["guards"]["sandbox_order_sent"] is True
+    assert adapter.state_calls == 1  # одна попытка, без retry-loop
+    assert any("состояние sandbox-заявки" in w for w in rep["warnings"])
+    assert rep["sandbox_order_state_sanitized"] is None
+
+
+def test_sanitized_response_fields_present_and_no_secret(tmp_path):
+    rep = _run(tmp_path, [_preview_row()], adapter=_FakeSandboxAdapter(),
+               client=None, **_SEND_KW)
+    resp = rep["sandbox_order_response_sanitized"]
+    assert resp["sandbox_order_id"] == "sb-order-1"
+    assert resp["lots_requested"] == 3
+    assert resp["lots_executed"] == 3
+    assert resp["total_order_amount"]["currency"] == "rub"
+    assert rep["sandbox_order_state_sanitized"]["execution_report_status"]
+    blob = json.dumps(rep, default=str)
+    assert "SHOULD-NOT-LEAK" not in blob
+
+
+def test_dry_run_sandbox_transport_present(tmp_path):
+    rep = _run(tmp_path, [_preview_row()])
+    assert rep["sandbox_transport"] is not None
+    assert rep["guards"]["token_printed"] is False
+    assert rep["guards"]["live_token_used"] is False
