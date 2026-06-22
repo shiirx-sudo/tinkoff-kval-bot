@@ -600,7 +600,20 @@ through controlled manual-confirmed stages."
 
 ### Milestone F1 — Owner decision report
 
-Status: implemented after this PR.
+Status: implemented + policy refinement after this PR.
+
+Policy refinement note: resolved `income_reliable` candidates (например, `T`,
+`VTBR`) больше не зависают в `NEEDS_POLICY` только из-за disabled-статуса (builder
+`--enable-mode disabled` → audit group A / `current_enabled=false`). Если у них нет
+реальных hard/mapping/floating/income-policy/data блокеров, они становятся
+`BUY_CANDIDATE`/`WAIT` для owner review. Это **не** исполнение и по-прежнему
+требует F2 order preview / no-send и ручного подтверждения перед любой сделкой.
+`income_variable` money-market (`LQDT`) сознательно остаётся `NEEDS_POLICY`
+(`variable_income_policy_required`), пока нет отдельной variable-income policy.
+Добавлены диагностические поля `policy_unblock_reason`, `hard_blockers[]`,
+`soft_warnings[]`, `owner_review_eligible`, `why_not_buy_candidate`,
+`why_not_wait` и markdown-секция «Resolved reliable candidates unblocked for owner
+review».
 
 Command: `income-owner-decision-report`.
 
