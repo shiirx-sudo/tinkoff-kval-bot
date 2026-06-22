@@ -937,6 +937,51 @@ def cmd_income_resolver_mapping_diagnostics(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_income_owner_decision_report(args: argparse.Namespace) -> int:
+    from modules import income_owner_decision_report as odr
+
+    try:
+        result = odr.run(
+            universe_report=args.universe_report,
+            audit_json=args.audit_json,
+            coupon_json=args.coupon_json,
+            floating_policy_json=args.floating_policy_json,
+            resolver_json=args.resolver_json,
+            target_json=args.target_json,
+            output_json=args.output_json,
+            output_md=args.output_md,
+            max_candidates=args.max_candidates,
+            min_score=args.min_score,
+            offline=bool(getattr(args, "offline", False)),
+        )
+    except odr.OwnerDecisionError as exc:
+        logger.error(str(exc))
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка income-owner-decision-report (read-only): {exc}")
+        return 1
+
+    s = result["summary"]
+    print("Owner income decision report — READ ONLY (F1)")
+    print("Owner-only decision support. Заявки не отправляются.")
+    print("order_send_allowed=false | auto_execution_allowed=false | "
+          "execution_requires_manual_confirmation=true")
+    if result.get("missing_inputs"):
+        print(f"  missing_inputs: {result['missing_inputs']} "
+              "(деградация безопасна; см. smoke chain в md)")
+    print(f"  total_candidates: {s['total_candidates']}")
+    print(f"  BUY_CANDIDATE: {s['buy_candidate_count']} | WAIT: {s['wait_count']} | "
+          f"NEEDS_POLICY: {s['needs_policy_count']} | "
+          f"NEEDS_MAPPING: {s['needs_mapping_count']} | "
+          f"NEEDS_DATA: {s['needs_data_count']} | BLOCKED: {s['blocked_count']}")
+    print(f"  by_proposed_action: {s['by_proposed_action']}")
+    print("  Следующий этап перед сделкой: order preview / no-send (F2); "
+          "ручное подтверждение обязательно.")
+    logger.info(f"Отчёт: {result['_output_json']}")
+    logger.info(f"Отчёт: {result['_output_md']}")
+    return 0
+
+
 def cmd_build_income_universe(args: argparse.Namespace) -> int:
     import json
     import shutil
@@ -1318,6 +1363,53 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--offline", action="store_true",
         help="Работать только по audit-отчёту, без read-only API enrichment")
 
+    p_odr = sub.add_parser(
+        "income-owner-decision-report",
+        help="READ-ONLY owner-only decision report (F1): объединяет income "
+             "universe, audit, coupon, floating policy, resolver и target context; "
+             "заявки не отправляются")
+    p_odr.add_argument(
+        "--universe-report", dest="universe_report",
+        default="data/reports/income_universe_builder_report.json",
+        help="Путь к income_universe_builder_report.json (только чтение)")
+    p_odr.add_argument(
+        "--audit-json", dest="audit_json",
+        default="data/reports/income_universe_disabled_audit.json",
+        help="Путь к income_universe_disabled_audit.json (только чтение)")
+    p_odr.add_argument(
+        "--coupon-json", dest="coupon_json",
+        default="data/reports/income_coupon_validation.json",
+        help="Путь к income_coupon_validation.json (только чтение)")
+    p_odr.add_argument(
+        "--floating-policy-json", dest="floating_policy_json",
+        default="data/reports/income_floating_coupon_policy.json",
+        help="Путь к income_floating_coupon_policy.json (только чтение)")
+    p_odr.add_argument(
+        "--resolver-json", dest="resolver_json",
+        default="data/reports/income_resolver_mapping_diagnostics.json",
+        help="Путь к income_resolver_mapping_diagnostics.json (только чтение)")
+    p_odr.add_argument(
+        "--target-json", dest="target_json",
+        default="data/reports/target_portfolio.json",
+        help="Путь к target_portfolio.json (опционально, только чтение)")
+    p_odr.add_argument(
+        "--output-json", dest="output_json",
+        default="data/reports/income_owner_decision_report.json",
+        help="Путь для JSON-отчёта owner decision report")
+    p_odr.add_argument(
+        "--output-md", dest="output_md",
+        default="data/reports/income_owner_decision_report.md",
+        help="Путь для Markdown-отчёта owner decision report")
+    p_odr.add_argument(
+        "--max-candidates", dest="max_candidates", type=int, default=30,
+        help="Максимум кандидатов в отчёте (по умолчанию 30)")
+    p_odr.add_argument(
+        "--min-score", dest="min_score", type=int, default=None,
+        help="Опциональный фильтр: исключить кандидатов со score < min-score")
+    p_odr.add_argument(
+        "--offline", action="store_true",
+        help="Только локальные отчёты (по умолчанию и так без сети)")
+
     p_biu = sub.add_parser(
         "build-income-universe",
         help="READ-ONLY генератор income universe из rules + T-Invest данных")
@@ -1387,6 +1479,7 @@ _HANDLERS = {
     "income-coupon-validation": cmd_income_coupon_validation,
     "income-floating-coupon-policy": cmd_income_floating_coupon_policy,
     "income-resolver-mapping-diagnostics": cmd_income_resolver_mapping_diagnostics,
+    "income-owner-decision-report": cmd_income_owner_decision_report,
     "build-income-universe": cmd_build_income_universe,
     "telegram-test": cmd_telegram_test,
     "telegram-summary": cmd_telegram_summary,
