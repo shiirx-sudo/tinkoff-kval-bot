@@ -600,6 +600,22 @@ through controlled manual-confirmed stages."
 
 ### Milestone F1 — Owner decision report
 
+Status: implemented after this PR.
+
+Command: `income-owner-decision-report`.
+
+Outputs: `data/reports/income_owner_decision_report.json` /
+`income_owner_decision_report.md`.
+
+Work:
+
+- `modules/income_owner_decision_report.py` — read-only объединение income
+  universe builder, disabled audit, coupon validation, floating-coupon policy,
+  resolver/mapping diagnostics и опционального target portfolio context;
+- прозрачный deterministic scoring (без ML) + `score_components`;
+- `docs/income_owner_decision_report.md`;
+- tests `tests/test_income_owner_decision_report.py`.
+
 Goal:
 
 - combine income universe, coupon validation, floating-coupon policy, resolver
@@ -611,10 +627,22 @@ Goal:
   - `BLOCKED`
   - `NEEDS_MAPPING`
   - `NEEDS_POLICY`
+  - `NEEDS_DATA`
 - no orders;
+- no order preview (это уже F2);
 - no full-access token;
-- no portfolio mutation;
-- `execution_requires_manual_confirmation=true`.
+- no portfolio mutation, no config mutation;
+- `execution_requires_manual_confirmation=true`, `order_preview_required=true`,
+  `order_send_allowed=false`, `auto_execution_allowed=false` для каждого
+  кандидата.
+
+Guarantees: missing входные отчёты не роняют команду (`missing_inputs` +
+безопасная деградация в `NEEDS_DATA`); отсутствие любого источника кандидатов —
+понятная ошибка с подсказкой про smoke chain. `proposed_action` — owner-only
+proposed action (candidate for owner review), не приказ на сделку и не публичная
+инвестиционная рекомендация.
+
+Next: F2 order preview / no-send.
 
 ### Milestone F2 — Order preview, no send
 
