@@ -1086,6 +1086,8 @@ def cmd_income_sandbox_execute_preview(args: argparse.Namespace) -> int:
             price_mode=price_mode,
             client_order_id_prefix=args.client_order_id_prefix,
             sandbox_account_id=getattr(args, "sandbox_account_id", None),
+            sandbox_transport=getattr(args, "sandbox_transport",
+                                      ise.TRANSPORT_UNCONFIGURED),
             client=client,
         )
     except ise.SandboxExecutionError as exc:
@@ -1096,9 +1098,12 @@ def cmd_income_sandbox_execute_preview(args: argparse.Namespace) -> int:
         return 1
 
     g = result["guards"]
+    tr = result.get("sandbox_transport") or {}
     print("Income sandbox execute preview — F3 (sandbox manual-confirmed execution)")
     print("LIVE-заявки запрещены. Sandbox only. full-access live токен не используется.")
     print(f"  mode: {result['mode']} | ticker: {result['ticker']}")
+    print(f"  sandbox_transport: {tr.get('selected_transport')} "
+          f"(configured: {tr.get('configured')})")
     print(f"  required_confirmation_phrase: {result['required_confirmation_phrase']}")
     print(f"  confirmation_matched: {result['confirmation_matched']}")
     print(f"  sandbox_order_sent: {g['sandbox_order_sent']} | dry_run: {g['dry_run']}")
@@ -1603,6 +1608,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p_ise.add_argument(
         "--sandbox-account-id", dest="sandbox_account_id", default=None,
         help="Sandbox account id (обязателен для --send-sandbox; не для dry-run)")
+    p_ise.add_argument(
+        "--sandbox-transport", dest="sandbox_transport",
+        choices=("unconfigured", "verified-rest", "verified-sdk"),
+        default="unconfigured",
+        help="Sandbox-транспорт: unconfigured (по умолчанию, отправка заблокирована), "
+             "verified-rest (проверенный sandbox REST), verified-sdk (SDK, если "
+             "установлен)")
     p_ise.add_argument(
         "--max-order-rub", dest="max_order_rub", type=int, default=1000,
         help="Жёсткий cap размера заявки в рублях (по умолчанию 1000)")

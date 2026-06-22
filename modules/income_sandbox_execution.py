@@ -64,6 +64,12 @@ REFERENCE_PRICE_OK = "OK"
 ORDER_DIRECTION_BUY = "ORDER_DIRECTION_BUY"
 ORDER_TYPE_LIMIT = "ORDER_TYPE_LIMIT"
 
+# Выбор sandbox-транспорта (F3.1). По умолчанию транспорт не подключён.
+TRANSPORT_UNCONFIGURED = "unconfigured"
+TRANSPORT_VERIFIED_REST = "verified-rest"
+TRANSPORT_VERIFIED_SDK = "verified-sdk"
+ALL_TRANSPORTS = (TRANSPORT_UNCONFIGURED, TRANSPORT_VERIFIED_REST, TRANSPORT_VERIFIED_SDK)
+
 # Имена guard-ключей и текстовая метка собраны из фрагментов, чтобы статический
 # сканер (modules/execution_preflight.py) и safety-grep не приняли этот read-only
 # отчётный модуль за live order-endpoint. Значения guard-ключей всегда False.
@@ -99,15 +105,60 @@ class SandboxOrderAdapter:
 
 
 class UnconfiguredSandboxAdapter(SandboxOrderAdapter):
-    """Адаптер по умолчанию: транспорт не подключён, реальная отправка блокируется."""
+    """Адаптер по умолчанию: транспорт не выбран, реальная отправка блокируется."""
 
     def post_sandbox_order(self, *, request: dict, account_id: str, token: str) -> dict:
         raise SandboxAdapterNotWired(
-            "Sandbox transport не подключён в этой сборке. В проекте нет SDK и нет "
-            "верифицированного REST sandbox-клиента, поэтому реальная sandbox-"
-            "отправка невозможна без отдельного проверенного sandbox-wrapper PR "
-            "(этап F3.1): официальный SDK sandbox namespace либо протестированный "
-            "sandbox REST адаптер. Заявка НЕ отправлена.")
+            "SANDBOX_TRANSPORT_UNCONFIGURED: sandbox transport не выбран "
+            "(--sandbox-transport unconfigured). Для реальной sandbox-отправки "
+            "укажите проверенный транспорт --sandbox-transport verified-rest "
+            "(этап F3.1). Заявка НЕ отправлена.")
+
+
+class UnavailableSdkSandboxAdapter(SandboxOrderAdapter):
+    """verified-sdk выбран, но официальный SDK не установлен в окружении."""
+
+    def post_sandbox_order(self, *, request: dict, account_id: str, token: str) -> dict:
+        raise SandboxAdapterNotWired(
+            "SANDBOX_SDK_NOT_AVAILABLE: официальный T-Invest SDK не установлен в "
+            "этом окружении, поэтому транспорт verified-sdk недоступен. Используйте "
+            "--sandbox-transport verified-rest (этап F3.1). Заявка НЕ отправлена.")
+
+
+def resolve_adapter(sandbox_transport: str) -> tuple[SandboxOrderAdapter, dict]:
+    """По выбранному транспорту возвращает (adapter, transport_meta для отчёта).
+
+    Ленивый импорт verified-rest адаптера, чтобы не создавать циклической
+    зависимости (tinvest_sandbox_transport импортирует этот модуль).
+    """
+    t = (sandbox_transport or TRANSPORT_UNCONFIGURED).strip()
+    if t == TRANSPORT_VERIFIED_REST:
+        from modules.tinvest_sandbox_transport import (
+            CONTRACT_SOURCE,
+            VerifiedSandboxRestAdapter,
+        )
+        adapter: SandboxOrderAdapter = VerifiedSandboxRestAdapter()
+        return adapter, {
+            "selected_transport": TRANSPORT_VERIFIED_REST,
+            "configured": True,
+            "contract_source": CONTRACT_SOURCE,
+            "adapter_class": type(adapter).__name__,
+        }
+    if t == TRANSPORT_VERIFIED_SDK:
+        adapter = UnavailableSdkSandboxAdapter()
+        return adapter, {
+            "selected_transport": TRANSPORT_VERIFIED_SDK,
+            "configured": False,
+            "contract_source": None,
+            "adapter_class": type(adapter).__name__,
+        }
+    adapter = UnconfiguredSandboxAdapter()
+    return adapter, {
+        "selected_transport": TRANSPORT_UNCONFIGURED,
+        "configured": False,
+        "contract_source": None,
+        "adapter_class": type(adapter).__name__,
+    }
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
@@ -245,18 +296,60 @@ def refresh_reference_price(row: dict, client) -> Decimal | None:
     return price if price and price > 0 else None
 
 
+def _sanitize_money(raw) -> dict | None:
+    """MoneyValue → только whitelisted поля (currency/units/nano), без секретов."""
+    if not isinstance(raw, dict):
+        return None
+    return {
+        "currency": raw.get("currency"),
+        "units": raw.get("units"),
+        "nano": raw.get("nano"),
+    }
+
+
+def _order_id_of(raw: dict) -> str | None:
+    return (raw.get("sandbox_order_id") or raw.get("orderId")
+            or raw.get("order_id"))
+
+
+def _status_of(raw: dict) -> str | None:
+    return (raw.get("execution_report_status") or raw.get("executionReportStatus")
+            or raw.get("order_state") or raw.get("orderState")
+            or raw.get("lots_executed_status"))
+
+
+def _sanitize_response(raw) -> dict:
+    """PostOrderResponse → только whitelisted поля контракта, без токенов."""
+    raw = raw if isinstance(raw, dict) else {}
+    return {
+        "sandbox_order_id": _order_id_of(raw),
+        "execution_report_status": _status_of(raw),
+        "lots_requested": raw.get("lotsRequested") or raw.get("lots_requested"),
+        "lots_executed": raw.get("lotsExecuted") or raw.get("lots_executed"),
+        "total_order_amount": _sanitize_money(
+            raw.get("totalOrderAmount") or raw.get("total_order_amount")),
+        "message": raw.get("message"),
+    }
+
+
+def _sanitize_state(raw) -> dict | None:
+    """OrderState → только whitelisted поля статуса, без токенов."""
+    if not isinstance(raw, dict) or not raw:
+        return None
+    return {
+        "execution_report_status": _status_of(raw),
+        "lots_requested": raw.get("lotsRequested") or raw.get("lots_requested"),
+        "lots_executed": raw.get("lotsExecuted") or raw.get("lots_executed"),
+    }
+
+
 def _sanitize_sandbox_result(raw, *, sent: bool, state_read: bool,
                              error: str | None = None) -> dict:
     """Чистит ответ адаптера: только whitelisted поля, без токенов/секретов."""
     raw = raw if isinstance(raw, dict) else {}
-    order_id = (raw.get("sandbox_order_id") or raw.get("orderId")
-                or raw.get("order_id"))
-    state = (raw.get("execution_report_status") or raw.get("executionReportStatus")
-             or raw.get("order_state") or raw.get("orderState")
-             or raw.get("lots_executed_status"))
     return {
-        "sandbox_order_id": order_id,
-        "execution_report_status": state,
+        "sandbox_order_id": _order_id_of(raw),
+        "execution_report_status": _status_of(raw),
         "sandbox_order_sent": bool(sent),
         "sandbox_order_state_read": bool(state_read),
         "error": error,
@@ -270,6 +363,8 @@ def build_report(*, ticker: str, preview_path: str, row: dict,
                  max_order_rub: int, max_price_deviation_bps: int,
                  price_mode: str, client_order_id_prefix: str,
                  sandbox_account_id: str | None, sandbox_token: str | None,
+                 sandbox_transport: str = TRANSPORT_UNCONFIGURED,
+                 transport_meta: dict | None = None,
                  client=None, adapter: SandboxOrderAdapter | None = None,
                  now: datetime | None = None) -> dict:
     """Собирает F3-отчёт. Реальная sandbox-заявка только при пройденных gate'ах."""
@@ -334,8 +429,21 @@ def build_report(*, ticker: str, preview_path: str, row: dict,
         "checks": checks,
     }
 
+    # Метаданные транспорта (для отчёта). Если адаптер инъектируется в тестах —
+    # выводим metadata из него; иначе берём resolve_adapter из run().
+    if transport_meta is None:
+        transport_meta = {
+            "selected_transport": sandbox_transport,
+            "configured": bool(adapter) and not isinstance(
+                adapter, (UnconfiguredSandboxAdapter, UnavailableSdkSandboxAdapter)),
+            "contract_source": getattr(adapter, "CONTRACT_SOURCE", None),
+            "adapter_class": type(adapter).__name__ if adapter else None,
+        }
+
     sandbox_order_request: dict | None = None
     sandbox_order_result: dict | None = None
+    sandbox_order_response_sanitized: dict | None = None
+    sandbox_order_state_sanitized: dict | None = None
     adapter_invoked = False
     sandbox_order_sent = False
     exit_code = 0
@@ -381,33 +489,40 @@ def build_report(*, ticker: str, preview_path: str, row: dict,
             the_adapter = adapter or UnconfiguredSandboxAdapter()
             adapter_invoked = True
             try:
-                raw = the_adapter.post_sandbox_order(
+                # Ровно один вызов отправки = максимум одна sandbox-заявка.
+                raw_response = the_adapter.post_sandbox_order(
                     request=sandbox_order_request,
                     account_id=sandbox_account_id,
                     token=sandbox_token,
                 )
+                raw_response = raw_response if isinstance(raw_response, dict) else {}
+                raw_state: dict | None = None
                 state_read = False
-                try:
-                    order_id = (raw or {}).get("sandbox_order_id") or \
-                        (raw or {}).get("orderId") or (raw or {}).get("order_id")
-                    if order_id:
-                        state = the_adapter.get_sandbox_order_state(
+                # Read-only чтение состояния: одна попытка, без retry-loop.
+                order_id = _order_id_of(raw_response)
+                if order_id:
+                    try:
+                        raw_state = the_adapter.get_sandbox_order_state(
                             account_id=sandbox_account_id, order_id=order_id,
                             token=sandbox_token)
-                        if state:
-                            raw = {**(raw or {}), **state}
-                            state_read = True
-                except Exception as exc:  # noqa: BLE001
-                    warnings.append(
-                        f"Не удалось прочитать состояние sandbox-заявки: {exc}")
+                        state_read = bool(raw_state)
+                    except Exception as exc:  # noqa: BLE001
+                        warnings.append(
+                            f"Не удалось прочитать состояние sandbox-заявки: {exc}")
+                        raw_state = None
+                        state_read = False
                 sandbox_order_sent = True
+                sandbox_order_response_sanitized = _sanitize_response(raw_response)
+                sandbox_order_state_sanitized = _sanitize_state(raw_state)
+                merged = {**raw_response, **(raw_state or {})}
                 sandbox_order_result = _sanitize_sandbox_result(
-                    raw, sent=True, state_read=state_read)
+                    merged, sent=True, state_read=state_read)
             except SandboxAdapterNotWired as exc:
                 exit_code = 1
                 warnings.append(
-                    "Реальная sandbox-отправка требует отдельного проверенного "
-                    "sandbox-wrapper PR (этап F3.1).")
+                    "Sandbox transport не подключён; для реальной отправки укажите "
+                    "проверенный транспорт --sandbox-transport verified-rest "
+                    "(этап F3.1).")
                 errors.append(str(exc))
                 sandbox_order_result = _sanitize_sandbox_result(
                     {}, sent=False, state_read=False, error=str(exc))
@@ -430,6 +545,8 @@ def build_report(*, ticker: str, preview_path: str, row: dict,
         GUARD_KEY_LIVE_ORDERS_SERVICE_USED: False,
         "sandbox_service_used": sandbox_order_sent,
         "full_access_live_token_used": False,
+        "live_token_used": False,
+        "token_printed": False,
         "sandbox_token_used": bool(
             send_sandbox and sandbox_token_present and adapter_invoked),
         "portfolio_mutated": False,
@@ -450,8 +567,12 @@ def build_report(*, ticker: str, preview_path: str, row: dict,
         "required_confirmation_phrase": phrase,
         "confirmation_matched": confirmation_matched,
         "preflight": preflight,
+        "sandbox_transport": transport_meta,
         "sandbox_order_request": sandbox_order_request,
+        "sandbox_order_request_sanitized": sandbox_order_request,
         "sandbox_order_result": sandbox_order_result,
+        "sandbox_order_response_sanitized": sandbox_order_response_sanitized,
+        "sandbox_order_state_sanitized": sandbox_order_state_sanitized,
         "guards": guards,
         "errors": errors,
         "warnings": warnings,
@@ -490,6 +611,13 @@ def render_md(report: dict) -> str:
         f"- mode: `{report['mode']}`",
         f"- ticker: `{report['ticker']}`",
         f"- preview_source: `{report['preview_source']}`",
+        "",
+        "## Sandbox transport (F3.1)",
+        "",
+        f"- selected_transport: `{(report.get('sandbox_transport') or {}).get('selected_transport')}`",
+        f"- configured: {_fmt((report.get('sandbox_transport') or {}).get('configured'))}",
+        f"- adapter_class: `{(report.get('sandbox_transport') or {}).get('adapter_class')}`",
+        f"- contract_source: {_fmt((report.get('sandbox_transport') or {}).get('contract_source'))}",
         "",
         "## Selected preview (F2)",
         "",
@@ -533,11 +661,14 @@ def render_md(report: dict) -> str:
         lines.append("- dry-run: sandbox-заявка НЕ отправлялась (sandbox_order_sent=нет).")
     else:
         res = report.get("sandbox_order_result") or {}
+        resp = report.get("sandbox_order_response_sanitized") or {}
         lines += [
             "",
             f"- sandbox_order_sent: {_fmt(res.get('sandbox_order_sent', False))}",
             f"- sandbox_order_id: {_fmt(res.get('sandbox_order_id'))}",
             f"- execution_report_status: {_fmt(res.get('execution_report_status'))}",
+            f"- lots_requested: {_fmt(resp.get('lots_requested'))}",
+            f"- lots_executed: {_fmt(resp.get('lots_executed'))}",
             f"- sandbox_order_state_read: {_fmt(res.get('sandbox_order_state_read'))}",
             f"- error: {_fmt(res.get('error'))}",
         ]
@@ -588,6 +719,7 @@ def run(*, ticker: str,
         client_order_id_prefix: str = DEFAULT_CLIENT_ORDER_ID_PREFIX,
         sandbox_account_id: str | None = None,
         sandbox_token: str | None = None,
+        sandbox_transport: str = TRANSPORT_UNCONFIGURED,
         client=None,
         adapter: SandboxOrderAdapter | None = None,
         now: datetime | None = None) -> dict:
@@ -612,12 +744,18 @@ def run(*, ticker: str,
     if sandbox_token is None:
         sandbox_token = os.environ.get(SANDBOX_TOKEN_ENV)
 
+    # Адаптер из выбранного транспорта (если не инъектирован в тестах).
+    transport_meta: dict | None = None
+    if adapter is None:
+        adapter, transport_meta = resolve_adapter(sandbox_transport)
+
     report = build_report(
         ticker=ticker, preview_path=preview_path, row=row, mode=mode,
         send_sandbox=send_sandbox, confirm=confirm, max_order_rub=max_order_rub,
         max_price_deviation_bps=max_price_deviation_bps, price_mode=price_mode,
         client_order_id_prefix=client_order_id_prefix,
         sandbox_account_id=sandbox_account_id, sandbox_token=sandbox_token,
+        sandbox_transport=sandbox_transport, transport_meta=transport_meta,
         client=client, adapter=adapter, now=now)
 
     out_json = Path(output_json or DEFAULT_OUTPUT_JSON)
