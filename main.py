@@ -982,6 +982,78 @@ def cmd_income_owner_decision_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_income_order_preview(args: argparse.Namespace) -> int:
+    from modules import income_order_preview as iop
+
+    price_mode = iop.PRICE_MODE_OFFLINE if getattr(args, "offline", False) \
+        else getattr(args, "price_mode", iop.PRICE_MODE_AUTO)
+
+    client = None
+    if price_mode != iop.PRICE_MODE_OFFLINE:
+        # read-only API опционально: без токена/ошибки → offline-like NEEDS_PRICE
+        try:
+            from api.client import ReadOnlyClient
+            client = ReadOnlyClient()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"API недоступен ({exc}); income-order-preview работает offline "
+                f"только по F1 decision report (NEEDS_PRICE при отсутствии цены).")
+            client = None
+            if price_mode == iop.PRICE_MODE_AUTO:
+                price_mode = iop.PRICE_MODE_OFFLINE
+
+    # безопасная fee model: только из настроек (read-only), если задана в .env
+    commission_bps = None
+    try:
+        from config.settings import settings
+        commission_bps = settings.commission_bps
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"settings.commission_bps недоступен ({exc}); комиссия UNAVAILABLE.")
+
+    try:
+        result = iop.run(
+            decision_json=args.decision_json,
+            output_json=args.output_json,
+            output_md=args.output_md,
+            candidate_action=args.candidate_action,
+            tickers=getattr(args, "ticker", None),
+            max_candidates=args.max_candidates,
+            max_order_rub=args.max_order_rub,
+            min_lots=args.min_lots,
+            max_lots=args.max_lots,
+            price_mode=price_mode,
+            commission_bps=commission_bps,
+            client=client,
+        )
+    except iop.OrderPreviewError as exc:
+        logger.error(str(exc))
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка income-order-preview (read-only): {exc}")
+        return 1
+
+    s = result["summary"]
+    print("Income order preview — READ ONLY (F2 order preview / no-send)")
+    print(f"Заявки не отправляются. {iop.ORDERS_SERVICE_LABEL} не используется. "
+          "full-access token не используется.")
+    print("order_send_allowed=false | auto_execution_allowed=false | "
+          "manual confirmation required")
+    print(f"  mode: {result['mode']}")
+    print(f"  total_decision_candidates: {s['total_decision_candidates']} | "
+          f"selected: {s['selected_candidates']}")
+    print(f"  PREVIEW_READY: {s['preview_ready_count']} | "
+          f"NEEDS_PRICE: {s['needs_price_count']} | "
+          f"BLOCKED: {s['blocked_count']}")
+    print(f"  order_send_allowed_count: {s['order_send_allowed_count']} | "
+          f"auto_execution_allowed_count: {s['auto_execution_allowed_count']} | "
+          f"orders_service_used: {s['orders_service_used']}")
+    print(f"  Следующий этап перед сделкой: {iop.NEXT_STAGE}; "
+          "ручное подтверждение обязательно.")
+    logger.info(f"Отчёт: {result['_output_json']}")
+    logger.info(f"Отчёт: {result['_output_md']}")
+    return 0 if s["selected_candidates"] > 0 else 1
+
+
 def cmd_build_income_universe(args: argparse.Namespace) -> int:
     import json
     import shutil
@@ -1410,6 +1482,49 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--offline", action="store_true",
         help="Только локальные отчёты (по умолчанию и так без сети)")
 
+    p_iop = sub.add_parser(
+        "income-order-preview",
+        help="READ-ONLY F2 order preview / no-send для BUY_CANDIDATE из owner "
+             "decision report; заявки не отправляются, orders-service не вызывается")
+    p_iop.add_argument(
+        "--decision-json", dest="decision_json",
+        default="data/reports/income_owner_decision_report.json",
+        help="Путь к income_owner_decision_report.json (только чтение)")
+    p_iop.add_argument(
+        "--output-json", dest="output_json",
+        default="data/reports/income_order_preview.json",
+        help="Путь для JSON-отчёта order preview")
+    p_iop.add_argument(
+        "--output-md", dest="output_md",
+        default="data/reports/income_order_preview.md",
+        help="Путь для Markdown-отчёта order preview")
+    p_iop.add_argument(
+        "--candidate-action", dest="candidate_action", default="BUY_CANDIDATE",
+        help="proposed_action из F1 для preview (по умолчанию BUY_CANDIDATE)")
+    p_iop.add_argument(
+        "--ticker", dest="ticker", action="append", default=None,
+        help="Опциональный фильтр по тикеру (повторяемый: --ticker T --ticker VTBR)")
+    p_iop.add_argument(
+        "--max-candidates", dest="max_candidates", type=int, default=5,
+        help="Максимум кандидатов в preview (по умолчанию 5)")
+    p_iop.add_argument(
+        "--max-order-rub", dest="max_order_rub", type=int, default=1000,
+        help="Preview cap размера превью в рублях (НЕ лимит реальной заявки)")
+    p_iop.add_argument(
+        "--min-lots", dest="min_lots", type=int, default=1,
+        help="Минимальное число лотов в preview (по умолчанию 1)")
+    p_iop.add_argument(
+        "--max-lots", dest="max_lots", type=int, default=None,
+        help="Опциональный максимум лотов в preview")
+    p_iop.add_argument(
+        "--price-mode", dest="price_mode",
+        choices=("auto", "offline", "readonly-api"), default="auto",
+        help="Источник цены: auto (read-only API, fallback offline), offline, "
+             "readonly-api")
+    p_iop.add_argument(
+        "--offline", action="store_true",
+        help="Ярлык для --price-mode offline (только локальный decision report)")
+
     p_biu = sub.add_parser(
         "build-income-universe",
         help="READ-ONLY генератор income universe из rules + T-Invest данных")
@@ -1480,6 +1595,7 @@ _HANDLERS = {
     "income-floating-coupon-policy": cmd_income_floating_coupon_policy,
     "income-resolver-mapping-diagnostics": cmd_income_resolver_mapping_diagnostics,
     "income-owner-decision-report": cmd_income_owner_decision_report,
+    "income-order-preview": cmd_income_order_preview,
     "build-income-universe": cmd_build_income_universe,
     "telegram-test": cmd_telegram_test,
     "telegram-summary": cmd_telegram_summary,
