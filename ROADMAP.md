@@ -659,12 +659,50 @@ Next: F2 order preview / no-send.
 
 ### Milestone F2 — Order preview, no send
 
-Goal:
+Status: implemented after this PR.
+
+Command: `income-order-preview`.
+
+Outputs: `data/reports/income_order_preview.json` /
+`data/reports/income_order_preview.md`.
+
+Work:
+
+- `modules/income_order_preview.py` — read-only построение order preview по
+  `BUY_CANDIDATE` из F1 `income_owner_decision_report.json`; расчёт лотов,
+  количества, reference price, estimated notional/commission/НКД (если данные
+  безопасно доступны), cash impact, risk flags;
+- `income-order-preview` CLI с `--decision-json`, `--output-json`/`--output-md`,
+  `--candidate-action`, повторяемым `--ticker`, `--max-candidates`,
+  `--max-order-rub` (preview cap, не лимит заявки), `--min-lots`/`--max-lots`,
+  `--price-mode auto|offline|readonly-api` / `--offline`;
+- `docs/income_order_preview.md`;
+- tests `tests/test_income_order_preview.py`.
+
+Guarantees:
+
+- no orders (заявки не отправляются);
+- no orders-service calls; `postOrder`/`cancelOrder` не вызываются;
+- no full-access token (только read-only методы);
+- no portfolio/config mutation; запись только в `data/reports/`;
+- no live/sandbox execution, no autonomous trading, no market order;
+- для каждого preview и в guards: `order_send_allowed=false`,
+  `auto_execution_allowed=false`, `full_access_token_used=false`,
+  `orders_service_used=false`, `manual_confirmation_required=true`;
+- цена никогда не выдумывается: нет read-only цены/данных →
+  `NEEDS_PRICE`/`PRICE_UNAVAILABLE`, lot_size недоступен → `BLOCKED`
+  (`LOT_SIZE_UNAVAILABLE`), min lot > cap → `BLOCKED` (`MIN_LOT_EXCEEDS_CAP`);
+- небезопасный F1-источник (`order_send_allowed != false`) → hard fail;
+- manual confirmation required before F3.
+
+Next: F3 sandbox manual-confirmed execution.
+
+Goal (original):
 
 - calculate lots, price, estimated amount, commission/fees if available, NKD for
   bonds if available, cash impact, risk flags;
 - do not send orders;
-- no OrdersService calls;
+- no orders-service calls;
 - no full-access token required;
 - output preview only.
 
