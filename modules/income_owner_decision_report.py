@@ -256,45 +256,189 @@ def compute_score(state: dict) -> tuple[int, dict]:
     return score, comp
 
 
+# ─── policy-классификация (pure, явные именованные предикаты) ──────────────────
+#
+# Ключевой инвариант F1-рефайнмента: `current_enabled=false` (builder запущен в
+# `--enable-mode disabled`) и связанная с этим audit-группа A (manual_audit) — это
+# СОСТОЯНИЕ universe, а НЕ policy-блокер. Сам по себе disabled-статус НЕ должен
+# делать resolved income_reliable кандидата ни NEEDS_POLICY, ни BLOCKED. Реальная
+# необходимость policy review определяется ниже явными предикатами.
+
+def is_resolved_identity(state: dict) -> bool:
+    """Есть проверенный идентификатор (class_code) и инструмент не «не разрешён».
+
+    Не resolved, если: нет class_code; resolver mapping unresolved/ambiguous;
+    audit group D (resolver/mapping); excluded_reason=="unresolved"; купон помечен
+    как unresolved_instrument.
+    """
+    if not state.get("class_code"):
+        return False
+    if state.get("audit_group") == "D":
+        return False
+    if state.get("resolver_mapping_status") in RESOLVER_UNRESOLVED:
+        return False
+    if state.get("excluded_reason") == "unresolved":
+        return False
+    if state.get("coupon_status") == COUPON_UNRESOLVED:
+        return False
+    return True
+
+
+def needs_mapping(state: dict) -> bool:
+    """Кандидат не разрешён (resolver/mapping) → NEEDS_MAPPING."""
+    return not is_resolved_identity(state)
+
+
+def compute_hard_blockers(state: dict) -> list[str]:
+    """Список реальных hard blocker'ов (→ BLOCKED). Disabled-статус сюда НЕ входит."""
+    blockers: list[str] = []
+    excluded_reason = state.get("excluded_reason") or ""
+    if excluded_reason in HARD_BLOCK_REASONS:
+        blockers.append(excluded_reason)
+    bucket = state.get("policy_bucket") or ""
+    if bucket in EXCLUDED_BUCKETS:
+        blockers.append("policy_excluded_bucket")
+    if bucket in UNKNOWN_BUCKETS:
+        blockers.append("income_unknown_bucket")
+    if state.get("audit_group") == "E":
+        blockers.append("keep_disabled")
+    return blockers
+
+
+def has_hard_blocker(state: dict) -> bool:
+    """True, если есть хотя бы один реальный hard blocker."""
+    return bool(state.get("hard_blockers")
+                if "hard_blockers" in state else compute_hard_blockers(state))
+
+
+def compute_soft_warnings(state: dict) -> list[str]:
+    """Non-hard risk warnings (например, soft state_control_risk) → влияют на WAIT.
+
+    Soft warning не блокирует кандидата и не делает его NEEDS_POLICY; он лишь не
+    даёт форсировать BUY_CANDIDATE (кандидат остаётся WAIT для ручного review).
+    """
+    hard = set(state.get("hard_blockers") or [])
+    warnings: list[str] = []
+    for flag in state.get("risk_flags_raw") or []:
+        flag = str(flag or "").strip()
+        if flag and flag not in hard and flag not in warnings:
+            warnings.append(flag)
+    return warnings
+
+
+def needs_floating_policy(state: dict) -> bool:
+    """ОФЗ-ПК / плавающий купон без утверждённой формулы → NEEDS_POLICY."""
+    return bool(
+        state.get("floating_policy_status") == FLOATING_POLICY_REQUIRED
+        or state.get("coupon_type") == "floating"
+        or state.get("coupon_status") == COUPON_FLOATING
+    )
+
+
+def needs_income_policy(state: dict) -> tuple[bool, str]:
+    """Нужна именно policy review дохода (не mapping/floating/data). Возвращает (bool, reason).
+
+    ВАЖНО: audit_group=="A" (manual_audit) сам по себе НЕ триггерит policy review —
+    это состояние disabled-universe, а не policy-блокер для resolved income_reliable.
+    Реальные триггеры: estimated/manual bucket, variable income money-market,
+    группа B (estimated policy), coupon future-policy / unknown coupon.
+    """
+    bucket = state.get("policy_bucket") or ""
+    if bucket in POLICY_REVIEW_BUCKETS:
+        return True, "manual/estimated income policy"
+    if bucket == "income_variable" and state.get("role") == ROLE_MONEY_MARKET:
+        return True, "variable_income_policy_required"
+    if state.get("audit_group") == "B":
+        return True, "estimated income policy review"
+    coupon_status = state.get("coupon_status")
+    if (state.get("audit_group") == "C"
+            and coupon_status in (COUPON_FIXED, COUPON_SCHEDULE)):
+        return True, "coupon future-policy review"
+    if state.get("coupon_type") == "unknown" and state.get("is_coupon_role"):
+        return True, "coupon type unknown"
+    return False, ""
+
+
+def needs_income_data(state: dict) -> tuple[bool, str]:
+    """Не хватает данных для решения (купонный календарь / income-метрики)."""
+    if (state.get("audit_group") == "C"
+            and state.get("coupon_status") in COUPON_DATA_MISSING):
+        return True, "нет купонного календаря/частоты/цены"
+    if not state.get("income_data_present"):
+        return True, "нет income/yield данных"
+    return False, ""
+
+
+def is_income_ready_for_owner_review(state: dict) -> bool:
+    """resolved income-ready кандидат без mapping/hard/floating/policy/data блокеров.
+
+    Такой кандидат owner_review_eligible: он становится BUY_CANDIDATE/WAIT, а не
+    зависает в NEEDS_POLICY только из-за disabled-статуса.
+    """
+    if not is_resolved_identity(state):
+        return False
+    if has_hard_blocker(state):
+        return False
+    if needs_floating_policy(state):
+        return False
+    if needs_income_policy(state)[0]:
+        return False
+    if needs_income_data(state)[0]:
+        return False
+    return True
+
+
 # ─── proposed_action (deterministic) ──────────────────────────────────────────
 
 def decide_action(state: dict, score: int) -> tuple[str, str]:
     """Возвращает (proposed_action, proposed_action_reason).
 
     Приоритет (от наиболее блокирующего): NEEDS_MAPPING → BLOCKED →
-    NEEDS_POLICY → NEEDS_DATA → BUY_CANDIDATE/WAIT (по score). Это owner-only
-    proposed action для ручного review, не приказ на сделку.
+    NEEDS_POLICY (floating → income) → NEEDS_DATA → BUY_CANDIDATE/WAIT (по score
+    и soft warnings). Это owner-only proposed action для ручного review, не приказ
+    на сделку.
+
+    Инвариант: disabled-статус (current_enabled=false / audit group A) НЕ влияет на
+    решение — resolved income_reliable без реальных блокеров доходит до
+    BUY_CANDIDATE/WAIT, а не зависает в NEEDS_POLICY.
     """
     # NEEDS_MAPPING: не разрешён инструмент (group D / resolver / нет class_code)
-    if state.get("unresolved_mapping"):
+    if needs_mapping(state):
         return (ACTION_NEEDS_MAPPING,
                 "Инструмент не разрешён (resolver/mapping): нет проверенного "
                 "secid/ISIN/ticker/class_code. Нужен ручной mapping review.")
 
     # BLOCKED: явный hard blocker (policy/cap/override/excluded/hard risk)
-    if state.get("hard_blocked"):
+    if has_hard_blocker(state):
         return (ACTION_BLOCKED,
                 f"Hard blocker: {state.get('block_reason') or 'excluded/keep_disabled'}. "
                 "Оставить disabled; менять только отдельным review.")
 
-    # NEEDS_POLICY: floating coupon / unknown coupon / manual/estimated policy
-    if state.get("floating_policy_required"):
+    # NEEDS_POLICY: floating coupon / unknown coupon / manual/estimated/variable policy
+    if needs_floating_policy(state):
         return (ACTION_NEEDS_POLICY,
                 "Floating coupon (ОФЗ-ПК): нет утверждённой floating-coupon policy; "
                 "доход нельзя annualize-ить как факт.")
     if state.get("needs_policy"):
+        reason = state.get("policy_reason") or "income policy"
+        if reason == "variable_income_policy_required":
+            return (ACTION_NEEDS_POLICY,
+                    "Variable income / money market: нет утверждённой variable-income "
+                    "policy; доход нельзя annualize-ить как факт без отдельного review.")
         return (ACTION_NEEDS_POLICY,
-                f"Требуется policy review: {state.get('policy_reason') or 'income policy'}.")
+                f"Требуется policy review: {reason}.")
 
     # NEEDS_DATA: не хватает данных для решения
     if state.get("needs_data"):
         return (ACTION_NEEDS_DATA,
                 f"Не хватает данных для решения: {state.get('data_reason') or 'missing inputs'}.")
 
-    # resolved & income-ready → BUY_CANDIDATE (по score) или WAIT
-    if state.get("hard_risk"):
+    # resolved & income-ready (owner_review_eligible) → WAIT при soft risk, иначе по score
+    if state.get("soft_warnings"):
         return (ACTION_WAIT,
-                "Есть risk flag: оставить на ручной review владельца, не BUY_CANDIDATE.")
+                f"Resolved income-ready кандидат, но есть soft risk warning(s): "
+                f"{', '.join(state['soft_warnings'])}. Оставить на ручной review "
+                "владельца, не форсировать BUY_CANDIDATE.")
     if score >= BUY_SCORE_THRESHOLD:
         return (ACTION_BUY_CANDIDATE,
                 f"Resolved income-ready кандидат, score={score} ≥ {BUY_SCORE_THRESHOLD}. "
@@ -357,54 +501,16 @@ def _merge_state(ticker: str, *, builder: dict, audit: dict, coupon: dict,
     net_yield = tg.get("net_yield_pct")
     estimated_yield = cv.get("estimated_gross_yield_pct")
 
-    # ── derived booleans ──
-    unresolved = (
-        not class_code
-        or excluded_reason == "unresolved"
-        or audit_group == "D"
-        or resolver_status in RESOLVER_UNRESOLVED
-        or coupon_status == COUPON_UNRESOLVED
-    )
-    resolved = not unresolved
+    # soft risk flags из входных отчётов (например, soft state_control_risk):
+    # это НЕ hard blocker, а warning, который не даёт форсировать BUY_CANDIDATE.
+    risk_flags_raw: list[str] = []
+    for src in (be, au):
+        rf = src.get("risk_flags")
+        if isinstance(rf, list):
+            risk_flags_raw += [str(x).strip() for x in rf if str(x or "").strip()]
 
     is_coupon_role = role in (ROLE_BOND, ROLE_OFZ) or "bond" in role.lower()
-    floating_required = (
-        floating_policy_status == FLOATING_POLICY_REQUIRED
-        or coupon_type == "floating"
-        or coupon_status == COUPON_FLOATING
-    )
 
-    # hard blocker: явный keep_disabled / excluded policy / hard risk reason
-    block_reason = ""
-    hard_blocked = False
-    if excluded_reason in HARD_BLOCK_REASONS:
-        hard_blocked, block_reason = True, excluded_reason
-    elif policy_bucket in EXCLUDED_BUCKETS:
-        hard_blocked, block_reason = True, "policy_excluded_bucket"
-    elif policy_bucket in UNKNOWN_BUCKETS:
-        hard_blocked, block_reason = True, "income_unknown_bucket"
-    elif audit_group == "E":
-        hard_blocked, block_reason = True, "keep_disabled"
-
-    # needs policy: estimated/manual bucket, group A/B, или валидируемый купон
-    needs_policy = False
-    policy_reason = ""
-    if not hard_blocked and resolved:
-        if policy_bucket in POLICY_REVIEW_BUCKETS or audit_group in ("A", "B"):
-            needs_policy, policy_reason = True, "manual/estimated income policy"
-        elif audit_group == "C" and coupon_status in (COUPON_FIXED, COUPON_SCHEDULE):
-            needs_policy, policy_reason = True, "coupon future-policy review"
-        elif coupon_type == "unknown" and is_coupon_role:
-            needs_policy, policy_reason = True, "coupon type unknown"
-
-    # needs data: coupon-капабельный, но нет купонных данных
-    needs_data = False
-    data_reason = ""
-    missing_income_data = False
-    if not hard_blocked and resolved and not needs_policy and not floating_required:
-        if audit_group == "C" and coupon_status in COUPON_DATA_MISSING:
-            needs_data, data_reason = True, "нет купонного календаря/частоты/цены"
-        # enabled, но вообще нет income-метрик
     income_data_present = bool(
         conservative_yield is not None or net_yield is not None
         or estimated_yield is not None
@@ -412,17 +518,45 @@ def _merge_state(ticker: str, *, builder: dict, audit: dict, coupon: dict,
         or policy_bucket in CONSERVATIVE_BUCKETS
         or policy_bucket in POLICY_REVIEW_BUCKETS
     )
-    if not income_data_present:
-        missing_income_data = True
-        if not (needs_data or needs_policy or floating_required):
-            needs_data = needs_data or resolved
-            data_reason = data_reason or "нет income/yield данных"
 
-    # risk flags
-    risk_flags: list[str] = []
-    if excluded_reason == "state_control_risk":
-        risk_flags.append("state_control_risk")
-    hard_risk = any(f in HARD_RISK_FLAGS for f in risk_flags)
+    # промежуточное наблюдаемое состояние для именованных предикатов (pure)
+    st = {
+        "ticker": str(ticker),
+        "class_code": class_code,
+        "role": role,
+        "is_coupon_role": is_coupon_role,
+        "policy_bucket": policy_bucket,
+        "excluded_reason": excluded_reason,
+        "audit_group": audit_group,
+        "coupon_status": coupon_status,
+        "coupon_type": coupon_type,
+        "resolver_mapping_status": resolver_status,
+        "floating_policy_status": floating_policy_status,
+        "income_data_present": income_data_present,
+        "risk_flags_raw": risk_flags_raw,
+    }
+
+    # ── derived через явные именованные предикаты ──
+    resolved = is_resolved_identity(st)
+    unresolved = not resolved
+    hard_blockers = compute_hard_blockers(st)
+    st["hard_blockers"] = hard_blockers
+    hard_blocked = bool(hard_blockers)
+    block_reason = hard_blockers[0] if hard_blockers else ""
+    soft_warnings = compute_soft_warnings(st)
+    floating_required = needs_floating_policy(st)
+
+    # needs policy / data считаем только для resolved & не-hard кандидатов
+    needs_policy, policy_reason = (False, "")
+    needs_data, data_reason = (False, "")
+    if resolved and not hard_blocked:
+        if not floating_required:
+            needs_policy, policy_reason = needs_income_policy(st)
+        if not floating_required and not needs_policy:
+            needs_data, data_reason = needs_income_data(st)
+
+    missing_income_data = not income_data_present
+    owner_review_eligible = is_income_ready_for_owner_review(st)
 
     # missing_data (per-candidate список недостающих полей)
     missing_data: list[str] = []
@@ -442,6 +576,22 @@ def _merge_state(ticker: str, *, builder: dict, audit: dict, coupon: dict,
         policy_bucket in EXCLUDED_BUCKETS or policy_bucket in UNKNOWN_BUCKETS
         or excluded_reason in HARD_BLOCK_REASONS or audit_group == "E"
     )
+
+    # policy_unblock_reason: почему resolved income-ready кандидат НЕ NEEDS_POLICY,
+    # хотя builder/audit пометили его disabled (manual_audit / current_enabled=false).
+    policy_unblock_reason = None
+    if owner_review_eligible and (enabled is False or audit_group == "A"):
+        policy_unblock_reason = (
+            "resolved income-ready identity, нет hard blocker / mapping / floating / "
+            "income policy / data gap; current_enabled=false и audit group A "
+            "(manual_audit) — это состояние disabled-universe (builder "
+            "--enable-mode disabled), а не policy-блокер. Разблокирован для owner review "
+            "(всё ещё требуется F2 order preview и ручное подтверждение)."
+        )
+
+    # для отображения: hard risk reasons + soft warnings
+    display_risk_flags = list(soft_warnings) + [
+        b for b in hard_blockers if b in HARD_RISK_FLAGS]
 
     return {
         "ticker": str(ticker),
@@ -468,7 +618,9 @@ def _merge_state(ticker: str, *, builder: dict, audit: dict, coupon: dict,
         "estimated_yield": estimated_yield,
         "target_weight_pct": tg.get("target_weight_pct"),
         "target_underweight": bool(tg.get("underweight")),
-        "risk_flags": risk_flags,
+        "risk_flags": display_risk_flags,
+        "hard_blockers": hard_blockers,
+        "soft_warnings": soft_warnings,
         "missing_data": missing_data,
         # derived booleans для score/decision
         "resolved": resolved,
@@ -484,15 +636,48 @@ def _merge_state(ticker: str, *, builder: dict, audit: dict, coupon: dict,
         "missing_income_data": missing_income_data,
         "known_future_income": known_future_income,
         "excluded_or_unknown_policy": excluded_or_unknown,
-        "risk_flag_count": len(risk_flags),
-        "hard_risk": hard_risk,
+        "risk_flag_count": len(soft_warnings),
+        "owner_review_eligible": owner_review_eligible,
+        "policy_unblock_reason": policy_unblock_reason,
     }
+
+
+def _why_not(action: str, state: dict, score: int) -> tuple[str | None, str | None]:
+    """Диагностика: (why_not_buy_candidate, why_not_wait). None, если статус совпал."""
+    block = None
+    if action == ACTION_NEEDS_MAPPING:
+        block = "не разрешён инструмент (resolver/mapping)"
+    elif action == ACTION_BLOCKED:
+        block = f"hard blocker: {', '.join(state.get('hard_blockers') or ['excluded'])}"
+    elif action == ACTION_NEEDS_POLICY:
+        block = ("floating-coupon policy"
+                 if state.get("floating_policy_required")
+                 else f"policy review: {state.get('policy_reason') or 'income policy'}")
+    elif action == ACTION_NEEDS_DATA:
+        block = f"не хватает данных: {state.get('data_reason') or 'missing inputs'}"
+
+    if action == ACTION_BUY_CANDIDATE:
+        why_not_buy = None
+        why_not_wait = (f"score={score} ≥ {BUY_SCORE_THRESHOLD} и нет soft risk "
+                        "warnings — выше порога WAIT.")
+    elif action == ACTION_WAIT:
+        if state.get("soft_warnings"):
+            why_not_buy = ("soft risk warning(s): "
+                           f"{', '.join(state['soft_warnings'])}")
+        else:
+            why_not_buy = f"score={score} < {BUY_SCORE_THRESHOLD}"
+        why_not_wait = None
+    else:
+        why_not_buy = block
+        why_not_wait = block
+    return why_not_buy, why_not_wait
 
 
 def build_candidate_row(state: dict) -> dict:
     """Строит одну owner-only decision-строку. Guard-флаги жёстко зафиксированы."""
     score, components = compute_score(state)
     action, reason = decide_action(state, score)
+    why_not_buy, why_not_wait = _why_not(action, state, score)
     return {
         "ticker": state["ticker"],
         "figi": state["figi"] or None,
@@ -516,11 +701,17 @@ def build_candidate_row(state: dict) -> dict:
         "net_yield_pct": state["net_yield_pct"],
         "target_weight_pct": state["target_weight_pct"],
         "risk_flags": list(state["risk_flags"]),
+        "hard_blockers": list(state["hard_blockers"]),
+        "soft_warnings": list(state["soft_warnings"]),
         "missing_data": list(state["missing_data"]),
+        "owner_review_eligible": bool(state["owner_review_eligible"]),
+        "policy_unblock_reason": state["policy_unblock_reason"],
         "score": score,
         "score_components": components,
         "proposed_action": action,
         "proposed_action_reason": reason,
+        "why_not_buy_candidate": why_not_buy,
+        "why_not_wait": why_not_wait,
         "next_required_step": _next_step(action),
         # ── жёсткие guard-флаги F1 (одинаковы для каждой строки) ──
         "execution_requires_manual_confirmation": True,
@@ -657,6 +848,10 @@ def _build_summary(rows: list[dict]) -> dict:
         "needs_mapping_count": _count(ACTION_NEEDS_MAPPING),
         "needs_policy_count": _count(ACTION_NEEDS_POLICY),
         "needs_data_count": _count(ACTION_NEEDS_DATA),
+        "owner_review_eligible_count": sum(
+            1 for r in rows if r.get("owner_review_eligible")),
+        "policy_unblocked_count": sum(
+            1 for r in rows if r.get("policy_unblock_reason")),
         "order_send_allowed_count": 0,
         "auto_execution_allowed_count": 0,
         "execution_requires_manual_confirmation_count": total,
@@ -754,6 +949,8 @@ def render_md(report: dict) -> str:
         f"- NEEDS_MAPPING: {s['needs_mapping_count']}",
         f"- NEEDS_DATA: {s['needs_data_count']}",
         f"- BLOCKED: {s['blocked_count']}",
+        f"- owner_review_eligible_count: {s.get('owner_review_eligible_count', 0)}",
+        f"- policy_unblocked_count: {s.get('policy_unblocked_count', 0)}",
         f"- order_send_allowed_count: {s['order_send_allowed_count']}",
         f"- auto_execution_allowed_count: {s['auto_execution_allowed_count']}",
         f"- execution_requires_manual_confirmation_count: "
@@ -780,6 +977,25 @@ def render_md(report: dict) -> str:
     lines += _section("BUY_CANDIDATE", ACTION_BUY_CANDIDATE,
                       "_(нет BUY_CANDIDATE)_")
     lines += _section("WAIT", ACTION_WAIT, "_(нет WAIT)_")
+
+    # resolved reliable кандидаты, которые раньше зависали бы в NEEDS_POLICY только
+    # из-за disabled-статуса (manual_audit / current_enabled=false), но теперь
+    # owner-review eligible (BUY_CANDIDATE / WAIT).
+    unblocked = [r for r in rows
+                 if r.get("policy_unblock_reason")
+                 and r["proposed_action"] in (ACTION_BUY_CANDIDATE, ACTION_WAIT)]
+    lines += ["", "## Resolved reliable candidates unblocked for owner review", ""]
+    lines += [
+        "Эти кандидаты resolved и income-ready; раньше они зависали бы в NEEDS_POLICY "
+        "только из-за disabled-статуса (builder `--enable-mode disabled` → audit group A "
+        "/ current_enabled=false), хотя реальных policy/mapping/data блокеров у них нет. "
+        "Теперь они owner-review eligible. Это НЕ исполнение: order_send_allowed=false, "
+        "auto_execution_allowed=false, execution_requires_manual_confirmation=true; "
+        "перед сделкой обязательны F2 order preview / no-send и ручное подтверждение.",
+        "",
+    ]
+    lines += _table(unblocked) if unblocked else ["_(нет unblocked-кандидатов)_"]
+
     lines += _section("NEEDS_POLICY", ACTION_NEEDS_POLICY, "_(нет NEEDS_POLICY)_")
     lines += _section("NEEDS_MAPPING", ACTION_NEEDS_MAPPING, "_(нет NEEDS_MAPPING)_")
 

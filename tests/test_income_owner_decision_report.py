@@ -200,6 +200,158 @@ def test_low_score_resolved_candidate_waits():
     assert row["score"] < odr.BUY_SCORE_THRESHOLD
 
 
+# ─── E2. F1 policy refinement: разблокировка resolved reliable кандидатов ───────
+
+def test_resolved_reliable_disabled_not_needs_policy():
+    # T-подобный кандидат: income_reliable, resolved, builder в --enable-mode
+    # disabled (enabled=false), audit group A (manual_audit). Disabled-статус сам по
+    # себе НЕ должен делать его NEEDS_POLICY.
+    builder = _builder(disabled=[{"ticker": "T", "class_code": "TQBR",
+                                  "role": "dividend_candidate",
+                                  "policy_bucket": "income_reliable",
+                                  "source": "api_known_future", "enabled": False}])
+    audit = _audit([{"ticker": "T", "class_code": "TQBR",
+                     "role": "dividend_candidate", "policy_bucket": "income_reliable",
+                     "audit_group": "A", "audit_group_name": "manual_audit"}])
+    report = _build(builder=builder, audit=audit)
+    row = report["candidates"][0]
+    assert row["proposed_action"] != odr.ACTION_NEEDS_POLICY
+    assert row["proposed_action"] in (odr.ACTION_BUY_CANDIDATE, odr.ACTION_WAIT)
+    assert row["owner_review_eligible"] is True
+    assert row["policy_unblock_reason"]
+
+
+def test_current_enabled_false_alone_does_not_force_needs_policy():
+    # current_enabled=false без других блокеров не делает кандидата NEEDS_POLICY.
+    builder = _builder(disabled=[{"ticker": "T", "class_code": "TQBR",
+                                  "role": "dividend_candidate",
+                                  "policy_bucket": "income_reliable",
+                                  "source": "api_known_future", "enabled": False}])
+    report = _build(builder=builder)
+    row = report["candidates"][0]
+    assert row["proposed_action"] != odr.ACTION_NEEDS_POLICY
+    assert row["proposed_action"] != odr.ACTION_BLOCKED
+
+
+def test_t_like_reliable_becomes_buy_candidate():
+    # T: resolved income_reliable, known_future dividend, нет hard blocker →
+    # score проходит порог → BUY_CANDIDATE.
+    builder = _builder(disabled=[{"ticker": "T", "class_code": "TQBR",
+                                  "role": "dividend_candidate",
+                                  "policy_bucket": "income_reliable",
+                                  "source": "api_known_future", "enabled": False}])
+    audit = _audit([{"ticker": "T", "class_code": "TQBR", "audit_group": "A",
+                     "role": "dividend_candidate",
+                     "policy_bucket": "income_reliable"}])
+    report = _build(builder=builder, audit=audit)
+    row = report["candidates"][0]
+    assert row["proposed_action"] == odr.ACTION_BUY_CANDIDATE
+    assert row["score"] >= odr.BUY_SCORE_THRESHOLD
+
+
+def test_low_score_reliable_resolved_waits_not_needs_policy():
+    # resolved income_reliable с soft risk warning → score ниже порога и WAIT,
+    # но НЕ NEEDS_POLICY (owner-review eligible).
+    builder = _builder(disabled=[{"ticker": "REL", "class_code": "TQBR",
+                                  "role": "share",
+                                  "policy_bucket": "income_reliable",
+                                  "source": "", "enabled": False,
+                                  "risk_flags": ["liquidity_warning"]}])
+    report = _build(builder=builder)
+    row = report["candidates"][0]
+    assert row["proposed_action"] == odr.ACTION_WAIT
+    assert row["proposed_action"] != odr.ACTION_NEEDS_POLICY
+    assert row["score"] < odr.BUY_SCORE_THRESHOLD
+    assert row["owner_review_eligible"] is True
+
+
+def test_vtbr_like_soft_state_control_risk_waits_not_needs_policy():
+    # VTBR-подобный: income_reliable resolved, но с soft risk warning
+    # state_control_risk (не hard excluded). → WAIT, не NEEDS_POLICY, не BLOCKED.
+    builder = _builder(disabled=[{"ticker": "VTBR", "class_code": "TQBR",
+                                  "role": "dividend_candidate",
+                                  "policy_bucket": "income_reliable",
+                                  "source": "api_known_future", "enabled": False,
+                                  "risk_flags": ["state_control_risk"]}])
+    audit = _audit([{"ticker": "VTBR", "class_code": "TQBR", "audit_group": "A",
+                     "role": "dividend_candidate",
+                     "policy_bucket": "income_reliable"}])
+    report = _build(builder=builder, audit=audit)
+    row = report["candidates"][0]
+    assert row["proposed_action"] == odr.ACTION_WAIT
+    assert row["proposed_action"] != odr.ACTION_NEEDS_POLICY
+    assert "state_control_risk" in row["soft_warnings"]
+    assert not row["hard_blockers"]
+
+
+def test_vtbr_like_hard_state_control_risk_blocked_not_needs_policy():
+    # Если state_control_risk — hard excluded reason (+ group E) → BLOCKED,
+    # но не NEEDS_POLICY.
+    builder = _builder(disabled=[{"ticker": "VTBR", "class_code": "TQBR",
+                                  "role": "dividend_candidate",
+                                  "policy_bucket": "income_reliable",
+                                  "excluded_reason": "state_control_risk",
+                                  "enabled": False}])
+    audit = _audit([{"ticker": "VTBR", "class_code": "TQBR", "audit_group": "E",
+                     "role": "dividend_candidate",
+                     "excluded_reason": "state_control_risk"}])
+    report = _build(builder=builder, audit=audit)
+    row = report["candidates"][0]
+    assert row["proposed_action"] == odr.ACTION_BLOCKED
+    assert row["proposed_action"] != odr.ACTION_NEEDS_POLICY
+    assert "state_control_risk" in row["hard_blockers"]
+
+
+def test_variable_income_money_market_not_buy_candidate():
+    # LQDT: income_variable money-market не должен становиться BUY_CANDIDATE без
+    # отдельного variable-income policy. Допустимо NEEDS_POLICY (честная причина).
+    builder = _builder(disabled=[{"ticker": "LQDT", "class_code": "TQTF",
+                                  "role": "money_market",
+                                  "policy_bucket": "income_variable",
+                                  "source": "manual_override", "enabled": False}])
+    audit = _audit([{"ticker": "LQDT", "class_code": "TQTF", "audit_group": "A",
+                     "role": "money_market", "policy_bucket": "income_variable"}])
+    report = _build(builder=builder, audit=audit)
+    row = report["candidates"][0]
+    assert row["proposed_action"] != odr.ACTION_BUY_CANDIDATE
+    assert row["proposed_action"] == odr.ACTION_NEEDS_POLICY
+    assert "variable" in row["proposed_action_reason"].lower()
+
+
+def test_floating_coupon_still_needs_policy():
+    # floating coupon policy_required остаётся NEEDS_POLICY (регресс-гард).
+    coupon = _coupon([{"ticker": "SU29024RMFS5", "class_code": "TQOB",
+                       "role": "ofz_pk_candidate", "coupon_type": "floating",
+                       "coupon_validation_status": "floating_coupon_detected"}])
+    floating = _floating([{"ticker": "SU29024RMFS5", "class_code": "TQOB",
+                           "role": "ofz_pk_candidate",
+                           "policy_status": "needs_floating_coupon_policy"}])
+    report = _build(coupon=coupon, floating=floating)
+    assert report["candidates"][0]["proposed_action"] == odr.ACTION_NEEDS_POLICY
+
+
+def test_group_d_unresolved_still_needs_mapping():
+    # unresolved group D остаётся NEEDS_MAPPING (регресс-гард).
+    audit = _audit([{"ticker": "SHORTNAME", "class_code": "", "audit_group": "D",
+                     "role": "bond_candidate", "excluded_reason": "unresolved"}])
+    resolver = _resolver([{"original_ticker": "SHORTNAME",
+                           "mapping_status": "unresolved"}])
+    report = _build(audit=audit, resolver=resolver)
+    assert report["candidates"][0]["proposed_action"] == odr.ACTION_NEEDS_MAPPING
+
+
+def test_unblocked_section_in_markdown():
+    builder = _builder(disabled=[{"ticker": "T", "class_code": "TQBR",
+                                  "role": "dividend_candidate",
+                                  "policy_bucket": "income_reliable",
+                                  "source": "api_known_future", "enabled": False}])
+    audit = _audit([{"ticker": "T", "class_code": "TQBR", "audit_group": "A",
+                     "role": "dividend_candidate",
+                     "policy_bucket": "income_reliable"}])
+    md = odr.render_md(_build(builder=builder, audit=audit))
+    assert "Resolved reliable candidates unblocked for owner review" in md
+
+
 # ─── F. hard excluded → BLOCKED ────────────────────────────────────────────────
 
 def test_hard_excluded_blocked():
