@@ -1115,6 +1115,52 @@ def cmd_income_sandbox_execute_preview(args: argparse.Namespace) -> int:
     return int(result.get("_exit_code", 0))
 
 
+def cmd_income_sandbox_account(args: argparse.Namespace) -> int:
+    from modules import income_sandbox_account as isa
+
+    try:
+        result = isa.run(
+            action=getattr(args, "action", isa.ACTION_STATUS),
+            sandbox_transport=getattr(args, "sandbox_transport",
+                                      isa.TRANSPORT_VERIFIED_REST),
+            sandbox_account_id=getattr(args, "sandbox_account_id", None),
+            pay_in_rub=getattr(args, "pay_in_rub", None),
+            confirm=getattr(args, "confirm", None),
+            dry_run=getattr(args, "dry_run", True),
+            output_json=args.output_json,
+            output_md=args.output_md,
+        )
+    except isa.SandboxAccountError as exc:
+        logger.error(str(exc))
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка income-sandbox-account: {exc}")
+        return 1
+
+    g = result["guards"]
+    tr = result.get("sandbox_transport") or {}
+    print("Income sandbox account — F3.2 (sandbox account bootstrap)")
+    print("Только sandbox. Заявки не отправляются. full-access live токен не используется.")
+    print(f"  action: {result['action']} | mode: {result['mode']}")
+    print(f"  sandbox_transport: {tr.get('selected_transport')} "
+          f"(configured: {tr.get('configured')})")
+    if result.get("required_confirmation_phrase"):
+        print(f"  required_confirmation_phrase: {result['required_confirmation_phrase']}")
+        print(f"  confirmation_matched: {result['confirmation_matched']}")
+    print(f"  sandbox_accounts: {len(result.get('sandbox_accounts') or [])}")
+    print(f"  selected_sandbox_account_id: {result.get('selected_sandbox_account_id')}")
+    print(f"  sandbox_account_opened: {result['sandbox_account_opened']} | "
+          f"sandbox_payin_done: {result['sandbox_payin_done']}")
+    print(f"  sandbox_token_used: {g['sandbox_token_used']} | "
+          f"token_printed: {g['token_printed']}")
+    print(f"  Следующий этап: {isa.NEXT_STAGE}")
+    for e in result.get("errors", []):
+        print(f"  ! {e}")
+    logger.info(f"Отчёт: {result['_output_json']}")
+    logger.info(f"Отчёт: {result['_output_md']}")
+    return int(result.get("_exit_code", 0))
+
+
 def cmd_build_income_universe(args: argparse.Namespace) -> int:
     import json
     import shutil
@@ -1641,6 +1687,43 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default="sandbox-f3",
         help="Префикс client order id (по умолчанию sandbox-f3)")
 
+    p_isa = sub.add_parser(
+        "income-sandbox-account",
+        help="F3.2 sandbox account bootstrap: status/list/open/pay-in. Только "
+             "sandbox, заявки не отправляются, live-токен не используется")
+    p_isa.add_argument(
+        "--action", dest="action",
+        choices=("status", "list", "open", "pay-in"), default="status",
+        help="status (инспекция, API не вызывается), list (read-only список счетов), "
+             "open (создать sandbox-счёт), pay-in (пополнить sandbox-счёт)")
+    p_isa.add_argument(
+        "--sandbox-transport", dest="sandbox_transport",
+        choices=("verified-rest", "unconfigured"), default="verified-rest",
+        help="Sandbox-транспорт: verified-rest (по умолчанию, проверенный sandbox "
+             "REST), unconfigured (реальные операции заблокированы)")
+    p_isa.add_argument(
+        "--sandbox-account-id", dest="sandbox_account_id", default=None,
+        help="Sandbox account id (обязателен для pay-in)")
+    p_isa.add_argument(
+        "--pay-in-rub", dest="pay_in_rub", type=int, default=None,
+        help="Сумма пополнения sandbox-счёта в рублях (обязательна для pay-in)")
+    p_isa.add_argument(
+        "--confirm", dest="confirm", default=None,
+        help='Точная фраза подтверждения для open/pay-in (например '
+             '"CONFIRM SANDBOX ACCOUNT OPEN")')
+    p_isa.add_argument(
+        "--dry-run", dest="dry_run", action="store_true", default=True,
+        help="Dry-run (по умолчанию). open/pay-in мутируют sandbox только при "
+             "точной фразе --confirm")
+    p_isa.add_argument(
+        "--output-json", dest="output_json",
+        default="data/reports/income_sandbox_account_report.json",
+        help="Путь для JSON-отчёта F3.2")
+    p_isa.add_argument(
+        "--output-md", dest="output_md",
+        default="data/reports/income_sandbox_account_report.md",
+        help="Путь для Markdown-отчёта F3.2")
+
     p_biu = sub.add_parser(
         "build-income-universe",
         help="READ-ONLY генератор income universe из rules + T-Invest данных")
@@ -1713,6 +1796,7 @@ _HANDLERS = {
     "income-owner-decision-report": cmd_income_owner_decision_report,
     "income-order-preview": cmd_income_order_preview,
     "income-sandbox-execute-preview": cmd_income_sandbox_execute_preview,
+    "income-sandbox-account": cmd_income_sandbox_account,
     "build-income-universe": cmd_build_income_universe,
     "telegram-test": cmd_telegram_test,
     "telegram-summary": cmd_telegram_summary,
