@@ -708,13 +708,45 @@ Goal (original):
 
 ### Milestone F3 — Sandbox manual-confirmed execution
 
-Goal:
+Status: implemented after this PR.
 
-- sandbox only;
-- explicit owner confirmation;
-- preflight checks;
-- no autonomous execution;
-- prove order lifecycle and reporting.
+Command: `income-sandbox-execute-preview`.
+
+Outputs: `data/reports/income_sandbox_execution_report.json` /
+`data/reports/income_sandbox_execution_report.md`.
+
+Work:
+
+- `modules/income_sandbox_execution.py` — берёт ОДНОГО `PREVIEW_READY` кандидата
+  (`BUY_CANDIDATE`) из F2 `income_order_preview.json`, валидирует безопасные F2-флаги,
+  строит preflight, генерирует точную фразу ручного подтверждения и может выполнить
+  заявку ТОЛЬКО в sandbox (BUY/LIMIT) при пройденных gate'ах;
+- sandbox-транспорт через adapter-seam (`SandboxOrderAdapter`); по умолчанию
+  `UnconfiguredSandboxAdapter` (транспорт не подключён → нужен отдельный проверенный
+  sandbox-wrapper PR, этап F3.1); dry-run работает без адаптера и без токена;
+- `income-sandbox-execute-preview` CLI с `--ticker` (один тикер), `--preview-json`,
+  `--output-json`/`--output-md`, `--sandbox-account-id`, `--max-order-rub`,
+  `--max-price-deviation-bps`, `--dry-run` (default), `--send-sandbox`, `--confirm`,
+  `--price-mode auto|offline|readonly-api`, `--client-order-id-prefix`;
+- `docs/income_sandbox_execution.md`;
+- tests `tests/test_income_sandbox_execution.py` (без реального API; sandbox-адаптер
+  и read-only клиент мокаются).
+
+Guarantees:
+
+- sandbox only; live-заявки запрещены;
+- no live order-endpoint, no live `Orders`-сервис; они не реализованы и не вызываются;
+- no full-access live token (sandbox-токен только из отдельного `TINKOFF_SANDBOX_TOKEN`,
+  никогда не печатается); no live account (sandbox account id передаётся явно);
+- exact manual confirmation required (`CONFIRM SANDBOX BUY <T> <N> LOTS MAX <RUB> RUB`);
+- no autonomous execution, no market order (только LIMIT), no Telegram-исполнения;
+- no portfolio/config mutation; запись только в `data/reports/`;
+- dry-run по умолчанию; один запуск = один тикер = максимум одна sandbox-заявка;
+- guards: `live_order_sent=false`, `auto_execution_allowed=false`,
+  `live_orders_service_used=false`, `full_access_live_token_used=false`,
+  `portfolio_mutated=false`, `config_mutated=false`, `manual_confirmation_required=true`.
+
+Next: F4 tiny live manual-confirmed order — отдельный PR и отдельное одобрение.
 
 ### Milestone F4 — Tiny live manual-confirmed order
 

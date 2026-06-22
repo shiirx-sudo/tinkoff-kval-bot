@@ -1054,6 +1054,62 @@ def cmd_income_order_preview(args: argparse.Namespace) -> int:
     return 0 if s["selected_candidates"] > 0 else 1
 
 
+def cmd_income_sandbox_execute_preview(args: argparse.Namespace) -> int:
+    from modules import income_sandbox_execution as ise
+
+    send_sandbox = bool(getattr(args, "send_sandbox", False))
+    price_mode = getattr(args, "price_mode", ise.PRICE_MODE_AUTO)
+
+    # read-only API нужен только для свежей preflight-цены (send или readonly-api)
+    client = None
+    if price_mode != ise.PRICE_MODE_OFFLINE and (
+            send_sandbox or price_mode == ise.PRICE_MODE_READONLY_API):
+        try:
+            from api.client import ReadOnlyClient
+            client = ReadOnlyClient()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"API недоступен ({exc}); preflight-цена берётся из F2 preview.")
+            client = None
+
+    try:
+        result = ise.run(
+            ticker=args.ticker,
+            preview_json=args.preview_json,
+            output_json=args.output_json,
+            output_md=args.output_md,
+            max_order_rub=args.max_order_rub,
+            max_price_deviation_bps=args.max_price_deviation_bps,
+            dry_run=getattr(args, "dry_run", True),
+            send_sandbox=send_sandbox,
+            confirm=getattr(args, "confirm", None),
+            price_mode=price_mode,
+            client_order_id_prefix=args.client_order_id_prefix,
+            sandbox_account_id=getattr(args, "sandbox_account_id", None),
+            client=client,
+        )
+    except ise.SandboxExecutionError as exc:
+        logger.error(str(exc))
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка income-sandbox-execute-preview: {exc}")
+        return 1
+
+    g = result["guards"]
+    print("Income sandbox execute preview — F3 (sandbox manual-confirmed execution)")
+    print("LIVE-заявки запрещены. Sandbox only. full-access live токен не используется.")
+    print(f"  mode: {result['mode']} | ticker: {result['ticker']}")
+    print(f"  required_confirmation_phrase: {result['required_confirmation_phrase']}")
+    print(f"  confirmation_matched: {result['confirmation_matched']}")
+    print(f"  sandbox_order_sent: {g['sandbox_order_sent']} | dry_run: {g['dry_run']}")
+    print(f"  Следующий этап: {ise.NEXT_STAGE}")
+    for e in result.get("errors", []):
+        print(f"  ! {e}")
+    logger.info(f"Отчёт: {result['_output_json']}")
+    logger.info(f"Отчёт: {result['_output_md']}")
+    return int(result.get("_exit_code", 0))
+
+
 def cmd_build_income_universe(args: argparse.Namespace) -> int:
     import json
     import shutil
@@ -1525,6 +1581,54 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--offline", action="store_true",
         help="Ярлык для --price-mode offline (только локальный decision report)")
 
+    p_ise = sub.add_parser(
+        "income-sandbox-execute-preview",
+        help="F3 sandbox manual-confirmed execution для одного PREVIEW_READY "
+             "кандидата из F2; dry-run по умолчанию, live-заявки запрещены")
+    p_ise.add_argument(
+        "--ticker", dest="ticker", required=True,
+        help="Ровно один тикер из F2 preview (например T или VTBR)")
+    p_ise.add_argument(
+        "--preview-json", dest="preview_json",
+        default="data/reports/income_order_preview.json",
+        help="Путь к F2 income_order_preview.json (только чтение)")
+    p_ise.add_argument(
+        "--output-json", dest="output_json",
+        default="data/reports/income_sandbox_execution_report.json",
+        help="Путь для JSON-отчёта F3")
+    p_ise.add_argument(
+        "--output-md", dest="output_md",
+        default="data/reports/income_sandbox_execution_report.md",
+        help="Путь для Markdown-отчёта F3")
+    p_ise.add_argument(
+        "--sandbox-account-id", dest="sandbox_account_id", default=None,
+        help="Sandbox account id (обязателен для --send-sandbox; не для dry-run)")
+    p_ise.add_argument(
+        "--max-order-rub", dest="max_order_rub", type=int, default=1000,
+        help="Жёсткий cap размера заявки в рублях (по умолчанию 1000)")
+    p_ise.add_argument(
+        "--max-price-deviation-bps", dest="max_price_deviation_bps", type=int,
+        default=100,
+        help="Максимальное отклонение свежей цены от preview в bps (по умолчанию 100)")
+    p_ise.add_argument(
+        "--dry-run", dest="dry_run", action="store_true", default=True,
+        help="Dry-run (по умолчанию). Реальная отправка только при --send-sandbox")
+    p_ise.add_argument(
+        "--send-sandbox", dest="send_sandbox", action="store_true", default=False,
+        help="Явный флаг: попытаться отправить ОДНУ sandbox-заявку (только при "
+             "точном --confirm). Без него заявка не отправляется")
+    p_ise.add_argument(
+        "--confirm", dest="confirm", default=None,
+        help="Точная фраза подтверждения, обязательна для --send-sandbox")
+    p_ise.add_argument(
+        "--price-mode", dest="price_mode",
+        choices=("auto", "offline", "readonly-api"), default="auto",
+        help="Источник свежей цены для preflight: auto, offline, readonly-api")
+    p_ise.add_argument(
+        "--client-order-id-prefix", dest="client_order_id_prefix",
+        default="sandbox-f3",
+        help="Префикс client order id (по умолчанию sandbox-f3)")
+
     p_biu = sub.add_parser(
         "build-income-universe",
         help="READ-ONLY генератор income universe из rules + T-Invest данных")
@@ -1596,6 +1700,7 @@ _HANDLERS = {
     "income-resolver-mapping-diagnostics": cmd_income_resolver_mapping_diagnostics,
     "income-owner-decision-report": cmd_income_owner_decision_report,
     "income-order-preview": cmd_income_order_preview,
+    "income-sandbox-execute-preview": cmd_income_sandbox_execute_preview,
     "build-income-universe": cmd_build_income_universe,
     "telegram-test": cmd_telegram_test,
     "telegram-summary": cmd_telegram_summary,
