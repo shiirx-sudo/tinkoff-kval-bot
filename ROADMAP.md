@@ -1,6 +1,6 @@
 # Roadmap — tinkoff-kval-bot
 
-_Last updated: 2026-06-19_
+_Last updated: 2026-06-22_
 
 ## Purpose
 
@@ -12,23 +12,34 @@ Secondary/side goal: track qualified-investor turnover/status where useful. Turn
 
 ## Non-negotiable safety contract
 
-Until explicitly changed by the owner, the project remains strictly read-only.
+The project is read-only by default. Autonomous trading is permanently forbidden.
+Order execution stays disabled until a separate execution PR.
+
+Controlled manual-confirmed execution may be added **only** after all of the
+following exist, in order:
+
+1. a separate owner-approved roadmap plan (this document, see
+   "Owner-approved deadline plan" below);
+2. a separate design PR;
+3. a separate implementation PR.
+
+A full-access token is allowed **only** for the execution stage, and only after
+explicit owner discussion, with strict isolation, a dedicated execution env var,
+and a hard rule that the token is never printed/logged.
+
+Any order is placed only after the owner's explicit manual confirmation. There is
+no scheduled execution and no autonomous execution, ever.
 
 Forbidden by default:
 
-- OrdersService
-- postOrder
-- cancelOrder
-- place_order
-- submit_order
-- place_limit_order
-- order_client
-- full-access token
-- LIVE_EXECUTION
 - autonomous trading
-- portfolio mutation
-- scraping for financial data
-- investment recommendations wording
+- order execution without manual confirmation
+- scheduled live execution
+- market orders without explicit approval
+- full-access token printing
+- portfolio mutation without explicit owner confirmation
+- scraping-based financial decisions
+- unreviewed investment recommendation wording
 
 Allowed:
 
@@ -38,6 +49,16 @@ Allowed:
 - Telegram notifications/summaries
 - manual planning outputs
 - no-order target/planned allocation analysis
+
+Allowed only after a dedicated PR (design + implementation), with explicit owner
+approval and the safety gates below:
+
+- owner-only proposed actions
+- order preview / no-send
+- sandbox order flow
+- manual-confirmed tiny live order
+- full-access token only for the execution module after explicit owner approval
+- explicit confirmation per order
 
 ## Workflow rules
 
@@ -479,18 +500,22 @@ Potential outputs:
 - upcoming income calendar
 - contribution progress
 
-### Milestone F — Confirmation-based execution, future only
+### Milestone F — Confirmation-based execution — owner-approved staged plan
 
-Status: blocked / future discussion.
+Status: owner-approved staged plan (see "Owner-approved deadline plan —
+controlled execution by 2026-06-30" below).
 
-No execution is planned now.
+This milestone is no longer "blocked forever". It is now delivered through the
+controlled, manual-confirmed stages **F0 → F1 → F2 → F3 → F4**. Each stage is a
+separate PR. Autonomous execution remains permanently forbidden; every order
+requires explicit owner confirmation.
 
-If ever introduced, it must be:
+Any execution work must still be:
 
-- separate branch + PR
+- separate branch + PR (design PR + implementation PR)
 - explicit owner approval
 - full safety design
-- full-token discussion
+- full-token discussion (execution-only env var, never printed)
 - no autonomous orders
 - confirmation per action
 - strong preflight and kill switch
@@ -551,6 +576,108 @@ Future backlog:
 3. research-digest: JSON/MD report with source reliability and candidate implications.
 4. research-to-universe bridge: only disabled/research candidates, no auto-enable.
 5. telegram research summary: optional digest, no send by default.
+
+## Owner-approved deadline plan — controlled execution by 2026-06-30
+
+Owner goal: by 2026-06-30 complete several small real trades to validate the full
+workflow for personal income-investing use:
+research/analytics → owner decision → order preview → manual confirmation →
+execution → portfolio/report verification.
+
+- This is for owner's personal use.
+- This is not autonomous trading.
+- This is not public investment advice.
+- The bot may produce owner-only proposed actions, but execution requires manual
+  confirmation.
+- Initial live trades must be tiny, capped, and fully preflighted.
+
+### Milestone F0 — Roadmap execution transition
+
+Status: this PR.
+
+Goal: formally replace "execution blocked forever" with "execution allowed only
+through controlled manual-confirmed stages."
+
+### Milestone F1 — Owner decision report
+
+Goal:
+
+- combine income universe, coupon validation, floating-coupon policy, resolver
+  diagnostics, target portfolio context;
+- produce owner-only candidate scoring;
+- output `proposed_action` values:
+  - `BUY_CANDIDATE`
+  - `WAIT`
+  - `BLOCKED`
+  - `NEEDS_MAPPING`
+  - `NEEDS_POLICY`
+- no orders;
+- no full-access token;
+- no portfolio mutation;
+- `execution_requires_manual_confirmation=true`.
+
+### Milestone F2 — Order preview, no send
+
+Goal:
+
+- calculate lots, price, estimated amount, commission/fees if available, NKD for
+  bonds if available, cash impact, risk flags;
+- do not send orders;
+- no OrdersService calls;
+- no full-access token required;
+- output preview only.
+
+### Milestone F3 — Sandbox manual-confirmed execution
+
+Goal:
+
+- sandbox only;
+- explicit owner confirmation;
+- preflight checks;
+- no autonomous execution;
+- prove order lifecycle and reporting.
+
+### Milestone F4 — Tiny live manual-confirmed order
+
+Goal:
+
+- 1–3 very small real orders before 2026-06-30;
+- limit orders only unless owner explicitly approves otherwise;
+- explicit confirmation phrase;
+- max order amount cap;
+- allowlist of instruments;
+- cash/lot/price/status preflight;
+- no scheduled execution;
+- post-trade report.
+
+### Schedule
+
+- 2026-06-22: roadmap transition PR
+- 2026-06-23: owner decision report PR
+- 2026-06-24: order preview / no-send PR
+- 2026-06-25: sandbox manual-confirm flow PR
+- 2026-06-26: pre-live checklist and tiny-live design
+- 2026-06-27 to 2026-06-30: 1–3 tiny manual-confirmed live orders if all gates pass
+
+### Safety gates for live execution
+
+- LIVE execution disabled by default
+- full-access token never printed
+- separate env var for execution token
+- explicit account id display before confirmation
+- instrument allowlist
+- max order amount cap
+- limit orders for first live trades
+- price deviation check
+- lot size check
+- available cash check
+- trading status check
+- duplicate order guard
+- dry-run default
+- confirmation phrase required
+- Telegram send optional, never execution by default
+- kill switch / emergency disable
+- complete post-trade report
 
 ## Ideas inbox
 
