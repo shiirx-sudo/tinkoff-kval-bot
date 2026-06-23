@@ -1210,6 +1210,63 @@ def cmd_income_live_readiness(args: argparse.Namespace) -> int:
     return int(result.get("_exit_code", 0))
 
 
+def cmd_income_live_execute(args: argparse.Namespace) -> int:
+    from modules import income_live_execution as ile
+
+    send_live = bool(getattr(args, "send_live", False))
+
+    try:
+        result = ile.run(
+            ticker=getattr(args, "ticker", ile.DEFAULT_TICKER),
+            live_account_id=getattr(args, "live_account_id", None),
+            max_order_rub=getattr(args, "max_order_rub", ile.DEFAULT_MAX_ORDER_RUB),
+            lots=getattr(args, "lots", ile.DEFAULT_LOTS),
+            instrument_id_source=getattr(args, "instrument_id_source", "auto"),
+            send_live=send_live,
+            confirm=getattr(args, "confirm", None),
+            dry_run=getattr(args, "dry_run", True),
+            readiness_report=args.readiness_report,
+            preview_report=args.preview_report,
+            output_json=args.output_json,
+            output_md=args.output_md,
+        )
+    except ile.LiveExecutionError as exc:
+        logger.error(str(exc))
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка income-live-execute: {exc}")
+        return 1
+
+    lp = result["live_plan"]
+    tp = result["token_policy"]
+    g = result["guards"]
+    print("Income live execute — F4.1 (tiny live manual-confirmed order)")
+    print("⚠️ РЕАЛЬНЫЕ ДЕНЬГИ. Только T/BUY/LIMIT/1 лот/cap 300 RUB. MARKET запрещён. "
+          "Аналитический токен для исполнения не используется.")
+    print(f"  stage: {result['stage']} | mode: {result['mode']} | "
+          f"ticker: {result['ticker']}")
+    print(f"  readiness_gate_passed: {result['readiness_gate_passed']} | "
+          f"preview_gate_passed: {result['preview_gate_passed']}")
+    print(f"  live_plan: {lp['ticker']} {lp['side']} {lp['order_type']} "
+          f"{lp['lots']} лот(а), cap {lp['max_order_rub']} RUB, "
+          f"instrument_id_source={lp['instrument_id_source']}")
+    print(f"  required_confirmation_phrase: {result['required_confirmation_phrase']}")
+    print(f"  confirmation_matched: {result['confirmation_matched']}")
+    print(f"  {tp['live_trading_token_env']} present: "
+          f"{tp['live_trading_token_present']} (только наличие; значение не печатается)")
+    print(f"  order sent: {g[ile.GUARD_KEY_LIVE_ORDER_SENT]} | "
+          f"sandbox_order_sent: {g['sandbox_order_sent']} | "
+          f"market_order_used: {g['market_order_used']}")
+    for r in result.get("blocking_reasons", []):
+        print(f"  ! blocked: {r}")
+    for w in result.get("warnings", []):
+        print(f"  - {w}")
+    print(f"  Следующий этап: {ile.NEXT_STAGE}")
+    logger.info(f"Отчёт: {result['_output_json']}")
+    logger.info(f"Отчёт: {result['_output_md']}")
+    return int(result.get("_exit_code", 0))
+
+
 def cmd_build_income_universe(args: argparse.Namespace) -> int:
     import json
     import shutil
@@ -1804,6 +1861,57 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default="data/reports/income_live_readiness_report.md",
         help="Путь для Markdown-отчёта F4.0")
 
+    p_ile = sub.add_parser(
+        "income-live-execute",
+        help="F4.1 tiny LIVE manual-confirmed order (РЕАЛЬНЫЕ деньги): одна BUY "
+             "LIMIT заявка T/1 лот/cap 300 RUB после всех gate'ов и точной фразы. "
+             "dry-run по умолчанию")
+    p_ile.add_argument(
+        "--ticker", dest="ticker", default="T",
+        help="Тикер (по умолчанию T)")
+    p_ile.add_argument(
+        "--live-account-id", dest="live_account_id", default=None,
+        help="Live account id (обязателен для --send-live; не для dry-run)")
+    p_ile.add_argument(
+        "--max-order-rub", dest="max_order_rub", type=int, default=300,
+        help="Жёсткий cap размера live-заявки в рублях (по умолчанию 300)")
+    p_ile.add_argument(
+        "--lots", dest="lots", type=int, default=1,
+        help="Число лотов (по умолчанию 1)")
+    p_ile.add_argument(
+        "--instrument-id-source", dest="instrument_id_source",
+        choices=("auto", "uid", "figi"), default="auto",
+        help="Источник instrumentId для wire payload: auto (uid-first, figi-fallback), "
+             "uid, figi")
+    p_ile.add_argument(
+        "--send-live", dest="send_live", action="store_true", default=False,
+        help="Явный флаг: попытаться отправить ОДНУ live-заявку (только при точном "
+             "--confirm, live account id и TINKOFF_LIVE_TRADING_TOKEN). Без него "
+             "заявка не отправляется")
+    p_ile.add_argument(
+        "--confirm", dest="confirm", default=None,
+        help='Точная фраза подтверждения, обязательна для --send-live '
+             '("CONFIRM LIVE BUY T 1 LOT MAX 300 RUB")')
+    p_ile.add_argument(
+        "--dry-run", dest="dry_run", action="store_true", default=True,
+        help="Dry-run (по умолчанию). Реальная отправка только при --send-live")
+    p_ile.add_argument(
+        "--readiness-report", dest="readiness_report",
+        default="data/reports/income_live_readiness_report.json",
+        help="Путь к F4.0 income_live_readiness_report.json (только чтение)")
+    p_ile.add_argument(
+        "--preview-report", dest="preview_report",
+        default="data/reports/income_order_preview.json",
+        help="Путь к F2 income_order_preview.json (только чтение)")
+    p_ile.add_argument(
+        "--output-json", dest="output_json",
+        default="data/reports/income_live_execution_report.json",
+        help="Путь для JSON-отчёта F4.1")
+    p_ile.add_argument(
+        "--output-md", dest="output_md",
+        default="data/reports/income_live_execution_report.md",
+        help="Путь для Markdown-отчёта F4.1")
+
     p_biu = sub.add_parser(
         "build-income-universe",
         help="READ-ONLY генератор income universe из rules + T-Invest данных")
@@ -1878,6 +1986,7 @@ _HANDLERS = {
     "income-sandbox-execute-preview": cmd_income_sandbox_execute_preview,
     "income-sandbox-account": cmd_income_sandbox_account,
     "income-live-readiness": cmd_income_live_readiness,
+    "income-live-execute": cmd_income_live_execute,
     "build-income-universe": cmd_build_income_universe,
     "telegram-test": cmd_telegram_test,
     "telegram-summary": cmd_telegram_summary,

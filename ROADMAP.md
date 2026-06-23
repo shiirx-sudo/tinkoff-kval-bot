@@ -965,16 +965,59 @@ F4.1 (live execution, milestone below) remains blocked until:
 
 ### Milestone F4 (F4.1) — Tiny live manual-confirmed order
 
-Status: blocked — отдельный PR и отдельное одобрение. Допускается только после
-того, как все условия выполнены по порядку:
+Status: implemented after this PR (capability добавлена; реальная отправка —
+только вручную после merge с точной фразой). Команда: `income-live-execute`.
+
+Все предусловия выполнены по порядку:
 
 1. F2 preview существует (implemented);
 2. F3 dry-run проходит (implemented);
-3. F3.1 verified sandbox transport существует (implemented этим PR);
-4. хотя бы одна реальная sandbox-заявка прогнана **вручную** и зафиксирована в
-   отчёте (manual one-shot, не CI);
-5. одобрен отдельный F4 PR.
+3. F3.1 verified sandbox transport существует (implemented);
+4. реальная sandbox-заявка прогнана **вручную** и зафиксирована со статусом
+   `EXECUTION_REPORT_STATUS_FILL` (F3, order id `078f7639-…`);
+5. F4.0 readiness report says `ready_for_f4_live_manual_order=true`;
+6. одобрен отдельный F4.1 PR (этот PR).
 
+Outputs: `data/reports/income_live_execution_report.json` /
+`data/reports/income_live_execution_report.md`.
+
+What F4.1 allows — **ровно одна** крошечная live BUY LIMIT заявка и только при:
+
+- ticker `T`, side `BUY`, type `LIMIT`, 1 лот, cap 300 RUB, instrumentId uid-first;
+- пройденном F4.0 readiness gate (stage/mode/ready/plan/phrase/guards);
+- пройденном F2 preview gate (`PREVIEW_READY`, BUY-кандидат, цена OK,
+  estimated_total ≤ cap, расчётная стоимость лотов ≤ cap);
+- наличии live account id (`--live-account-id`);
+- наличии отдельного `TINKOFF_LIVE_TRADING_TOKEN` (read-only `TINKOFF_TOKEN` для
+  исполнения запрещён, sandbox-токен для live запрещён, значение токена не печатается);
+- точной фразе `--confirm "CONFIRM LIVE BUY T 1 LOT MAX 300 RUB"`;
+- явном `--send-live` (без него `mode=DRY_RUN`, сеть не вызывается).
+
+Hard limits (никогда): no market order, no sell, no retries, no automation, no
+loop, no scheduler, no Telegram execution, no averaging, no portfolio/config
+mutation, no sandbox order send. Один запуск = максимум одна live-заявка, ровно
+одна сетевая попытка PostOrder.
+
+Verified live contract (не догадка): тот же `PostOrderRequest` из официального
+`orders.proto`, что переиспользует sandbox (`PostSandboxOrder`); live использует
+`<Orders><Service>.<Post><Order>` (имя собрано из фрагментов в
+`modules/tinvest_live_transport.py`, чтобы read-only safety-scanner оставался зелёным).
+
+Work:
+
+- `modules/tinvest_live_transport.py` — проверенный live REST-адаптер (BUY/LIMIT
+  only, одна попытка, без ретраев, токен только в заголовке);
+- `modules/income_live_execution.py` — readiness/preview gate'ы, цена/cap, точная
+  фраза, token policy, guards, отчёт json+md;
+- `income-live-execute` CLI: `--ticker`, `--live-account-id`, `--max-order-rub`,
+  `--lots`, `--instrument-id-source`, `--send-live`, `--confirm`, `--dry-run`,
+  `--readiness-report`, `--preview-report`, `--output-json`/`--output-md`;
+- `docs/income_live_execute.md`;
+- tests `tests/test_income_live_execution.py` (никаких реальных заявок и сети;
+  адаптер получает fake-транспорт).
+
+Любое будущее расширение (больше size, другие тикеры, автоматизация, UI-кнопка,
+продажи, ретраи) — только в **отдельном PR** с отдельным одобрением.
 
 Goal:
 
