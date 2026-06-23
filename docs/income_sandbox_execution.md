@@ -151,8 +151,25 @@ sandbox, только BUY/LIMIT). Выбор транспорта — флаг `
 
 Wire-payload (camelCase JSON): `quantity` (строка, лоты), `price`, `direction`
 (`ORDER_DIRECTION_BUY`), `accountId`, `orderType` (`ORDER_TYPE_LIMIT`), `orderId`
-(идемпотентный client order id), `instrumentId` (uid/figi). Контракт фиксируется в
-отчёте в `sandbox_transport.contract_source`.
+(**валидный UUID v4** — требование API, см. ниже), `instrumentId` (uid/figi).
+Контракт фиксируется в отчёте в `sandbox_transport.contract_source`.
+
+#### `orderId` обязан быть UUID
+
+API `PostSandboxOrder` принимает `orderId` **только в формате UUID**. Невалидный
+`orderId` приводит к HTTP 400:
+
+```
+{"code":3,"message":"`order id` has invalid UUID format","description":"30028"}
+```
+
+Поэтому wire `orderId` формируется как `uuid.uuid4()` (UUID v4). Человекочитаемый
+семантический контекст (`sandbox-f3-<ticker>-<timestamp>-<hash>`) **не** уходит в
+wire `orderId` — он сохраняется отдельным полем отчёта `order_trace_label`
+(дублируется как `client_order_tag`). Транспорт дополнительно валидирует: если
+`orderId` не UUID — hard fail до сети (заявка не отправляется). В отчёте
+`sandbox_order_request_wire_sanitized` есть флаги `orderId_is_uuid` и
+`orderId_version` (ожидается `true` / `4`).
 
 #### Выбор instrumentId: UID-first
 
@@ -202,7 +219,8 @@ python main.py income-sandbox-execute-preview `
   отправка блокируется;
 - проверяется наличие sandbox account id;
 - проверяется наличие `TINKOFF_SANDBOX_TOKEN` (без печати токена);
-- формируется идемпотентный `client_order_id` (prefix + тикер + timestamp + hash);
+- формируется wire `orderId` как UUID v4 (`uuid.uuid4()`); семантический трейс
+  `order_trace_label` (prefix + тикер + timestamp + hash) сохраняется отдельно;
 - проверки: `preview_ready`, `confirmation_matched`, `sandbox_account_present`,
   `sandbox_token_present`, `price_available`, `price_deviation_ok`, `cap_ok`,
   `no_live_execution`, `no_market_order`.
@@ -215,7 +233,8 @@ python main.py income-sandbox-execute-preview `
 `mode` (`DRY_RUN`/`SANDBOX_SEND`), `ticker`, `preview_source`, `selected_preview`,
 `required_confirmation_phrase`, `confirmation_matched`, `preflight`,
 `sandbox_transport` (`selected_transport`, `configured`, `contract_source`,
-`adapter_class`), `sandbox_order_request` / `sandbox_order_request_sanitized`,
+`adapter_class`), `client_order_tag` / `order_trace_label` (семантический трейс,
+не wire orderId), `sandbox_order_request` / `sandbox_order_request_sanitized`,
 `sandbox_order_request_wire_sanitized`, `sandbox_order_result`,
 `sandbox_order_response_sanitized`, `sandbox_order_state_sanitized`,
 `sandbox_http_status`, `sandbox_http_error_body`, `sandbox_http_error_json`,
@@ -232,8 +251,12 @@ python main.py income-sandbox-execute-preview `
 
 - `sandbox_order_request_wire_sanitized` — **фактический** wire-payload, ушедший в
   REST: `instrumentId`, `instrument_id_source` (uid/figi), `quantity` + `quantity_type`
-  (должна быть строкой int64), `price`, `direction`, `orderType`, `orderId`,
-  `accountId_masked` (account id только маскированный);
+  (должна быть строкой int64), `price`, `direction`, `orderType`, `orderId` (UUID v4),
+  `orderId_is_uuid` / `orderId_version`, `accountId_masked` (account id только
+  маскированный). В dry-run с `--sandbox-transport verified-rest` это поле строится
+  как **превью** (без отправки и без токена), чтобы заранее видеть UUID `orderId`;
+- `order_trace_label` / `client_order_tag` — человекочитаемый семантический контекст
+  заявки (`sandbox-f3-...`), который намеренно **не** уходит в wire `orderId`;
 - `sandbox_http_status` — HTTP-статус ответа (например `400`);
 - `sandbox_http_error_body` — тело ответа API (обрезается), без секретов;
 - `sandbox_http_error_json` — распарсенное JSON-тело ошибки, если ответ был JSON;
@@ -256,6 +279,20 @@ python main.py income-sandbox-execute-preview `
    - `direction` / `orderType` — должны быть `ORDER_DIRECTION_BUY` /
      `ORDER_TYPE_LIMIT` (enum-значения).
 3. `diagnostic_hint` суммирует вероятную причину.
+
+#### Частный случай: `order id has invalid UUID format`
+
+Если в `sandbox_http_error_body` видно:
+
+```
+{"code":3,"message":"`order id` has invalid UUID format","description":"30028"}
+```
+
+— значит в wire `orderId` ушла не-UUID-строка. Текущая реализация формирует
+`orderId` как UUID v4, а семантический контекст хранит отдельно (`order_trace_label`),
+поэтому в норме этой ошибки быть не должно. Проверьте, что
+`sandbox_order_request_wire_sanitized.orderId_is_uuid == true` и `orderId_version == 4`.
+Транспорт `verified-rest` также делает hard fail до сети, если `orderId` не UUID.
 
 Токен (`TINKOFF_SANDBOX_TOKEN`) и Authorization-заголовок никогда не попадают в
 отчёт, тело ошибки и логи.

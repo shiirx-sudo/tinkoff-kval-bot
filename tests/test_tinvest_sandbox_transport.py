@@ -10,16 +10,20 @@ from __future__ import annotations
 import json
 import sys
 import types
+import uuid
 
 import pytest
 
 from modules import income_sandbox_execution as ise
 from modules import tinvest_sandbox_transport as tx
 
+# Валидный UUID v4 для wire orderId (контракт API PostSandboxOrder).
+_UUID_ORDER_ID = "f3a1b2c3-d4e5-4f6a-8b9c-0d1e2f3a4b5c"
+
 
 def _request(*, order_type=ise.ORDER_TYPE_LIMIT, direction=ise.ORDER_DIRECTION_BUY,
              figi="FIGI-T", uid="uid-T", lots=3, price=("275", 500000000),
-             client_order_id="sandbox-f3-T-x"):
+             client_order_id=_UUID_ORDER_ID):
     units, nano = price
     return {
         "direction": direction,
@@ -75,7 +79,9 @@ def test_post_payload_uses_confirmed_contract_fields():
     assert p["direction"] == "ORDER_DIRECTION_BUY"
     assert p["accountId"] == "sandbox-acc-007"
     assert p["orderType"] == "ORDER_TYPE_LIMIT"
-    assert p["orderId"] == "sandbox-f3-T-x"
+    # orderId == client_order_id и обязан быть валидным UUID (требование API)
+    assert p["orderId"] == _UUID_ORDER_ID
+    assert uuid.UUID(p["orderId"]).version == 4
     # UID-first: при наличии и uid, и figi берётся uid (поле instrumentId)
     assert p["instrumentId"] == "uid-T"
     # никакого live-token-поля или секрета в payload
@@ -150,6 +156,50 @@ def test_wire_payload_sanitized_uses_uid_and_string_quantity():
     assert wire["accountId_masked"] != "sandbox-acc-007"
     blob = json.dumps(wire)
     assert "sbx-token" not in blob
+
+
+def test_wire_payload_order_id_uuid_flags():
+    rec = _Recorder()
+    adapter = tx.VerifiedSandboxRestAdapter(transport=rec)
+    adapter.post_sandbox_order(
+        request=_request(), account_id="sandbox-acc-007", token="sbx-token")
+    wire = adapter.last_wire_sanitized
+    assert wire["orderId"] == _UUID_ORDER_ID
+    assert wire["orderId_is_uuid"] is True
+    assert wire["orderId_version"] == 4
+
+
+def test_non_uuid_order_id_hard_fails():
+    rec = _Recorder()
+    adapter = tx.VerifiedSandboxRestAdapter(transport=rec)
+    req = _request(client_order_id="sandbox-f3-T-20260623T141714Z-d8ee4fd8")
+    with pytest.raises(tx.SandboxTransportError):
+        adapter.post_sandbox_order(request=req, account_id="acc", token="t")
+    assert rec.calls == []  # семантический id не уходит в сеть
+
+
+def test_build_wire_preview_no_send_uuid_order_id():
+    rec = _Recorder()
+    adapter = tx.VerifiedSandboxRestAdapter(transport=rec)
+    wire = adapter.build_wire_preview(
+        request=_request(), account_id="sandbox-acc-007")
+    # превью НЕ отправляет ничего в сеть
+    assert rec.calls == []
+    assert wire["instrumentId"] == "uid-T"
+    assert wire["quantity"] == "3"
+    assert uuid.UUID(wire["orderId"]).version == 4
+    assert wire["orderId_is_uuid"] is True
+    # токена в превью нет (он и не передавался)
+    assert "token" not in json.dumps(wire)
+
+
+def test_build_wire_preview_rejects_non_uuid():
+    rec = _Recorder()
+    adapter = tx.VerifiedSandboxRestAdapter(transport=rec)
+    req = _request(client_order_id="not-a-uuid")
+    with pytest.raises(tx.SandboxTransportError):
+        adapter.build_wire_preview(request=req, account_id="acc")
+    assert rec.calls == []
 
 
 def test_market_order_hard_fails():

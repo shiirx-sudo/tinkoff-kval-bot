@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
@@ -193,11 +194,22 @@ def build_confirmation_phrase(ticker: str, lots: int, max_order_rub: int) -> str
     return f"CONFIRM SANDBOX BUY {ticker} {lots} LOTS MAX {max_order_rub} RUB"
 
 
-def build_client_order_id(prefix: str, ticker: str, now: datetime) -> str:
-    """Идемпотентный client order id: prefix + тикер + timestamp + hash."""
+def build_order_trace_label(prefix: str, ticker: str, now: datetime) -> str:
+    """Человекочитаемая метка контекста заявки (НЕ wire orderId).
+
+    Раньше эта строка уходила в wire `orderId`, но API PostSandboxOrder требует
+    для `orderId` строгий UUID-формат (иначе HTTP 400 "`order id` has invalid UUID
+    format"). Поэтому семантический контекст сохраняется отдельным полем отчёта,
+    а wire `orderId` формируется через build_sandbox_order_id() как UUID v4.
+    """
     ts = now.strftime("%Y%m%dT%H%M%SZ")
     digest = stable_hash(f"{prefix}|{ticker}|{now.isoformat()}", 8)
     return f"{prefix}-{ticker}-{ts}-{digest}"
+
+
+def build_sandbox_order_id() -> str:
+    """Wire `orderId` для PostSandboxOrder: валидный UUID v4 (требование API)."""
+    return str(uuid.uuid4())
 
 
 def load_preview_report(path: str | None = None) -> dict:
@@ -485,6 +497,41 @@ def build_report(*, ticker: str, preview_path: str, row: dict,
     sandbox_order_sent = False
     exit_code = 0
 
+    the_adapter = adapter or UnconfiguredSandboxAdapter()
+    supports_wire_preview = hasattr(the_adapter, "build_wire_preview")
+
+    # Семантическая метка контекста (НЕ wire orderId) и UUID v4 для wire orderId.
+    order_trace_label = build_order_trace_label(client_order_id_prefix, ticker, now)
+    order_id = build_sandbox_order_id()
+
+    # Намерение заявки (intent) строим, когда реально отправляем ИЛИ когда транспорт
+    # умеет построить dry-run превью wire payload. Это read-only метаданные; реальная
+    # отправка возможна только в send-ветке при пройденных gate'ах.
+    if (send_sandbox or supports_wire_preview) and preview_ref_price is not None:
+        sandbox_order_request = {
+            "direction": ORDER_DIRECTION_BUY,
+            "order_type": ORDER_TYPE_LIMIT,
+            "instrument": {
+                "ticker": ticker,
+                "figi": row.get("figi"),
+                "uid": row.get("uid"),
+                "class_code": row.get("class_code"),
+            },
+            "lots": lots,
+            "quantity": quantity,
+            "limit_price": preview_ref_price,
+            "limit_price_quotation": decimal_to_quotation(preview_ref_price),
+            "currency": row.get("currency") or "rub",
+            # client_order_id == wire orderId: ТОЛЬКО UUID v4 (требование API).
+            "client_order_id": order_id,
+            # Человекочитаемый трейс-контекст; в wire orderId НЕ попадает.
+            "order_trace_label": order_trace_label,
+            "sandbox_account_id_masked": (
+                mask_identifier(sandbox_account_id) if sandbox_account_id else None),
+            # Предпочтение источника instrumentId (auto=uid-first/figi-fallback).
+            "instrument_id_source_pref": instrument_id_source,
+        }
+
     if send_sandbox:
         gate_fail = [name for name, ok in (
             ("confirmation_matched", confirmation_matched),
@@ -503,29 +550,12 @@ def build_report(*, ticker: str, preview_path: str, row: dict,
                 errors.append(
                     "Нужна точная фраза подтверждения --confirm: "
                     f"\"{phrase}\".")
+        elif sandbox_order_request is None:
+            exit_code = 1
+            errors.append(
+                f"{ticker}: нет лимитной цены для построения заявки. "
+                "Заявка в sandbox НЕ отправлена.")
         else:
-            client_order_id = build_client_order_id(
-                client_order_id_prefix, ticker, now)
-            sandbox_order_request = {
-                "direction": ORDER_DIRECTION_BUY,
-                "order_type": ORDER_TYPE_LIMIT,
-                "instrument": {
-                    "ticker": ticker,
-                    "figi": row.get("figi"),
-                    "uid": row.get("uid"),
-                    "class_code": row.get("class_code"),
-                },
-                "lots": lots,
-                "quantity": quantity,
-                "limit_price": preview_ref_price,
-                "limit_price_quotation": decimal_to_quotation(preview_ref_price),
-                "currency": row.get("currency") or "rub",
-                "client_order_id": client_order_id,
-                "sandbox_account_id_masked": mask_identifier(sandbox_account_id),
-                # Предпочтение источника instrumentId (auto=uid-first/figi-fallback).
-                "instrument_id_source_pref": instrument_id_source,
-            }
-            the_adapter = adapter or UnconfiguredSandboxAdapter()
             adapter_invoked = True
             try:
                 # Ровно один вызов отправки = максимум одна sandbox-заявка.
@@ -538,11 +568,11 @@ def build_report(*, ticker: str, preview_path: str, row: dict,
                 raw_state: dict | None = None
                 state_read = False
                 # Read-only чтение состояния: одна попытка, без retry-loop.
-                order_id = _order_id_of(raw_response)
-                if order_id:
+                resp_order_id = _order_id_of(raw_response)
+                if resp_order_id:
                     try:
                         raw_state = the_adapter.get_sandbox_order_state(
-                            account_id=sandbox_account_id, order_id=order_id,
+                            account_id=sandbox_account_id, order_id=resp_order_id,
                             token=sandbox_token)
                         state_read = bool(raw_state)
                     except Exception as exc:  # noqa: BLE001
@@ -594,6 +624,18 @@ def build_report(*, ticker: str, preview_path: str, row: dict,
 
         if not sandbox_order_sent and exit_code == 0:
             exit_code = 1
+    elif supports_wire_preview and sandbox_order_request is not None:
+        # DRY-RUN: строим превью wire payload БЕЗ отправки и БЕЗ токена (сеть не
+        # вызывается). Нужно, чтобы пользователь заранее видел, что wire orderId —
+        # валидный UUID v4, а не семантическая строка.
+        try:
+            preview_wire = the_adapter.build_wire_preview(
+                request=sandbox_order_request,
+                account_id=sandbox_account_id or "")
+            if isinstance(preview_wire, dict):
+                sandbox_order_request_wire_sanitized = preview_wire
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"Не удалось построить превью wire payload: {exc}")
 
     guards = {
         GUARD_KEY_LIVE_ORDER_SENT: False,
@@ -628,6 +670,10 @@ def build_report(*, ticker: str, preview_path: str, row: dict,
         "confirmation_matched": confirmation_matched,
         "preflight": preflight,
         "sandbox_transport": transport_meta,
+        # Человекочитаемый трейс-контекст заявки (НЕ wire orderId). Wire orderId —
+        # UUID v4 (см. sandbox_order_request_wire_sanitized.orderId).
+        "client_order_tag": order_trace_label,
+        "order_trace_label": order_trace_label,
         "sandbox_order_request": sandbox_order_request,
         "sandbox_order_request_sanitized": sandbox_order_request,
         "sandbox_order_request_wire_sanitized": sandbox_order_request_wire_sanitized,
@@ -753,7 +799,10 @@ def render_md(report: dict) -> str:
             f"- price: `{_fmt(wire.get('price'))}`",
             f"- direction: `{_fmt(wire.get('direction'))}`",
             f"- orderType: `{_fmt(wire.get('orderType'))}`",
-            f"- orderId: `{_fmt(wire.get('orderId'))}`",
+            f"- orderId (UUID v4): `{_fmt(wire.get('orderId'))}`",
+            f"- orderId_is_uuid: {_fmt(wire.get('orderId_is_uuid'))}",
+            f"- orderId_version: {_fmt(wire.get('orderId_version'))}",
+            f"- order_trace_label: `{_fmt(report.get('order_trace_label'))}`",
         ]
 
     if report.get("sandbox_http_status") is not None or report.get("diagnostic_hint"):
