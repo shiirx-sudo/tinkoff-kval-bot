@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -448,6 +449,91 @@ def test_bad_max_order_rub_raises(tmp_path):
 
 
 # ─── статическая проверка исходника: нет запрещённых литералов ────────────────
+
+# ─── current-order notional cap gate (F4.1 safety refinement) ─────────────────
+
+def test_notional_gate_preview_lots_mismatch_passes_with_warning(tmp_path):
+    # старый preview сайзил 3 лота (828.42), но заявка --lots 1 (276.14) ≤ 300
+    transport = FakeTransport()
+    rep = _run(tmp_path, readiness=_readiness(),
+               preview=_preview([_preview_row(
+                   preview_lots=3, reference_price=276.14, lot_size=1,
+                   estimated_total_rub=828.42)]),
+               transport=transport, lots=1, max_order_rub=300)
+    assert rep["preview_gate_passed"] is True
+    assert rep["preview_lots"] == 3
+    assert rep["cli_lots"] == 1
+    assert rep["preview_lots_matches_cli_lots"] is False
+    assert rep["current_order_estimated_total_rub"] == Decimal("276.14")
+    assert rep["current_order_cap_passed"] is True
+    assert rep["preview_lots_mismatch_warning"]
+    assert any("preview_lots=3" in w for w in rep["warnings"])
+    # transparency: preview est_total всё ещё в отчёте, но НЕ блокирует
+    assert rep["preview_estimated_total_rub"] == Decimal("828.42")
+    assert rep[ile.FIELD_SENT] is False  # dry-run
+    assert transport.post_calls == []
+
+
+def test_notional_gate_match_no_warning(tmp_path):
+    rep = _run(tmp_path, readiness=_readiness(),
+               preview=_preview([_preview_row(
+                   preview_lots=1, reference_price=276.14, lot_size=1,
+                   estimated_total_rub=276.14)]),
+               lots=1, max_order_rub=300)
+    assert rep["preview_gate_passed"] is True
+    assert rep["preview_lots_matches_cli_lots"] is True
+    assert rep["preview_lots_mismatch_warning"] is None
+    assert rep["current_order_estimated_total_rub"] == Decimal("276.14")
+    assert rep["current_order_cap_passed"] is True
+    assert not any("preview_lots" in w for w in rep["warnings"])
+
+
+def test_notional_gate_price_over_cap_blocks(tmp_path):
+    rep = _run(tmp_path, readiness=_readiness(),
+               preview=_preview([_preview_row(
+                   preview_lots=1, reference_price=301, lot_size=1,
+                   estimated_total_rub=301)]),
+               lots=1, max_order_rub=300)
+    assert rep["preview_gate_passed"] is False
+    assert rep["current_order_cap_passed"] is False
+    assert rep["current_order_estimated_total_rub"] == Decimal("301.00")
+    assert any("превышает cap" in r for r in rep["blocking_reasons"])
+
+
+def test_notional_gate_lot_size_pushes_over_cap_blocks(tmp_path):
+    # 1 лот, но lot_size=3 → 276.14*3 = 828.42 > 300
+    rep = _run(tmp_path, readiness=_readiness(),
+               preview=_preview([_preview_row(
+                   preview_lots=1, reference_price=276.14, lot_size=3,
+                   estimated_total_rub=276.14)]),
+               lots=1, max_order_rub=300)
+    assert rep["preview_gate_passed"] is False
+    assert rep["current_order_cap_passed"] is False
+    assert rep["current_order_estimated_total_rub"] == Decimal("828.42")
+    assert any("превышает cap" in r for r in rep["blocking_reasons"])
+
+
+def test_notional_gate_dry_run_no_send_no_token(tmp_path, monkeypatch):
+    monkeypatch.setenv("TINKOFF_TOKEN", "ANALYTICS-SECRET")
+    monkeypatch.setenv("TINKOFF_SANDBOX_TOKEN", "SANDBOX-SECRET")
+    monkeypatch.delenv("TINKOFF_LIVE_TRADING_TOKEN", raising=False)
+    transport = FakeTransport()
+    rep = _run(tmp_path, readiness=_readiness(),
+               preview=_preview([_preview_row(
+                   preview_lots=3, reference_price=276.14, lot_size=1,
+                   estimated_total_rub=828.42)]),
+               transport=transport, lots=1, max_order_rub=300)
+    g = rep["guards"]
+    assert rep["mode"] == "DRY_RUN"
+    assert rep[ile.FIELD_SENT] is False
+    assert transport.post_calls == []
+    assert g["live_token_used"] is False
+    assert g["tinkoff_token_used_for_execution"] is False
+    assert g["sandbox_token_used_for_live"] is False
+    assert rep["token_policy"]["live_trading_token_present"] is False
+    js = Path(rep["_output_json"]).read_text(encoding="utf-8")
+    assert "ANALYTICS-SECRET" not in js and "SANDBOX-SECRET" not in js
+
 
 def test_module_source_has_no_forbidden_literals():
     src = Path(ile.__file__).read_text(encoding="utf-8")

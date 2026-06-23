@@ -285,15 +285,17 @@ def evaluate_readiness_gate(report: dict | None, *, ticker: str, lots: int,
 
 def evaluate_preview_gate(report: dict | None, *, ticker: str, lots: int,
                           max_order_rub: int
-                          ) -> tuple[bool, list[str], dict | None, dict | None]:
-    """Проверяет F2 preview report для тикера. (passed, reasons, row, econ)."""
+                          ) -> tuple[bool, list[str], list[str],
+                                     dict | None, dict | None]:
+    """Проверяет F2 preview report. (passed, reasons, warnings, row, econ)."""
     reasons: list[str] = []
+    warnings: list[str] = []
     if report is None:
         reasons.append(
             "Отсутствует F2 preview report "
             f"({DEFAULT_PREVIEW_JSON}). Сначала выполните income-order-preview и "
             "убедитесь, что preview_status=PREVIEW_READY для тикера.")
-        return False, reasons, None, None
+        return False, reasons, warnings, None, None
 
     previews = report.get("previews") or []
     matches = [r for r in previews
@@ -302,12 +304,12 @@ def evaluate_preview_gate(report: dict | None, *, ticker: str, lots: int,
         avail = ", ".join(sorted({str(r.get("ticker")) for r in previews})) or "—"
         reasons.append(
             f"Тикер {ticker} не найден в F2 preview. Доступны: {avail}.")
-        return False, reasons, None, None
+        return False, reasons, warnings, None, None
     if len(matches) > 1:
         reasons.append(
             f"Тикер {ticker} встречается в F2 preview более одного раза — "
             "неоднозначно.")
-        return False, reasons, None, None
+        return False, reasons, warnings, None, None
     row = matches[0]
 
     if row.get("preview_status") != PREVIEW_READY:
@@ -345,32 +347,51 @@ def evaluate_preview_gate(report: dict | None, *, ticker: str, lots: int,
     if not isinstance(lot_size, int) or isinstance(lot_size, bool) or lot_size <= 0:
         reasons.append(f"{ticker}: lot_size={lot_size} — ожидалось целое > 0.")
 
-    est_total = _to_decimal(row.get("estimated_total_rub"))
-    if est_total is None:
-        reasons.append(
-            f"{ticker}: estimated_total_rub отсутствует — нельзя проверить cap.")
-    elif est_total > Decimal(max_order_rub):
-        reasons.append(
-            f"{ticker}: estimated_total_rub={est_total} превышает cap "
-            f"{max_order_rub} RUB.")
+    # F2 preview estimated_total_rub отражает preview_lots (сайзинг под preview-cap),
+    # который может отличаться от текущего CLI --lots. Поэтому он — ТОЛЬКО для
+    # прозрачности отчёта и НЕ является решающим cap-блокером F4.1. Решающий cap-gate
+    # считает стоимость ИМЕННО текущей заявки (reference_price * lot_size * cli_lots).
+    preview_lots = row.get("preview_lots")
+    if isinstance(preview_lots, bool) or not isinstance(preview_lots, int):
+        preview_lots = None
+    preview_est_total = _to_decimal(row.get("estimated_total_rub"))
+
+    preview_lots_matches_cli_lots: bool | None = (
+        (preview_lots == lots) if preview_lots is not None else None)
+    preview_lots_mismatch_warning: str | None = None
+    if preview_lots is not None and preview_lots != lots:
+        preview_lots_mismatch_warning = (
+            f"{ticker}: preview_lots={preview_lots} ≠ --lots={lots}. F4.1 НЕ блокирует "
+            "только из-за расхождения: cap-gate использует "
+            "current_order_estimated_total_rub (по текущим --lots), а не preview "
+            f"estimated_total_rub={preview_est_total}.")
+        warnings.append(preview_lots_mismatch_warning)
 
     econ: dict | None = None
     if (ref is not None and ref > 0 and isinstance(lot_size, int)
             and not isinstance(lot_size, bool) and lot_size > 0):
         quantity = lots * lot_size
-        order_notional = (ref * Decimal(quantity)).quantize(Decimal("0.01"))
-        if order_notional > Decimal(max_order_rub):
+        current_order_total = (ref * Decimal(quantity)).quantize(Decimal("0.01"))
+        current_order_cap_passed = current_order_total <= Decimal(max_order_rub)
+        if not current_order_cap_passed:
             reasons.append(
-                f"{ticker}: расчётная стоимость {lots} лот(а) = {order_notional} RUB "
+                f"{ticker}: стоимость текущей заявки {lots} лот(а) "
+                f"current_order_estimated_total_rub={current_order_total} RUB "
                 f"превышает cap {max_order_rub} RUB.")
         econ = {
             "reference_price": ref,
             "lot_size": lot_size,
             "quantity": quantity,
-            "order_notional": order_notional,
+            "cli_lots": lots,
+            "preview_lots": preview_lots,
+            "preview_estimated_total_rub": preview_est_total,
+            "current_order_estimated_total_rub": current_order_total,
+            "current_order_cap_passed": current_order_cap_passed,
+            "preview_lots_matches_cli_lots": preview_lots_matches_cli_lots,
+            "preview_lots_mismatch_warning": preview_lots_mismatch_warning,
         }
 
-    return (not reasons), reasons, row, econ
+    return (not reasons), reasons, warnings, row, econ
 
 
 # ─── core ─────────────────────────────────────────────────────────────────────
@@ -407,10 +428,28 @@ def build_report(*, ticker: str, lots: int, max_order_rub: int,
     readiness_gate_passed, readiness_reasons = evaluate_readiness_gate(
         readiness_report, ticker=ticker, lots=lots, max_order_rub=max_order_rub,
         phrase=phrase)
-    preview_gate_passed, preview_reasons, row, econ = evaluate_preview_gate(
-        preview_report, ticker=ticker, lots=lots, max_order_rub=max_order_rub)
+    preview_gate_passed, preview_reasons, preview_warnings, row, econ = \
+        evaluate_preview_gate(
+            preview_report, ticker=ticker, lots=lots, max_order_rub=max_order_rub)
     blocking_reasons.extend(readiness_reasons)
     blocking_reasons.extend(preview_reasons)
+    warnings.extend(preview_warnings)
+
+    # Прозрачность cap-gate: preview_lots vs текущие --lots и обе оценки стоимости.
+    econ = econ or {}
+    notional_gate = {
+        "reference_price": econ.get("reference_price"),
+        "lot_size": econ.get("lot_size"),
+        "cli_lots": lots,
+        "preview_lots": econ.get("preview_lots"),
+        "preview_estimated_total_rub": econ.get("preview_estimated_total_rub"),
+        "current_order_estimated_total_rub": econ.get(
+            "current_order_estimated_total_rub"),
+        "current_order_cap_passed": econ.get("current_order_cap_passed"),
+        "preview_lots_matches_cli_lots": econ.get("preview_lots_matches_cli_lots"),
+        "preview_lots_mismatch_warning": econ.get("preview_lots_mismatch_warning"),
+    }
+    econ = econ or None
 
     # Намерение заявки (read-only метаданные). Строится только при наличии цены.
     order_request: dict | None = None
@@ -585,6 +624,20 @@ def build_report(*, ticker: str, lots: int, max_order_rub: int,
         "readiness_gate_passed": readiness_gate_passed,
         "preview_gate_passed": preview_gate_passed,
         "confirmation_matched": confirmation_matched,
+        # ── current-order notional cap gate (prevents stale preview_lots over-block) ──
+        "reference_price": notional_gate["reference_price"],
+        "lot_size": notional_gate["lot_size"],
+        "cli_lots": notional_gate["cli_lots"],
+        "preview_lots": notional_gate["preview_lots"],
+        "preview_estimated_total_rub": notional_gate["preview_estimated_total_rub"],
+        "current_order_estimated_total_rub": notional_gate[
+            "current_order_estimated_total_rub"],
+        "current_order_cap_passed": notional_gate["current_order_cap_passed"],
+        "preview_lots_matches_cli_lots": notional_gate[
+            "preview_lots_matches_cli_lots"],
+        "preview_lots_mismatch_warning": notional_gate[
+            "preview_lots_mismatch_warning"],
+        "current_order_notional_gate": notional_gate,
         FIELD_SENT: order_sent,
         FIELD_RESULT: order_result,
         FIELD_RESPONSE: order_response,
@@ -662,6 +715,35 @@ def render_md(report: dict) -> str:
         f"| lots | {_fmt(lp['lots'])} |",
         f"| max_order_rub | {_fmt(lp['max_order_rub'])} |",
         f"| instrument_id_source | {_fmt(lp['instrument_id_source'])} |",
+        "",
+        "## Current-order notional cap gate",
+        "",
+        "> Cap-gate F4.1 считает стоимость ИМЕННО текущей заявки "
+        "(`reference_price × lot_size × cli_lots`), а не preview `estimated_total_rub` "
+        "(который отражает preview_lots и может быть устаревшим).",
+        "",
+        "| Поле | Значение |",
+        "| --- | --- |",
+        f"| reference_price | {_fmt(report.get('reference_price'))} |",
+        f"| lot_size | {_fmt(report.get('lot_size'))} |",
+        f"| cli_lots | {_fmt(report.get('cli_lots'))} |",
+        f"| preview_lots | {_fmt(report.get('preview_lots'))} |",
+        f"| preview_estimated_total_rub | "
+        f"{_fmt(report.get('preview_estimated_total_rub'))} |",
+        f"| **current_order_estimated_total_rub** | "
+        f"{_fmt(report.get('current_order_estimated_total_rub'))} |",
+        f"| max_order_rub | {_fmt(lp['max_order_rub'])} |",
+        f"| **current_order_cap_passed** | "
+        f"{_fmt(report.get('current_order_cap_passed'))} |",
+        f"| preview_lots_matches_cli_lots | "
+        f"{_fmt(report.get('preview_lots_matches_cli_lots'))} |",
+    ]
+    if report.get("preview_lots_mismatch_warning"):
+        lines += [
+            "",
+            f"> ⚠️ {report['preview_lots_mismatch_warning']}",
+        ]
+    lines += [
         "",
         "## Required confirmation phrase",
         "",
