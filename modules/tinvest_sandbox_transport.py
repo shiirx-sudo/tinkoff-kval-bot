@@ -52,6 +52,7 @@ RussianInvestments/investAPI (источник 2: official proto / generated API
 from __future__ import annotations
 
 import time
+import uuid
 from typing import Any, Callable
 
 from loguru import logger
@@ -152,14 +153,26 @@ def _mask_account_in_payload(payload: dict | None) -> dict:
     return safe
 
 
+def _uuid_version(value: Any) -> tuple[bool, int | None]:
+    """Проверяет, что value — валидный UUID; возвращает (is_uuid, version)."""
+    try:
+        parsed = uuid.UUID(str(value))
+    except (ValueError, AttributeError, TypeError):
+        return False, None
+    return True, parsed.version
+
+
 def _sanitize_wire_payload(payload: dict, instrument_id_source: str | None) -> dict:
     """Actual wire payload PostSandboxOrder → безопасный whitelisted-вид для отчёта.
 
     accountId маскируется, instrumentId и его источник видны, quantity показывается
-    вместе с типом (должна быть строкой int64). Токен НИКОГДА не включается.
+    вместе с типом (должна быть строкой int64). orderId по контракту API обязан быть
+    UUID — фиксируем это явными флагами. Токен НИКОГДА не включается.
     """
     payload = payload if isinstance(payload, dict) else {}
     qty = payload.get("quantity")
+    order_id = payload.get("orderId")
+    order_id_is_uuid, order_id_version = _uuid_version(order_id)
     return {
         "accountId_masked": mask_identifier(str(payload.get("accountId") or "")),
         "instrumentId": payload.get("instrumentId"),
@@ -169,7 +182,9 @@ def _sanitize_wire_payload(payload: dict, instrument_id_source: str | None) -> d
         "price": payload.get("price"),
         "direction": payload.get("direction"),
         "orderType": payload.get("orderType"),
-        "orderId": payload.get("orderId"),
+        "orderId": order_id,
+        "orderId_is_uuid": order_id_is_uuid,
+        "orderId_version": order_id_version,
     }
 
 
@@ -283,13 +298,16 @@ class VerifiedSandboxRestAdapter(SandboxOrderAdapter):
 
     # ─── sandbox-only API ──────────────────────────────────────────────────────
 
-    def post_sandbox_order(self, *, request: dict, account_id: str,
-                           token: str) -> dict:
-        """PostSandboxOrder: ровно одна sandbox-заявка BUY/LIMIT по proto-контракту."""
-        # Сбрасываем диагностику предыдущего вызова, чтобы отчёт не показал stale.
-        self.last_wire_sanitized = None
-        self.last_instrument_id_source = None
-        # Жёсткие предохранители: только LIMIT BUY, только sandbox, только с токеном.
+    def _build_payload(self, request: dict,
+                       account_id: str) -> tuple[dict[str, Any], str]:
+        """Строит проверенный wire payload PostSandboxOrder (без токена, без сети).
+
+        Возвращает (payload, instrument_id_source). Используется и реальной отправкой
+        post_sandbox_order, и dry-run превью build_wire_preview, чтобы wire-контракт
+        (включая UUID orderId) был ровно один. account_id кладётся как есть, токен
+        сюда не попадает (он только в Authorization header при отправке).
+        """
+        # Жёсткие предохранители: только LIMIT BUY (MARKET/SELL запрещены).
         order_type = request.get("order_type")
         if order_type != ORDER_TYPE_LIMIT:
             raise SandboxTransportError(
@@ -300,10 +318,6 @@ class VerifiedSandboxRestAdapter(SandboxOrderAdapter):
             raise SandboxTransportError(
                 f"Sandbox transport принимает только {ORDER_DIRECTION_BUY}; "
                 f"direction={direction}. Не отправлено.")
-        if not account_id:
-            raise SandboxTransportError("Не задан sandbox account id. Не отправлено.")
-        if not token:
-            raise SandboxTransportError("Не задан sandbox-токен. Не отправлено.")
 
         instrument = request.get("instrument") or {}
         uid = instrument.get("uid")
@@ -345,6 +359,16 @@ class VerifiedSandboxRestAdapter(SandboxOrderAdapter):
         client_order_id = request.get("client_order_id")
         if not client_order_id:
             raise SandboxTransportError("Нет client_order_id. Не отправлено.")
+        # orderId по контракту API ОБЯЗАН быть валидным UUID, иначе sandbox вернёт
+        # HTTP 400 "`order id` has invalid UUID format". Семантический человекочитаемый
+        # контекст (sandbox-f3-...) сюда не кладётся — он живёт в order_trace_label.
+        try:
+            uuid.UUID(str(client_order_id))
+        except (ValueError, AttributeError, TypeError) as exc:
+            raise SandboxTransportError(
+                "orderId должен быть валидным UUID (требование API PostSandboxOrder); "
+                f"получено {client_order_id!r}. Семантический контекст храните "
+                "отдельно (order_trace_label). Не отправлено.") from exc
 
         # PostOrderRequest (camelCase JSON; quantity = ЛОТЫ, int64 → строка).
         payload = {
@@ -353,13 +377,41 @@ class VerifiedSandboxRestAdapter(SandboxOrderAdapter):
             "direction": ORDER_DIRECTION_BUY,
             "accountId": account_id,
             "orderType": ORDER_TYPE_LIMIT,
-            "orderId": client_order_id,
+            "orderId": str(client_order_id),
             "instrumentId": instrument_id,
         }
+        return payload, instrument_id_source
+
+    def post_sandbox_order(self, *, request: dict, account_id: str,
+                           token: str) -> dict:
+        """PostSandboxOrder: ровно одна sandbox-заявка BUY/LIMIT по proto-контракту."""
+        # Сбрасываем диагностику предыдущего вызова, чтобы отчёт не показал stale.
+        self.last_wire_sanitized = None
+        self.last_instrument_id_source = None
+        if not account_id:
+            raise SandboxTransportError("Не задан sandbox account id. Не отправлено.")
+        if not token:
+            raise SandboxTransportError("Не задан sandbox-токен. Не отправлено.")
+
+        payload, instrument_id_source = self._build_payload(request, account_id)
         # Фиксируем actual wire payload (санитизированный, без токена) для отчёта.
         self.last_instrument_id_source = instrument_id_source
         self.last_wire_sanitized = _sanitize_wire_payload(payload, instrument_id_source)
         return self._post(_METHOD_POST, payload, token)
+
+    def build_wire_preview(self, *, request: dict,
+                           account_id: str) -> dict:
+        """DRY-RUN превью wire payload PostSandboxOrder БЕЗ отправки и БЕЗ токена.
+
+        Сеть не вызывается. Нужен, чтобы F3-отчёт показывал заранее, что wire orderId —
+        валидный UUID v4 (а не семантическая строка). Возвращает санитизированный wire.
+        """
+        self.last_wire_sanitized = None
+        self.last_instrument_id_source = None
+        payload, instrument_id_source = self._build_payload(request, account_id or "")
+        self.last_instrument_id_source = instrument_id_source
+        self.last_wire_sanitized = _sanitize_wire_payload(payload, instrument_id_source)
+        return self.last_wire_sanitized
 
     def get_sandbox_order_state(self, *, account_id: str, order_id: str,
                                 token: str) -> dict | None:

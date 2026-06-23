@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from decimal import Decimal
 from pathlib import Path
 
@@ -314,7 +315,12 @@ def test_adapter_receives_correct_ticker_lots_price(tmp_path):
     assert req["instrument"]["ticker"] == "T"
     assert req["lots"] == 3
     assert req["limit_price"] == Decimal("275.5")
-    assert req["client_order_id"].startswith("sandbox-f3-T-")
+    # client_order_id == wire orderId: ТОЛЬКО UUID v4, без семантического префикса.
+    parsed = uuid.UUID(req["client_order_id"])
+    assert parsed.version == 4
+    assert not req["client_order_id"].startswith("sandbox-f3-")
+    # семантический контекст хранится отдельным полем
+    assert req["order_trace_label"].startswith("sandbox-f3-T-")
 
 
 # ─── санитизация ответа / отсутствие утечки токена ────────────────────────────
@@ -517,7 +523,9 @@ def test_adapter_receives_all_prepared_safe_params(tmp_path):
     assert req["instrument"]["ticker"] == "T"
     assert req["lots"] == 3
     assert req["limit_price"] == Decimal("275.5")
-    assert req["client_order_id"].startswith("sandbox-f3-T-")
+    parsed = uuid.UUID(req["client_order_id"])
+    assert parsed.version == 4
+    assert req["order_trace_label"].startswith("sandbox-f3-T-")
     assert req["sandbox_account_id_masked"] != "sandbox-acc-007"
 
 
@@ -612,3 +620,71 @@ def test_dry_run_wire_and_http_fields_present_as_none(tmp_path):
     assert rep["sandbox_http_error_json"] is None
     assert rep["sandbox_error_method"] is None
     assert rep["diagnostic_hint"] is None
+
+
+# ─── orderId UUID (Задачи 1–3) ────────────────────────────────────────────────
+
+def test_generated_order_id_is_uuid_v4():
+    oid = ise.build_sandbox_order_id()
+    parsed = uuid.UUID(oid)
+    assert parsed.version == 4
+    assert not oid.startswith("sandbox-f3-")
+
+
+def test_order_trace_label_is_semantic_not_uuid():
+    from datetime import datetime, timezone
+    now = datetime(2026, 6, 23, 14, 17, 14, tzinfo=timezone.utc)
+    label = ise.build_order_trace_label("sandbox-f3", "T", now)
+    assert label.startswith("sandbox-f3-T-")
+    with pytest.raises(ValueError):
+        uuid.UUID(label)
+
+
+def test_send_wire_order_id_is_uuid_not_semantic(tmp_path):
+    adapter = tx.VerifiedSandboxRestAdapter(transport=_RecorderTx())
+    rep = _run(tmp_path, [_preview_row()], adapter=adapter, client=None, **_SEND_KW)
+    wire = rep["sandbox_order_request_wire_sanitized"]
+    assert wire is not None
+    oid = wire["orderId"]
+    assert uuid.UUID(oid).version == 4
+    assert not oid.startswith("sandbox-f3-")
+    assert wire["orderId_is_uuid"] is True
+    assert wire["orderId_version"] == 4
+
+
+def test_semantic_tag_preserved_separately_in_report(tmp_path):
+    adapter = tx.VerifiedSandboxRestAdapter(transport=_RecorderTx())
+    rep = _run(tmp_path, [_preview_row()], adapter=adapter, client=None, **_SEND_KW)
+    # семантический трейс — отдельным полем, НЕ в wire orderId
+    assert rep["order_trace_label"].startswith("sandbox-f3-T-")
+    assert rep["client_order_tag"].startswith("sandbox-f3-T-")
+    wire_oid = rep["sandbox_order_request_wire_sanitized"]["orderId"]
+    assert rep["order_trace_label"] != wire_oid
+
+
+def test_dry_run_verified_rest_builds_wire_preview_with_uuid(tmp_path):
+    # dry-run + verified-rest транспорт: wire payload-превью строится БЕЗ отправки,
+    # orderId — валидный UUID v4. Сеть/токен не нужны.
+    adapter = tx.VerifiedSandboxRestAdapter(transport=_RecorderTx())
+    rep = _run(tmp_path, [_preview_row()], adapter=adapter, client=None,
+               sandbox_account_id="dummy-sandbox-account")
+    assert rep["mode"] == ise.MODE_DRY_RUN
+    assert rep["guards"]["sandbox_order_sent"] is False
+    wire = rep["sandbox_order_request_wire_sanitized"]
+    assert wire is not None
+    oid = wire["orderId"]
+    assert uuid.UUID(oid).version == 4
+    assert not oid.startswith("sandbox-f3-")
+    assert wire["orderId_is_uuid"] is True
+
+
+def test_no_token_leak_with_verified_rest_dry_run(tmp_path):
+    adapter = tx.VerifiedSandboxRestAdapter(transport=_RecorderTx())
+    rep = _run(tmp_path, [_preview_row()], adapter=adapter, client=None,
+               sandbox_account_id="dummy-sandbox-account",
+               sandbox_token="sbx-secret-token")
+    js = Path(rep["_output_json"]).read_text(encoding="utf-8")
+    md = Path(rep["_output_md"]).read_text(encoding="utf-8")
+    assert "sbx-secret-token" not in js
+    assert "sbx-secret-token" not in md
+    assert "dummy-sandbox-account" not in js
