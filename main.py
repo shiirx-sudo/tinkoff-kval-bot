@@ -1163,6 +1163,53 @@ def cmd_income_sandbox_account(args: argparse.Namespace) -> int:
     return int(result.get("_exit_code", 0))
 
 
+def cmd_income_live_readiness(args: argparse.Namespace) -> int:
+    from modules import income_live_readiness as ilr
+
+    try:
+        result = ilr.run(
+            ticker=getattr(args, "ticker", ilr.DEFAULT_TICKER),
+            lots=getattr(args, "lots", ilr.DEFAULT_LOTS),
+            max_order_rub=getattr(args, "max_order_rub", ilr.DEFAULT_MAX_ORDER_RUB),
+            sandbox_report=args.sandbox_report,
+            output_json=args.output_json,
+            output_md=args.output_md,
+        )
+    except ilr.LiveReadinessError as exc:
+        logger.error(str(exc))
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка income-live-readiness: {exc}")
+        return 1
+
+    lp = result["live_plan"]
+    tp = result["token_policy"]
+    print("Income live readiness — F4.0 (pre-live readiness; НЕ live-исполнение)")
+    print("LIVE-заявки не отправляются. Sandbox-заявки не отправляются. "
+          "Execution-токен не используется.")
+    print(f"  stage: {result['stage']} | mode: {result['mode']} | "
+          f"ticker: {result['ticker']}")
+    print(f"  sandbox_gate_passed: {result['sandbox_gate_passed']}")
+    print(f"  sandbox_order_id: {result['sandbox_order_id']} | "
+          f"sandbox_execution_report_status: {result['sandbox_execution_report_status']}")
+    print(f"  ready_for_f4_live_manual_order: {result['ready_for_f4_live_manual_order']}")
+    print(f"  live_plan: {lp['ticker']} {lp['side']} {lp['order_type']} "
+          f"{lp['lots']} лот(а), cap {lp['max_order_rub']} ₽, "
+          f"instrument_id_source={lp['instrument_id_source']}")
+    print(f"  required_future_confirmation_phrase: "
+          f"{result['required_future_confirmation_phrase']}")
+    print(f"  {tp['live_trading_token_env']} present: {tp['live_trading_token_present']} "
+          f"(только наличие; значение не печатается)")
+    for r in result.get("blocking_reasons", []):
+        print(f"  ! blocked: {r}")
+    for w in result.get("warnings", []):
+        print(f"  - {w}")
+    print(f"  Следующий этап: {ilr.NEXT_STAGE}")
+    logger.info(f"Отчёт: {result['_output_json']}")
+    logger.info(f"Отчёт: {result['_output_md']}")
+    return int(result.get("_exit_code", 0))
+
+
 def cmd_build_income_universe(args: argparse.Namespace) -> int:
     import json
     import shutil
@@ -1731,6 +1778,32 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default="data/reports/income_sandbox_account_report.md",
         help="Путь для Markdown-отчёта F3.2")
 
+    p_ilr = sub.add_parser(
+        "income-live-readiness",
+        help="F4.0 pre-live readiness: проверяет F3 sandbox FILL-gate и готовит tiny "
+             "live plan. НЕ live-исполнение, заявки не отправляются")
+    p_ilr.add_argument(
+        "--ticker", dest="ticker", default="T",
+        help="Тикер tiny live plan (по умолчанию T)")
+    p_ilr.add_argument(
+        "--lots", dest="lots", type=int, default=1,
+        help="Число лотов tiny live plan (по умолчанию 1)")
+    p_ilr.add_argument(
+        "--max-order-rub", dest="max_order_rub", type=int, default=300,
+        help="Жёсткий cap размера будущей live-заявки в рублях (по умолчанию 300)")
+    p_ilr.add_argument(
+        "--sandbox-report", dest="sandbox_report",
+        default="data/reports/income_sandbox_execution_report.json",
+        help="Путь к F3 income_sandbox_execution_report.json (только чтение)")
+    p_ilr.add_argument(
+        "--output-json", dest="output_json",
+        default="data/reports/income_live_readiness_report.json",
+        help="Путь для JSON-отчёта F4.0")
+    p_ilr.add_argument(
+        "--output-md", dest="output_md",
+        default="data/reports/income_live_readiness_report.md",
+        help="Путь для Markdown-отчёта F4.0")
+
     p_biu = sub.add_parser(
         "build-income-universe",
         help="READ-ONLY генератор income universe из rules + T-Invest данных")
@@ -1804,6 +1877,7 @@ _HANDLERS = {
     "income-order-preview": cmd_income_order_preview,
     "income-sandbox-execute-preview": cmd_income_sandbox_execute_preview,
     "income-sandbox-account": cmd_income_sandbox_account,
+    "income-live-readiness": cmd_income_live_readiness,
     "build-income-universe": cmd_build_income_universe,
     "telegram-test": cmd_telegram_test,
     "telegram-summary": cmd_telegram_summary,
