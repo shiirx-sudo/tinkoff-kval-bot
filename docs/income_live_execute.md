@@ -59,12 +59,20 @@ F4_0_PRE_LIVE_READINESS`, `mode == READINESS_ONLY`, `sandbox_gate_passed == true
 `live_order_sent=false`, `live_orders_service_used=false`, `no_live_execution=true`,
 `no_order_execution=true`.
 
-**Preview gate** (`income_order_preview.json`, F2): тикер `T` выбран,
-`preview_status == PREVIEW_READY`, `source_proposed_action == BUY_CANDIDATE`,
-безопасные F2-флаги (`order_send_allowed=false`, `auto_execution_allowed=false`,
+**Preview gate** (`income_order_preview.json`, F2): F2 preview — источник
+**eligibility**: тикер `T` выбран, `preview_status == PREVIEW_READY`,
+`source_proposed_action == BUY_CANDIDATE`, безопасные F2-флаги
+(`order_send_allowed=false`, `auto_execution_allowed=false`,
 `full_access_token_required=false`, `orders_service_allowed=false`,
-`manual_confirmation_required=true`), `reference_price_status == OK` и цена > 0,
-`estimated_total_rub ≤ max_order_rub`, корректный `lot_size`.
+`manual_confirmation_required=true`), `reference_price_status == OK` и
+`reference_price` > 0, корректный `lot_size`, и идентификаторы инструмента
+(uid/figi). Размер заявки F4.1 здесь **не** проверяется по preview-итогу.
+
+> F4.1 **не** требует `estimated_total_rub ≤ max_order_rub`. Preview
+> `estimated_total_rub` отражает `preview_lots` (сайзинг под preview-cap старого
+> запуска) и может отличаться от текущих `--lots`, поэтому он **только для
+> прозрачности отчёта** и не является решающим cap-блокером. Решающий cap-чек —
+> в Price/cap gate ниже, по `current_order_estimated_total_rub`.
 
 **Price/cap gate (current-order notional):** лимитная цена = последняя preview
 reference price; решающий cap-чек считает стоимость **именно текущей заявки**:
