@@ -7,6 +7,10 @@ payload использует подтверждённые поля proto-кон�
 """
 from __future__ import annotations
 
+import json
+import sys
+import types
+
 import pytest
 
 from modules import income_sandbox_execution as ise
@@ -66,23 +70,86 @@ def test_post_payload_uses_confirmed_contract_fields():
     p = call["payload"]
     # подтверждённые поля PostOrderRequest (camelCase JSON)
     assert p["quantity"] == "3"            # int64 → строка, КОЛИЧЕСТВО ЛОТОВ
+    assert isinstance(p["quantity"], str)  # quantity в wire payload — строка
     assert p["price"] == {"units": "275", "nano": 500000000}
     assert p["direction"] == "ORDER_DIRECTION_BUY"
     assert p["accountId"] == "sandbox-acc-007"
     assert p["orderType"] == "ORDER_TYPE_LIMIT"
     assert p["orderId"] == "sandbox-f3-T-x"
-    assert p["instrumentId"] == "FIGI-T"
+    # UID-first: при наличии и uid, и figi берётся uid (поле instrumentId)
+    assert p["instrumentId"] == "uid-T"
     # никакого live-token-поля или секрета в payload
     assert "token" not in p
     assert "Authorization" not in p
 
 
-def test_instrument_id_falls_back_to_uid_when_no_figi():
+def test_instrument_id_uses_uid_before_figi_when_both_exist():
     rec = _Recorder()
     adapter = tx.VerifiedSandboxRestAdapter(transport=rec)
     adapter.post_sandbox_order(
-        request=_request(figi=None), account_id="acc", token="t")
+        request=_request(figi="FIGI-T", uid="uid-T"), account_id="acc", token="t")
     assert rec.calls[0]["payload"]["instrumentId"] == "uid-T"
+    assert adapter.last_instrument_id_source == "uid"
+
+
+def test_instrument_id_falls_back_to_figi_when_uid_missing():
+    rec = _Recorder()
+    adapter = tx.VerifiedSandboxRestAdapter(transport=rec)
+    adapter.post_sandbox_order(
+        request=_request(uid=None), account_id="acc", token="t")
+    assert rec.calls[0]["payload"]["instrumentId"] == "FIGI-T"
+    assert adapter.last_instrument_id_source == "figi"
+
+
+def test_instrument_id_missing_both_hard_fails():
+    rec = _Recorder()
+    adapter = tx.VerifiedSandboxRestAdapter(transport=rec)
+    with pytest.raises(tx.SandboxTransportError):
+        adapter.post_sandbox_order(
+            request=_request(figi=None, uid=None), account_id="acc", token="t")
+    assert rec.calls == []
+
+
+def test_instrument_id_source_force_uid_requires_uid():
+    rec = _Recorder()
+    adapter = tx.VerifiedSandboxRestAdapter(transport=rec)
+    req = _request(figi="FIGI-T", uid=None)
+    req["instrument_id_source_pref"] = "uid"
+    with pytest.raises(tx.SandboxTransportError):
+        adapter.post_sandbox_order(request=req, account_id="acc", token="t")
+    assert rec.calls == []
+
+
+def test_instrument_id_source_force_figi_uses_figi_even_with_uid():
+    rec = _Recorder()
+    adapter = tx.VerifiedSandboxRestAdapter(transport=rec)
+    req = _request(figi="FIGI-T", uid="uid-T")
+    req["instrument_id_source_pref"] = "figi"
+    adapter.post_sandbox_order(request=req, account_id="acc", token="t")
+    assert rec.calls[0]["payload"]["instrumentId"] == "FIGI-T"
+    assert adapter.last_instrument_id_source == "figi"
+
+
+def test_wire_payload_sanitized_uses_uid_and_string_quantity():
+    rec = _Recorder()
+    adapter = tx.VerifiedSandboxRestAdapter(transport=rec)
+    adapter.post_sandbox_order(
+        request=_request(figi="FIGI-T", uid="uid-T"),
+        account_id="sandbox-acc-007", token="sbx-token")
+    wire = adapter.last_wire_sanitized
+    assert wire is not None
+    assert wire["instrumentId"] == "uid-T"
+    assert wire["instrument_id_source"] == "uid"
+    assert wire["quantity"] == "3"
+    assert wire["quantity_type"] == "str"
+    # цена-quotation сохранена, enums сохранены
+    assert wire["price"] == {"units": "275", "nano": 500000000}
+    assert wire["direction"] == "ORDER_DIRECTION_BUY"
+    assert wire["orderType"] == "ORDER_TYPE_LIMIT"
+    # accountId маскирован, токен не включён
+    assert wire["accountId_masked"] != "sandbox-acc-007"
+    blob = json.dumps(wire)
+    assert "sbx-token" not in blob
 
 
 def test_market_order_hard_fails():
@@ -146,6 +213,88 @@ def test_get_order_state_returns_none_without_ids():
     assert adapter.get_sandbox_order_state(
         account_id="", order_id="sb-1", token="t") is None
     assert rec.calls == []
+
+
+def _make_fake_requests(*, status_code, json_data, text, json_raises=False):
+    """Минимальный фейковый requests-модуль для проверки захвата HTTP-ошибки."""
+    mod = types.ModuleType("requests")
+
+    class HTTPError(Exception):
+        pass
+
+    class FakeResp:
+        def __init__(self):
+            self.status_code = status_code
+            self.text = text
+
+        def json(self):
+            if json_raises:
+                raise ValueError("no json")
+            return json_data
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise HTTPError(f"{self.status_code} Client Error for url …")
+
+    class FakeSession:
+        def __init__(self):
+            self.headers = {}
+
+        def post(self, url, json=None, timeout=None):
+            return FakeResp()
+
+    mod.HTTPError = HTTPError
+    mod.Session = FakeSession
+    return mod
+
+
+def test_http_400_captures_sanitized_response_body(monkeypatch):
+    fake = _make_fake_requests(
+        status_code=400,
+        json_data={"code": 3, "message": "bad instrument"},
+        text='{"code":3,"message":"bad instrument"}')
+    monkeypatch.setitem(sys.modules, "requests", fake)
+    adapter = tx.VerifiedSandboxRestAdapter(transport=None, max_retries=1)
+    with pytest.raises(tx.SandboxTransportHttpError) as ei:
+        adapter.post_sandbox_order(
+            request=_request(), account_id="sandbox-acc-007", token="sbx-secret")
+    exc = ei.value
+    assert exc.status_code == 400
+    assert exc.method == "PostSandboxOrder"
+    assert "bad instrument" in exc.safe_response_body
+    assert exc.safe_response_json["message"] == "bad instrument"
+    assert exc.safe_request_payload["instrumentId"] == "uid-T"
+    # accountId маскирован; токен/Authorization нигде не появляются
+    assert exc.safe_request_payload["accountId"] != "sandbox-acc-007"
+    blob = json.dumps({
+        "body": exc.safe_response_body, "json": exc.safe_response_json,
+        "payload": exc.safe_request_payload, "url": exc.url, "msg": str(exc)})
+    assert "sbx-secret" not in blob
+    assert "Authorization" not in blob
+
+
+def test_http_400_non_json_body_captured(monkeypatch):
+    fake = _make_fake_requests(
+        status_code=400, json_data=None, text="Bad Request plain text",
+        json_raises=True)
+    monkeypatch.setitem(sys.modules, "requests", fake)
+    adapter = tx.VerifiedSandboxRestAdapter(transport=None, max_retries=1)
+    with pytest.raises(tx.SandboxTransportHttpError) as ei:
+        adapter.post_sandbox_order(request=_request(), account_id="acc", token="t")
+    exc = ei.value
+    assert exc.safe_response_json is None
+    assert "Bad Request" in exc.safe_response_body
+
+
+def test_wire_payload_recorded_before_http_error(monkeypatch):
+    fake = _make_fake_requests(
+        status_code=400, json_data={"message": "x"}, text="{}")
+    monkeypatch.setitem(sys.modules, "requests", fake)
+    adapter = tx.VerifiedSandboxRestAdapter(transport=None, max_retries=1)
+    with pytest.raises(tx.SandboxTransportHttpError):
+        adapter.post_sandbox_order(request=_request(), account_id="acc", token="t")
+    assert adapter.last_wire_sanitized["instrumentId"] == "uid-T"
+    assert adapter.last_instrument_id_source == "uid"
 
 
 def test_module_source_has_no_live_order_execution_apis():

@@ -71,6 +71,7 @@ verified-rest` отправка блокируется (`SANDBOX_TRANSPORT_UNCON
 | `--output-md` | `data/reports/income_sandbox_execution_report.md` | Markdown-отчёт |
 | `--sandbox-account-id` | none | sandbox account id (обязателен для `--send-sandbox`) |
 | `--sandbox-transport` | `unconfigured` | `unconfigured` / `verified-rest` / `verified-sdk` |
+| `--instrument-id-source` | `auto` | `auto` (uid-first, figi-fallback) / `uid` / `figi` |
 | `--max-order-rub` | `1000` | жёсткий cap размера заявки |
 | `--max-price-deviation-bps` | `100` | макс. отклонение свежей цены от preview |
 | `--dry-run` | true | dry-run по умолчанию |
@@ -150,8 +151,23 @@ sandbox, только BUY/LIMIT). Выбор транспорта — флаг `
 
 Wire-payload (camelCase JSON): `quantity` (строка, лоты), `price`, `direction`
 (`ORDER_DIRECTION_BUY`), `accountId`, `orderType` (`ORDER_TYPE_LIMIT`), `orderId`
-(идемпотентный client order id), `instrumentId` (figi/uid). Контракт фиксируется в
+(идемпотентный client order id), `instrumentId` (uid/figi). Контракт фиксируется в
 отчёте в `sandbox_transport.contract_source`.
+
+#### Выбор instrumentId: UID-first
+
+Поле wire-payload называется `instrumentId`. По умолчанию (`auto`) адаптер берёт
+**uid first, figi fallback** — uid присутствует в F2 preview и для `PostSandboxOrder`
+надёжнее. Поведение управляется флагом `--instrument-id-source auto|uid|figi`:
+
+| Значение | Поведение |
+| --- | --- |
+| `auto` (по умолчанию) | uid, если есть; иначе figi; если нет обоих — hard fail |
+| `uid` | только uid (если uid нет — hard fail) |
+| `figi` | только figi (если figi нет — hard fail) |
+
+Фактический использованный источник фиксируется в отчёте как
+`sandbox_order_request_wire_sanitized.instrument_id_source`.
 
 Адаптер принимает **уже подготовленные безопасные параметры** из F3 preflight и сам
 НЕ выбирает инструмент/цену/лоты, НЕ читает live account, НЕ использует live токен,
@@ -200,12 +216,49 @@ python main.py income-sandbox-execute-preview `
 `required_confirmation_phrase`, `confirmation_matched`, `preflight`,
 `sandbox_transport` (`selected_transport`, `configured`, `contract_source`,
 `adapter_class`), `sandbox_order_request` / `sandbox_order_request_sanitized`,
-`sandbox_order_result`, `sandbox_order_response_sanitized`,
-`sandbox_order_state_sanitized`, `guards`, `errors`, `warnings`.
+`sandbox_order_request_wire_sanitized`, `sandbox_order_result`,
+`sandbox_order_response_sanitized`, `sandbox_order_state_sanitized`,
+`sandbox_http_status`, `sandbox_http_error_body`, `sandbox_http_error_json`,
+`sandbox_error_method`, `diagnostic_hint`, `guards`, `errors`, `warnings`.
 
 Все ответы адаптера санитизируются: в отчёт попадают только whitelisted-поля
 контракта (order id, статус, лоты, сумма, message) — токен/секреты в отчёт и логи
 не попадают; account id только маскированный.
+
+### Диагностика отправки (actual wire payload + HTTP-ошибки)
+
+Дополнительные поля отчёта для разбора неудачной sandbox-отправки (все
+санитизированы, без токена и без Authorization-заголовка):
+
+- `sandbox_order_request_wire_sanitized` — **фактический** wire-payload, ушедший в
+  REST: `instrumentId`, `instrument_id_source` (uid/figi), `quantity` + `quantity_type`
+  (должна быть строкой int64), `price`, `direction`, `orderType`, `orderId`,
+  `accountId_masked` (account id только маскированный);
+- `sandbox_http_status` — HTTP-статус ответа (например `400`);
+- `sandbox_http_error_body` — тело ответа API (обрезается), без секретов;
+- `sandbox_http_error_json` — распарсенное JSON-тело ошибки, если ответ был JSON;
+- `sandbox_error_method` — метод (`PostSandboxOrder`);
+- `diagnostic_hint` — короткая подсказка по причине.
+
+### Troubleshooting: 400 от PostSandboxOrder
+
+Если `PostSandboxOrder` вернул `400 Client Error`, отчёт сохраняет причину без
+токена. Порядок разбора:
+
+1. Откройте `sandbox_http_error_body` (и `sandbox_http_error_json`) — там тело
+   ответа API с `message`/`description` причины.
+2. Проверьте `sandbox_order_request_wire_sanitized`:
+   - `instrument_id_source` — какой id ушёл (uid/figi). По умолчанию uid-first;
+     при проблемах попробуйте `--instrument-id-source figi`.
+   - `quantity` — должно быть **строкой** и равно числу **лотов** (не штук).
+   - `price` — `Quotation {units, nano}`; проверьте шаг цены (price increment)
+     инструмента; неверное приращение цены — частая причина 400.
+   - `direction` / `orderType` — должны быть `ORDER_DIRECTION_BUY` /
+     `ORDER_TYPE_LIMIT` (enum-значения).
+3. `diagnostic_hint` суммирует вероятную причину.
+
+Токен (`TINKOFF_SANDBOX_TOKEN`) и Authorization-заголовок никогда не попадают в
+отчёт, тело ошибки и логи.
 
 `guards` фиксируют контракт: `live_order_sent=false`, `sandbox_order_sent`,
 `dry_run`, `manual_confirmation_required=true`, `order_send_allowed=false` (для live),
