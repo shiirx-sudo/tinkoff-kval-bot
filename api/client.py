@@ -88,6 +88,12 @@ class ReadOnlyClient:
         resp = self._rest.get_instrument_by(INSTRUMENT_ID_TYPE_FIGI, figi)
         return (resp or {}).get("instrument")
 
+    def get_instrument_by_uid(self, uid: str) -> dict[str, Any] | None:
+        """GetInstrumentBy по instrument uid (read-only). None при отсутствии."""
+        from brokers.tinkoff.rest_client import INSTRUMENT_ID_TYPE_UID
+        resp = self._rest.get_instrument_by(INSTRUMENT_ID_TYPE_UID, uid)
+        return (resp or {}).get("instrument")
+
     def instruments_catalog(self) -> list[dict[str, Any]]:
         """Объединённый каталог Etfs/Shares/Bonds/Currencies (read-only fallback)."""
         out: list[dict[str, Any]] = []

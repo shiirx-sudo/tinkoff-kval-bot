@@ -124,18 +124,49 @@ def _write(tmp: Path, name: str, data: dict | None) -> str:
     return str(p)
 
 
-def _run(tmp: Path, *, readiness=None, preview=None, transport=None, **kw) -> dict:
+def trad_available(**over):
+    """Read-only tradability-провайдер: инструмент доступен для BUY LIMIT."""
+    base = {
+        "trading_status": "SECURITY_TRADING_STATUS_NORMAL_TRADING",
+        "api_trade_available_flag": True,
+        "buy_available_flag": True,
+        "for_qual_investor_flag": False,
+        "exchange": "MOEX",
+        "class_code": "TQBR",
+        "min_price_increment": {"units": "0", "nano": 20000000},
+        "source": "test_provider",
+    }
+    base.update(over)
+    return lambda instrument: dict(base)
+
+
+def trad_unavailable(**over):
+    """Read-only tradability-провайдер: инструмент НЕ доступен (как 30079)."""
+    return trad_available(
+        trading_status="SECURITY_TRADING_STATUS_NOT_AVAILABLE_FOR_TRADING",
+        api_trade_available_flag=False, **over)
+
+
+_UNSET = object()
+
+
+def _run(tmp: Path, *, readiness=None, preview=None, transport=None,
+         tradability=_UNSET, **kw) -> dict:
     rp = _write(tmp, "readiness.json", readiness)
     pp = _write(tmp, "preview.json", preview)
     adapter = None
     if transport is not None:
         adapter = VerifiedLiveRestAdapter(transport=transport)
+    # По умолчанию tradability проходит (изоляция от сети). Тесты, проверяющие сам
+    # tradability-gate, передают tradability=None (не проверено) или trad_unavailable().
+    provider = trad_available() if tradability is _UNSET else tradability
     return ile.run(
         readiness_report=rp,
         preview_report=pp,
         output_json=str(tmp / "exec.json"),
         output_md=str(tmp / "exec.md"),
         adapter=adapter,
+        tradability_provider=provider,
         **kw,
     )
 
@@ -533,6 +564,112 @@ def test_notional_gate_dry_run_no_send_no_token(tmp_path, monkeypatch):
     assert rep["token_policy"]["live_trading_token_present"] is False
     js = Path(rep["_output_json"]).read_text(encoding="utf-8")
     assert "ANALYTICS-SECRET" not in js and "SANDBOX-SECRET" not in js
+
+
+# ─── live tradability preflight (F4.1 safety gate before PostOrder) ───────────
+
+def test_tradability_available_dry_run_unchanged(tmp_path):
+    rep = _run(tmp_path, readiness=_readiness(), preview=_preview(),
+               tradability=trad_available())
+    assert rep["mode"] == "DRY_RUN"
+    assert rep["live_tradability_checked"] is True
+    assert rep["live_tradability_passed"] is True
+    assert rep["live_trading_status"] == "SECURITY_TRADING_STATUS_NORMAL_TRADING"
+    assert rep["live_api_trade_available_flag"] is True
+    assert rep["live_buy_available_flag"] is True
+    assert rep["live_postorder_blocked_before_call"] is False
+    assert rep[ile.FIELD_SENT] is False
+
+
+def test_tradability_unavailable_blocks_before_postorder(tmp_path):
+    transport = FakeTransport()
+    rep = _run(tmp_path, readiness=_readiness(), preview=_preview(),
+               transport=transport, tradability=trad_unavailable(),
+               send_live=True, confirm=PHRASE, live_account_id=LIVE_ACCOUNT,
+               live_token=SECRET_LIVE_TOKEN)
+    # blocked before any PostOrder
+    assert transport.post_calls == []
+    assert rep[ile.FIELD_SENT] is False
+    assert rep["guards"][ile.GUARD_ORDERS_SERVICE_USED] is False  # service not used
+    assert rep["guards"][ile.GUARD_KEY_LIVE_ORDER_SENT] is False
+    assert rep["guards"]["no_retries"] is True
+    assert rep["guards"]["market_order_used"] is False
+    assert rep["live_tradability_checked"] is True
+    assert rep["live_tradability_passed"] is False
+    assert rep["live_postorder_blocked_before_call"] is True
+    assert rep["live_tradability_blocking_reason"]
+    assert rep["_exit_code"] == 1
+    # token must not be used to call any service, and must not leak
+    assert rep["guards"]["live_token_used"] is False
+    js = Path(rep["_output_json"]).read_text(encoding="utf-8")
+    assert SECRET_LIVE_TOKEN not in js
+
+
+def test_send_blocked_when_tradability_unchecked(tmp_path):
+    # provider=None → tradability not verified → live send must be blocked
+    transport = FakeTransport()
+    rep = _run(tmp_path, readiness=_readiness(), preview=_preview(),
+               transport=transport, tradability=None,
+               send_live=True, confirm=PHRASE, live_account_id=LIVE_ACCOUNT,
+               live_token=SECRET_LIVE_TOKEN)
+    assert transport.post_calls == []
+    assert rep[ile.FIELD_SENT] is False
+    assert rep["live_tradability_checked"] is False
+    assert rep["guards"][ile.GUARD_ORDERS_SERVICE_USED] is False
+    assert rep["live_postorder_blocked_before_call"] is True
+    assert any("tradability" in r.lower() for r in rep["blocking_reasons"])
+    assert rep["_exit_code"] == 1
+
+
+def test_tradability_unavailable_individual_flags(tmp_path):
+    # buy_available_flag false alone must block
+    rep = _run(tmp_path, readiness=_readiness(), preview=_preview(),
+               tradability=trad_available(buy_available_flag=False),
+               send_live=True, confirm=PHRASE, live_account_id=LIVE_ACCOUNT,
+               live_token=SECRET_LIVE_TOKEN)
+    assert rep["live_tradability_passed"] is False
+    assert "buy_available_flag" in rep["live_tradability_blocking_reason"]
+    assert rep[ile.FIELD_SENT] is False
+
+
+def test_http_400_30079_classified(tmp_path):
+    # if PostOrder still returns 30079 (tradability passed but broker rejects),
+    # classify as INSTRUMENT_NOT_AVAILABLE_FOR_TRADING
+    from modules.tinvest_live_transport import LiveTransportHttpError
+    body = ('{"code":3,"message":"Instrument is not available for trading",'
+            '"description":"30079"}')
+    err = LiveTransportHttpError(
+        method=_METHOD_POST, status_code=400,
+        safe_response_body=body,
+        safe_response_json={"code": 3,
+                            "message": "Instrument is not available for trading",
+                            "description": "30079"},
+        safe_request_payload={"accountId": "***"}, url="https://x/y")
+    transport = FakeTransport(raise_on_post=err)
+    rep = _run(tmp_path, readiness=_readiness(), preview=_preview(),
+               transport=transport, tradability=trad_available(),
+               send_live=True, confirm=PHRASE, live_account_id=LIVE_ACCOUNT,
+               live_token=SECRET_LIVE_TOKEN)
+    assert len(transport.post_calls) == 1  # tradability passed → call attempted once
+    assert rep[ile.FIELD_SENT] is False
+    assert rep["live_http_status"] == 400
+    assert rep["live_http_error_classification"] == \
+        "INSTRUMENT_NOT_AVAILABLE_FOR_TRADING"
+    # raw sanitized body preserved
+    assert "30079" in (rep["live_http_error_body"] or "")
+    assert "INSTRUMENT_NOT_AVAILABLE_FOR_TRADING" in (rep["diagnostic_hint"] or "")
+    assert rep["guards"]["market_order_used"] is False
+    assert rep["guards"]["no_retries"] is True
+
+
+def test_classify_live_http_error_unit():
+    assert ile.classify_live_http_error(
+        400, {"description": "30079"}, None) == "INSTRUMENT_NOT_AVAILABLE_FOR_TRADING"
+    assert ile.classify_live_http_error(
+        400, {"message": "Instrument is not available for trading"}, None) == \
+        "INSTRUMENT_NOT_AVAILABLE_FOR_TRADING"
+    assert ile.classify_live_http_error(400, {"message": "bad price"}, None) is None
+    assert ile.classify_live_http_error(None, None, None) is None
 
 
 def test_module_source_has_no_forbidden_literals():
