@@ -1088,6 +1088,8 @@ def cmd_income_sandbox_execute_preview(args: argparse.Namespace) -> int:
             sandbox_account_id=getattr(args, "sandbox_account_id", None),
             sandbox_transport=getattr(args, "sandbox_transport",
                                       ise.TRANSPORT_UNCONFIGURED),
+            instrument_id_source=getattr(args, "instrument_id_source",
+                                         ise.INSTRUMENT_ID_SOURCE_AUTO),
             client=client,
         )
     except ise.SandboxExecutionError as exc:
@@ -1661,6 +1663,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Sandbox-транспорт: unconfigured (по умолчанию, отправка заблокирована), "
              "verified-rest (проверенный sandbox REST), verified-sdk (SDK, если "
              "установлен)")
+    p_ise.add_argument(
+        "--instrument-id-source", dest="instrument_id_source",
+        choices=("auto", "uid", "figi"), default="auto",
+        help="Источник instrumentId для wire payload: auto (uid-first, figi-fallback), "
+             "uid (только uid), figi (только figi)")
     p_ise.add_argument(
         "--max-order-rub", dest="max_order_rub", type=int, default=1000,
         help="Жёсткий cap размера заявки в рублях (по умолчанию 1000)")

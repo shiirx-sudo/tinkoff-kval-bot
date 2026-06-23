@@ -56,7 +56,11 @@ from typing import Any, Callable
 
 from loguru import logger
 
+from common.helpers import mask_identifier
 from modules.income_sandbox_execution import (
+    INSTRUMENT_ID_SOURCE_AUTO,
+    INSTRUMENT_ID_SOURCE_FIGI,
+    INSTRUMENT_ID_SOURCE_UID,
     ORDER_DIRECTION_BUY,
     ORDER_TYPE_LIMIT,
     SandboxExecutionError,
@@ -75,6 +79,9 @@ _BASE_URL = "https://invest-public-api.tinkoff.ru/rest"
 _DEFAULT_TIMEOUT = 10
 _MAX_RETRIES = 5
 _RATE_LIMIT_SLEEP = 1.0
+# Тело ответа при ошибке обрезается, чтобы отчёт не раздувался; в нём нет токена
+# (API не возвращает Authorization в теле), но размер ограничиваем на всякий случай.
+_MAX_ERROR_BODY = 4000
 
 # Имя sandbox-сервиса и методов из подтверждённого proto. Здесь нет ни одного
 # live order-endpoint токена (никакого Orders-сервиса/live order endpoint).
@@ -107,6 +114,65 @@ class SandboxTransportError(SandboxExecutionError):
     """Ошибка sandbox-транспорта (без traceback, безопасна для пользователя)."""
 
 
+class SandboxTransportHttpError(SandboxTransportError):
+    """Диагностируемая HTTP-ошибка sandbox-транспорта (4xx/5xx).
+
+    Несёт уже санитизированные детали для отчёта: метод, статус, тело ответа,
+    распарсенный JSON-ответ, санитизированный request payload и URL без токена.
+    Токен/Authorization сюда НИКОГДА не попадают (он только в заголовке запроса).
+    """
+
+    # Маркер для duck-typing в income_sandbox_execution.build_report (без
+    # обратного импорта, чтобы не создавать циклической зависимости).
+    is_sandbox_http_diag = True
+
+    def __init__(self, *, method: str, status_code: int | None,
+                 safe_response_body: str | None,
+                 safe_response_json: Any | None,
+                 safe_request_payload: dict | None,
+                 url: str, message: str | None = None) -> None:
+        self.method = method
+        self.status_code = status_code
+        self.safe_response_body = safe_response_body
+        self.safe_response_json = safe_response_json
+        self.safe_request_payload = safe_request_payload
+        self.url = url
+        super().__init__(
+            message or f"Sandbox {method}: HTTP {status_code}. "
+            "См. sandbox_http_error_body в отчёте.")
+
+
+def _mask_account_in_payload(payload: dict | None) -> dict:
+    """Копия payload с маскированным accountId; токена в payload нет по контракту."""
+    if not isinstance(payload, dict):
+        return {}
+    safe = dict(payload)
+    if "accountId" in safe:
+        safe["accountId"] = mask_identifier(str(safe.get("accountId") or ""))
+    return safe
+
+
+def _sanitize_wire_payload(payload: dict, instrument_id_source: str | None) -> dict:
+    """Actual wire payload PostSandboxOrder → безопасный whitelisted-вид для отчёта.
+
+    accountId маскируется, instrumentId и его источник видны, quantity показывается
+    вместе с типом (должна быть строкой int64). Токен НИКОГДА не включается.
+    """
+    payload = payload if isinstance(payload, dict) else {}
+    qty = payload.get("quantity")
+    return {
+        "accountId_masked": mask_identifier(str(payload.get("accountId") or "")),
+        "instrumentId": payload.get("instrumentId"),
+        "instrument_id_source": instrument_id_source,
+        "quantity": qty,
+        "quantity_type": type(qty).__name__,
+        "price": payload.get("price"),
+        "direction": payload.get("direction"),
+        "orderType": payload.get("orderType"),
+        "orderId": payload.get("orderId"),
+    }
+
+
 # Тип тестового транспорта: callable(method, payload, token) -> dict.
 TransportCallable = Callable[[str, dict[str, Any], str], dict[str, Any]]
 
@@ -129,6 +195,10 @@ class VerifiedSandboxRestAdapter(SandboxOrderAdapter):
         self._transport = transport
         self._timeout = timeout_seconds
         self._max_retries = max_retries
+        # actual wire payload последней PostSandboxOrder (санитизированный, без
+        # токена) — для диагностики в отчёте F3; источник instrument id отдельно.
+        self.last_wire_sanitized: dict | None = None
+        self.last_instrument_id_source: str | None = None
 
     # ─── транспорт ────────────────────────────────────────────────────────────
 
@@ -152,6 +222,7 @@ class VerifiedSandboxRestAdapter(SandboxOrderAdapter):
             "Accept": "application/json",
         })
         last_exc: Exception | None = None
+        resp = None
         for attempt in range(1, self._max_retries + 1):
             try:
                 resp = session.post(url, json=payload, timeout=self._timeout)
@@ -175,15 +246,49 @@ class VerifiedSandboxRestAdapter(SandboxOrderAdapter):
                     time.sleep(wait)
                     last_exc = exc
                     continue
-                raise SandboxTransportError(f"Ошибка sandbox {method}: {exc}") from exc
+                # Не-ретраябельная HTTP-ошибка (например 400): сохраняем
+                # санитизированное тело/JSON ответа, чтобы причина была видна.
+                # Authorization-заголовок и токен сюда не попадают.
+                raise self._build_http_error(method, url, payload, resp) from exc
         assert last_exc is not None
         raise SandboxTransportError(f"Sandbox {method}: исчерпаны ретраи (429).")
+
+    @staticmethod
+    def _build_http_error(method: str, url: str, payload: dict,
+                          resp) -> SandboxTransportHttpError:
+        """Собирает SandboxTransportHttpError из ответа (без токена/секретов)."""
+        status = getattr(resp, "status_code", None)
+        body = ""
+        try:
+            body = resp.text or ""
+        except Exception:  # noqa: BLE001
+            body = ""
+        if len(body) > _MAX_ERROR_BODY:
+            body = body[:_MAX_ERROR_BODY] + "…(truncated)"
+        parsed: Any | None = None
+        try:
+            parsed = resp.json()
+        except Exception:  # noqa: BLE001
+            parsed = None
+        if not isinstance(parsed, (dict, list)):
+            parsed = None
+        return SandboxTransportHttpError(
+            method=method,
+            status_code=status,
+            safe_response_body=body,
+            safe_response_json=parsed,
+            safe_request_payload=_mask_account_in_payload(payload),
+            url=url,  # url не содержит токена (он только в заголовке)
+        )
 
     # ─── sandbox-only API ──────────────────────────────────────────────────────
 
     def post_sandbox_order(self, *, request: dict, account_id: str,
                            token: str) -> dict:
         """PostSandboxOrder: ровно одна sandbox-заявка BUY/LIMIT по proto-контракту."""
+        # Сбрасываем диагностику предыдущего вызова, чтобы отчёт не показал stale.
+        self.last_wire_sanitized = None
+        self.last_instrument_id_source = None
         # Жёсткие предохранители: только LIMIT BUY, только sandbox, только с токеном.
         order_type = request.get("order_type")
         if order_type != ORDER_TYPE_LIMIT:
@@ -201,10 +306,31 @@ class VerifiedSandboxRestAdapter(SandboxOrderAdapter):
             raise SandboxTransportError("Не задан sandbox-токен. Не отправлено.")
 
         instrument = request.get("instrument") or {}
-        instrument_id = instrument.get("figi") or instrument.get("uid")
-        if not instrument_id:
+        uid = instrument.get("uid")
+        figi = instrument.get("figi")
+        # В payload поле называется instrumentId; для PostOrder надёжнее UID-first
+        # (uid есть в F2 preview), figi — fallback. Источник фиксируется в отчёте.
+        pref = str(request.get("instrument_id_source_pref")
+                   or INSTRUMENT_ID_SOURCE_AUTO).strip().lower()
+        if pref == INSTRUMENT_ID_SOURCE_UID:
+            if not uid:
+                raise SandboxTransportError(
+                    "Запрошен instrument-id-source=uid, но uid отсутствует. "
+                    "Не отправлено.")
+            instrument_id, instrument_id_source = uid, INSTRUMENT_ID_SOURCE_UID
+        elif pref == INSTRUMENT_ID_SOURCE_FIGI:
+            if not figi:
+                raise SandboxTransportError(
+                    "Запрошен instrument-id-source=figi, но figi отсутствует. "
+                    "Не отправлено.")
+            instrument_id, instrument_id_source = figi, INSTRUMENT_ID_SOURCE_FIGI
+        elif uid:  # auto: uid first
+            instrument_id, instrument_id_source = uid, INSTRUMENT_ID_SOURCE_UID
+        elif figi:  # auto: figi fallback
+            instrument_id, instrument_id_source = figi, INSTRUMENT_ID_SOURCE_FIGI
+        else:
             raise SandboxTransportError(
-                "Нет instrument id (figi/uid) для sandbox-заявки. Не отправлено.")
+                "Нет instrument id (uid/figi) для sandbox-заявки. Не отправлено.")
 
         lots = request.get("lots")
         if not isinstance(lots, int) or isinstance(lots, bool) or lots <= 0:
@@ -230,6 +356,9 @@ class VerifiedSandboxRestAdapter(SandboxOrderAdapter):
             "orderId": client_order_id,
             "instrumentId": instrument_id,
         }
+        # Фиксируем actual wire payload (санитизированный, без токена) для отчёта.
+        self.last_instrument_id_source = instrument_id_source
+        self.last_wire_sanitized = _sanitize_wire_payload(payload, instrument_id_source)
         return self._post(_METHOD_POST, payload, token)
 
     def get_sandbox_order_state(self, *, account_id: str, order_id: str,

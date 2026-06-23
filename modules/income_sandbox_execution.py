@@ -64,6 +64,14 @@ REFERENCE_PRICE_OK = "OK"
 ORDER_DIRECTION_BUY = "ORDER_DIRECTION_BUY"
 ORDER_TYPE_LIMIT = "ORDER_TYPE_LIMIT"
 
+# Выбор источника instrumentId для wire payload (поле называется instrumentId).
+# auto = uid first, figi fallback (надёжнее для PostOrder, uid есть в F2 preview).
+INSTRUMENT_ID_SOURCE_AUTO = "auto"
+INSTRUMENT_ID_SOURCE_UID = "uid"
+INSTRUMENT_ID_SOURCE_FIGI = "figi"
+ALL_INSTRUMENT_ID_SOURCES = (
+    INSTRUMENT_ID_SOURCE_AUTO, INSTRUMENT_ID_SOURCE_UID, INSTRUMENT_ID_SOURCE_FIGI)
+
 # Выбор sandbox-транспорта (F3.1). По умолчанию транспорт не подключён.
 TRANSPORT_UNCONFIGURED = "unconfigured"
 TRANSPORT_VERIFIED_REST = "verified-rest"
@@ -343,6 +351,27 @@ def _sanitize_state(raw) -> dict | None:
     }
 
 
+def _diagnostic_hint(status: int | None, error_json, wire) -> str | None:
+    """Подсказка по 4xx-ответу sandbox PostOrder (без секретов)."""
+    hints: list[str] = []
+    if status == 400:
+        hints.append(
+            "HTTP 400 от PostSandboxOrder: проверьте instrumentId и его источник "
+            "(uid/figi), приращение цены (price increment), quantity (= лоты, "
+            "строка int64) и enum direction/orderType.")
+    elif status is not None:
+        hints.append(f"HTTP {status} от PostSandboxOrder: см. sandbox_http_error_body.")
+    if isinstance(error_json, dict):
+        msg = error_json.get("message") or error_json.get("description")
+        if msg:
+            hints.append(f"API message: {msg}")
+    if isinstance(wire, dict) and wire.get("instrumentId"):
+        hints.append(
+            f"instrumentId={wire.get('instrumentId')} "
+            f"(source={wire.get('instrument_id_source')}).")
+    return " ".join(hints) or None
+
+
 def _sanitize_sandbox_result(raw, *, sent: bool, state_read: bool,
                              error: str | None = None) -> dict:
     """Чистит ответ адаптера: только whitelisted поля, без токенов/секретов."""
@@ -365,6 +394,7 @@ def build_report(*, ticker: str, preview_path: str, row: dict,
                  sandbox_account_id: str | None, sandbox_token: str | None,
                  sandbox_transport: str = TRANSPORT_UNCONFIGURED,
                  transport_meta: dict | None = None,
+                 instrument_id_source: str = INSTRUMENT_ID_SOURCE_AUTO,
                  client=None, adapter: SandboxOrderAdapter | None = None,
                  now: datetime | None = None) -> dict:
     """Собирает F3-отчёт. Реальная sandbox-заявка только при пройденных gate'ах."""
@@ -444,6 +474,13 @@ def build_report(*, ticker: str, preview_path: str, row: dict,
     sandbox_order_result: dict | None = None
     sandbox_order_response_sanitized: dict | None = None
     sandbox_order_state_sanitized: dict | None = None
+    # Диагностика actual wire payload и HTTP-ошибок (заполняется при send).
+    sandbox_order_request_wire_sanitized: dict | None = None
+    sandbox_http_status: int | None = None
+    sandbox_http_error_body: str | None = None
+    sandbox_http_error_json = None
+    sandbox_error_method: str | None = None
+    diagnostic_hint: str | None = None
     adapter_invoked = False
     sandbox_order_sent = False
     exit_code = 0
@@ -485,6 +522,8 @@ def build_report(*, ticker: str, preview_path: str, row: dict,
                 "currency": row.get("currency") or "rub",
                 "client_order_id": client_order_id,
                 "sandbox_account_id_masked": mask_identifier(sandbox_account_id),
+                # Предпочтение источника instrumentId (auto=uid-first/figi-fallback).
+                "instrument_id_source_pref": instrument_id_source,
             }
             the_adapter = adapter or UnconfiguredSandboxAdapter()
             adapter_invoked = True
@@ -528,9 +567,30 @@ def build_report(*, ticker: str, preview_path: str, row: dict,
                     {}, sent=False, state_read=False, error=str(exc))
             except Exception as exc:  # noqa: BLE001
                 exit_code = 1
-                errors.append(f"Ошибка sandbox-адаптера: {exc}")
+                # SandboxTransportHttpError помечен is_sandbox_http_diag — берём
+                # санитизированные детали 4xx через duck-typing (без обратного
+                # импорта транспорта, чтобы не плодить циклическую зависимость).
+                if getattr(exc, "is_sandbox_http_diag", False):
+                    sandbox_http_status = getattr(exc, "status_code", None)
+                    sandbox_http_error_body = getattr(exc, "safe_response_body", None)
+                    sandbox_http_error_json = getattr(exc, "safe_response_json", None)
+                    sandbox_error_method = getattr(exc, "method", None)
+                    errors.append(
+                        f"Ошибка sandbox-адаптера: HTTP {sandbox_http_status} "
+                        f"{sandbox_error_method}. См. sandbox_http_error_body.")
+                else:
+                    errors.append(f"Ошибка sandbox-адаптера: {exc}")
                 sandbox_order_result = _sanitize_sandbox_result(
                     {}, sent=False, state_read=False, error=str(exc))
+
+            # Actual wire payload (санитизированный, без токена) — для отчёта,
+            # доступен и при успехе, и при HTTP-ошибке (строится до отправки).
+            wire = getattr(the_adapter, "last_wire_sanitized", None)
+            if isinstance(wire, dict):
+                sandbox_order_request_wire_sanitized = wire
+            diagnostic_hint = _diagnostic_hint(
+                sandbox_http_status, sandbox_http_error_json,
+                sandbox_order_request_wire_sanitized)
 
         if not sandbox_order_sent and exit_code == 0:
             exit_code = 1
@@ -570,9 +630,15 @@ def build_report(*, ticker: str, preview_path: str, row: dict,
         "sandbox_transport": transport_meta,
         "sandbox_order_request": sandbox_order_request,
         "sandbox_order_request_sanitized": sandbox_order_request,
+        "sandbox_order_request_wire_sanitized": sandbox_order_request_wire_sanitized,
         "sandbox_order_result": sandbox_order_result,
         "sandbox_order_response_sanitized": sandbox_order_response_sanitized,
         "sandbox_order_state_sanitized": sandbox_order_state_sanitized,
+        "sandbox_http_status": sandbox_http_status,
+        "sandbox_http_error_body": sandbox_http_error_body,
+        "sandbox_http_error_json": sandbox_http_error_json,
+        "sandbox_error_method": sandbox_error_method,
+        "diagnostic_hint": diagnostic_hint,
         "guards": guards,
         "errors": errors,
         "warnings": warnings,
@@ -673,6 +739,34 @@ def render_md(report: dict) -> str:
             f"- error: {_fmt(res.get('error'))}",
         ]
 
+    wire = report.get("sandbox_order_request_wire_sanitized")
+    if wire:
+        lines += [
+            "",
+            "## Actual wire payload (sanitized)",
+            "",
+            f"- instrumentId: `{_fmt(wire.get('instrumentId'))}`",
+            f"- instrument_id_source: `{_fmt(wire.get('instrument_id_source'))}`",
+            f"- accountId_masked: `{_fmt(wire.get('accountId_masked'))}`",
+            f"- quantity: `{_fmt(wire.get('quantity'))}` "
+            f"(type: {_fmt(wire.get('quantity_type'))})",
+            f"- price: `{_fmt(wire.get('price'))}`",
+            f"- direction: `{_fmt(wire.get('direction'))}`",
+            f"- orderType: `{_fmt(wire.get('orderType'))}`",
+            f"- orderId: `{_fmt(wire.get('orderId'))}`",
+        ]
+
+    if report.get("sandbox_http_status") is not None or report.get("diagnostic_hint"):
+        lines += [
+            "",
+            "## Sandbox HTTP diagnostics",
+            "",
+            f"- sandbox_http_status: `{_fmt(report.get('sandbox_http_status'))}`",
+            f"- sandbox_error_method: `{_fmt(report.get('sandbox_error_method'))}`",
+            f"- diagnostic_hint: {_fmt(report.get('diagnostic_hint'))}",
+            f"- sandbox_http_error_body: `{_fmt(report.get('sandbox_http_error_body'))}`",
+        ]
+
     if report.get("errors"):
         lines += ["", "## Errors"]
         lines += [f"- {e}" for e in report["errors"]]
@@ -720,6 +814,7 @@ def run(*, ticker: str,
         sandbox_account_id: str | None = None,
         sandbox_token: str | None = None,
         sandbox_transport: str = TRANSPORT_UNCONFIGURED,
+        instrument_id_source: str = INSTRUMENT_ID_SOURCE_AUTO,
         client=None,
         adapter: SandboxOrderAdapter | None = None,
         now: datetime | None = None) -> dict:
@@ -732,6 +827,13 @@ def run(*, ticker: str,
     if not ticker or not str(ticker).strip():
         raise SandboxExecutionError("Не задан --ticker (ровно один тикер).")
     ticker = str(ticker).strip().upper()
+
+    instrument_id_source = (instrument_id_source
+                            or INSTRUMENT_ID_SOURCE_AUTO).strip().lower()
+    if instrument_id_source not in ALL_INSTRUMENT_ID_SOURCES:
+        raise SandboxExecutionError(
+            f"Некорректный instrument-id-source={instrument_id_source}; "
+            f"допустимо: {', '.join(ALL_INSTRUMENT_ID_SOURCES)}.")
 
     mode = MODE_SANDBOX_SEND if send_sandbox else MODE_DRY_RUN
     preview_path = preview_json or DEFAULT_PREVIEW_JSON
@@ -756,6 +858,7 @@ def run(*, ticker: str,
         client_order_id_prefix=client_order_id_prefix,
         sandbox_account_id=sandbox_account_id, sandbox_token=sandbox_token,
         sandbox_transport=sandbox_transport, transport_meta=transport_meta,
+        instrument_id_source=instrument_id_source,
         client=client, adapter=adapter, now=now)
 
     out_json = Path(output_json or DEFAULT_OUTPUT_JSON)

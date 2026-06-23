@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from modules import income_sandbox_execution as ise
+from modules import tinvest_sandbox_transport as tx
 from tests.conftest import quotation
 
 
@@ -112,6 +113,40 @@ class _FakeSandboxAdapter(ise.SandboxOrderAdapter):
         if self._state_raises:
             raise RuntimeError("sandbox state read failed")
         return {"order_state": "EXECUTION_REPORT_STATUS_FILL"}
+
+
+class _RecorderTx:
+    """Фейковый transport callable для VerifiedSandboxRestAdapter (без сети)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, method, payload, token):
+        self.calls.append({"method": method, "payload": payload, "token": token})
+        if method == "PostSandboxOrder":
+            return {"orderId": "sb-1",
+                    "executionReportStatus": "EXECUTION_REPORT_STATUS_NEW",
+                    "lotsRequested": 3}
+        return {"executionReportStatus": "EXECUTION_REPORT_STATUS_FILL"}
+
+
+class _HttpErrorAdapter(ise.SandboxOrderAdapter):
+    """Адаптер, имитирующий HTTP 400 от PostSandboxOrder (с wire-диагностикой)."""
+
+    def __init__(self):
+        self.last_wire_sanitized = {
+            "instrumentId": "uid-T", "instrument_id_source": "uid",
+            "quantity": "3", "quantity_type": "str",
+            "accountId_masked": "sa****07"}
+        self.last_instrument_id_source = "uid"
+
+    def post_sandbox_order(self, *, request, account_id, token):
+        raise tx.SandboxTransportHttpError(
+            method="PostSandboxOrder", status_code=400,
+            safe_response_body='{"code":3,"message":"bad instrument"}',
+            safe_response_json={"code": 3, "message": "bad instrument"},
+            safe_request_payload={"instrumentId": "uid-T", "accountId": "sa****07"},
+            url="https://invest-public-api.tinkoff.ru/rest/Service/PostSandboxOrder")
 
 
 _SEND_KW = dict(
@@ -513,3 +548,67 @@ def test_dry_run_sandbox_transport_present(tmp_path):
     assert rep["sandbox_transport"] is not None
     assert rep["guards"]["token_printed"] is False
     assert rep["guards"]["live_token_used"] is False
+
+
+# ─── F3 wire payload + HTTP-диагностика (Задачи 1–4) ──────────────────────────
+
+def test_report_wire_payload_uses_uid_first(tmp_path):
+    adapter = tx.VerifiedSandboxRestAdapter(transport=_RecorderTx())
+    rep = _run(tmp_path, [_preview_row()], adapter=adapter, client=None, **_SEND_KW)
+    assert rep["guards"]["sandbox_order_sent"] is True
+    wire = rep["sandbox_order_request_wire_sanitized"]
+    assert wire["instrumentId"] == "uid-T"
+    assert wire["instrument_id_source"] == "uid"
+    assert wire["quantity"] == "3"
+    assert wire["quantity_type"] == "str"
+    assert wire["direction"] == ise.ORDER_DIRECTION_BUY
+    assert wire["orderType"] == ise.ORDER_TYPE_LIMIT
+
+
+def test_report_instrument_id_source_figi_flows_to_wire(tmp_path):
+    adapter = tx.VerifiedSandboxRestAdapter(transport=_RecorderTx())
+    rep = _run(tmp_path, [_preview_row()], adapter=adapter, client=None,
+               instrument_id_source="figi", **_SEND_KW)
+    wire = rep["sandbox_order_request_wire_sanitized"]
+    assert wire["instrumentId"] == "FIGI-T"
+    assert wire["instrument_id_source"] == "figi"
+
+
+def test_invalid_instrument_id_source_blocks(tmp_path):
+    with pytest.raises(ise.SandboxExecutionError):
+        _run(tmp_path, [_preview_row()], instrument_id_source="bogus")
+
+
+def test_http_error_body_captured_in_report(tmp_path):
+    adapter = _HttpErrorAdapter()
+    rep = _run(tmp_path, [_preview_row()], adapter=adapter, client=None, **_SEND_KW)
+    assert rep["guards"]["sandbox_order_sent"] is False
+    assert rep["sandbox_http_status"] == 400
+    assert rep["sandbox_error_method"] == "PostSandboxOrder"
+    assert "bad instrument" in rep["sandbox_http_error_body"]
+    assert rep["sandbox_http_error_json"]["message"] == "bad instrument"
+    assert rep["sandbox_order_request_wire_sanitized"]["instrumentId"] == "uid-T"
+    assert rep["diagnostic_hint"]
+    assert rep["_exit_code"] == 1
+
+
+def test_http_error_no_token_leak_in_report_or_md(tmp_path):
+    adapter = _HttpErrorAdapter()
+    rep = _run(tmp_path, [_preview_row()], adapter=adapter, client=None, **_SEND_KW)
+    js = Path(rep["_output_json"]).read_text(encoding="utf-8")
+    md = Path(rep["_output_md"]).read_text(encoding="utf-8")
+    assert "sbx-secret-token" not in js
+    assert "sbx-secret-token" not in md
+    assert "Authorization" not in js
+    # account id в отчёте только маскированный
+    assert "sandbox-acc-007" not in js
+
+
+def test_dry_run_wire_and_http_fields_present_as_none(tmp_path):
+    rep = _run(tmp_path, [_preview_row()])
+    assert rep["sandbox_order_request_wire_sanitized"] is None
+    assert rep["sandbox_http_status"] is None
+    assert rep["sandbox_http_error_body"] is None
+    assert rep["sandbox_http_error_json"] is None
+    assert rep["sandbox_error_method"] is None
+    assert rep["diagnostic_hint"] is None
