@@ -82,6 +82,26 @@ _SANDBOX_SERVICE = "tinkoff.public.invest.api.contract.v1.SandboxService"
 _METHOD_POST = "PostSandboxOrder"
 _METHOD_STATE = "GetSandboxOrderState"
 
+# F3.2 sandbox account bootstrap — методы того же SandboxService из подтверждённого
+# sandbox.proto. Это операции со СЧЁТОМ sandbox (list/open/pay-in), НЕ заявки:
+#   GetSandboxAccounts(GetAccountsRequest) -> GetAccountsResponse{accounts:[Account]}
+#   OpenSandboxAccount(OpenSandboxAccountRequest{name?}) -> {accountId}
+#   SandboxPayIn(SandboxPayInRequest{accountId, amount:MoneyValue}) -> {balance:MoneyValue}
+# Account (users.proto): id/type/name/status/openedDate/accessLevel.
+# MoneyValue (common.proto): currency/units(int64→строка)/nano(int32).
+_METHOD_GET_ACCOUNTS = "GetSandboxAccounts"
+_METHOD_OPEN_ACCOUNT = "OpenSandboxAccount"
+_METHOD_PAY_IN = "SandboxPayIn"
+
+# Источник контракта для sandbox account bootstrap (proto, не догадка).
+CONTRACT_SOURCE_ACCOUNT = (
+    "RussianInvestments/investAPI proto: sandbox.proto "
+    "(SandboxService.GetSandboxAccounts / OpenSandboxAccount / SandboxPayIn), "
+    "users.proto (Account: id/type/name/status/openedDate/accessLevel), "
+    "common.proto (MoneyValue: currency/units/nano); "
+    "package tinkoff.public.invest.api.contract.v1"
+)
+
 
 class SandboxTransportError(SandboxExecutionError):
     """Ошибка sandbox-транспорта (без traceback, безопасна для пользователя)."""
@@ -100,6 +120,7 @@ class VerifiedSandboxRestAdapter(SandboxOrderAdapter):
     """
 
     CONTRACT_SOURCE = CONTRACT_SOURCE
+    CONTRACT_SOURCE_ACCOUNT = CONTRACT_SOURCE_ACCOUNT
 
     def __init__(self, *, transport: TransportCallable | None = None,
                  timeout_seconds: int = _DEFAULT_TIMEOUT,
@@ -218,3 +239,44 @@ class VerifiedSandboxRestAdapter(SandboxOrderAdapter):
             return None
         payload = {"accountId": account_id, "orderId": order_id}
         return self._post(_METHOD_STATE, payload, token)
+
+    # ─── sandbox account bootstrap (F3.2; счета, не заявки) ─────────────────────
+
+    def get_sandbox_accounts(self, *, token: str) -> dict:
+        """GetSandboxAccounts: read-only список sandbox-счетов (GetAccountsRequest).
+
+        Это НЕ заявка и НЕ live: только перечисление sandbox-счетов по sandbox-токену.
+        """
+        if not token:
+            raise SandboxTransportError("Не задан sandbox-токен. Список не запрошен.")
+        return self._post(_METHOD_GET_ACCOUNTS, {}, token)
+
+    def open_sandbox_account(self, *, token: str, name: str | None = None) -> dict:
+        """OpenSandboxAccount: создаёт sandbox-счёт (OpenSandboxAccountRequest).
+
+        Мутация ТОЛЬКО внутри sandbox (виртуальные счета). Никакого live account,
+        никакого full-access live токена. Возвращает {accountId}.
+        """
+        if not token:
+            raise SandboxTransportError("Не задан sandbox-токен. Счёт не создан.")
+        payload: dict[str, Any] = {}
+        if name:
+            payload["name"] = name
+        return self._post(_METHOD_OPEN_ACCOUNT, payload, token)
+
+    def sandbox_pay_in(self, *, account_id: str, amount: dict, token: str) -> dict:
+        """SandboxPayIn: пополнение sandbox-счёта sandbox-деньгами (SandboxPayInRequest).
+
+        amount — MoneyValue {currency, units(строка), nano}. Виртуальные деньги
+        sandbox; реального движения средств нет. Возвращает {balance:MoneyValue}.
+        """
+        if not account_id:
+            raise SandboxTransportError(
+                "Не задан sandbox account id. Пополнение не выполнено.")
+        if not token:
+            raise SandboxTransportError("Не задан sandbox-токен. Пополнение не выполнено.")
+        if not isinstance(amount, dict) or "units" not in amount:
+            raise SandboxTransportError(
+                "Некорректный MoneyValue amount. Пополнение не выполнено.")
+        payload = {"accountId": account_id, "amount": amount}
+        return self._post(_METHOD_PAY_IN, payload, token)
