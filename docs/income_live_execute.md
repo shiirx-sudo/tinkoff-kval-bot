@@ -84,6 +84,27 @@ reference price; решающий cap-чек считает стоимость *
 (не блок); заявка всё равно блокируется, если `current_order_estimated_total_rub >
 max_order_rub`. Если цена отсутствует/не OK → блок, без market fallback.
 
+**Live tradability preflight (read-only, до PostOrder):** перед любым вызовом
+PostOrder выполняется **read-only** проверка, доступен ли инструмент для BUY LIMIT
+прямо сейчас. Используются ровно те идентификаторы из F2 preview, что пойдут в
+заявку (uid-first), и read-only методы T-Invest API (`GetInstrumentBy` +
+`GetTradingStatus`). Инструмент считается tradable только при
+`trading_status == SECURITY_TRADING_STATUS_NORMAL_TRADING`,
+`api_trade_available_flag == true` и `buy_available_flag == true`. Если инструмент
+сейчас **не** торгуется (например, причина брокера `30079` / "Instrument is not
+available for trading") — live-отправка блокируется **до** PostOrder:
+`live_order_sent=false`, `live_orders_service_used=false`,
+`live_postorder_blocked_before_call=true`, без ретраев, без смены
+`instrument_id_source`, без market fallback, без смены тикера. Если read-only
+проверку выполнить нельзя (нет read-only клиента) — при `--send-live` отправка тоже
+блокируется (инструмент не подтверждён как доступный). dry-run выполняет проверку
+для прозрачности, но ничего не отправляет.
+
+Если фактический PostOrder всё же вернёт HTTP 400 с `30079`, ошибка
+классифицируется как `INSTRUMENT_NOT_AVAILABLE_FOR_TRADING`
+(`live_http_error_classification`), а сырое санитизированное тело сохраняется в
+`live_http_error_body`.
+
 Любое нарушение любого gate → live-заявка **не** отправляется, причина в
 `blocking_reasons[]`, exit code `1`.
 
@@ -145,6 +166,13 @@ Current-order notional cap-gate (прозрачность): `reference_price`, `
 `current_order_estimated_total_rub`, `current_order_cap_passed`,
 `preview_lots_matches_cli_lots`, `preview_lots_mismatch_warning` (+ собранный блок
 `current_order_notional_gate`).
+
+Live tradability preflight: `live_tradability_checked`, `live_tradability_passed`,
+`live_trading_status`, `live_api_trade_available_flag`, `live_buy_available_flag`,
+`live_tradability_blocking_reason`, `live_tradability_source`,
+`live_tradability_checked_at`, `live_postorder_blocked_before_call`,
+`live_http_error_classification` (+ собранный блок `live_tradability` с
+`for_qual_investor_flag` / `exchange` / `class_code` / `min_price_increment`).
 
 `guards` фиксируют контракт: `live_order_sent` (true только если live PostOrder
 принят), `sandbox_order_sent=false`, `live_orders_service_used` (true только если

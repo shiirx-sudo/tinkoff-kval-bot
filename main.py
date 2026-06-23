@@ -1215,6 +1215,20 @@ def cmd_income_live_execute(args: argparse.Namespace) -> int:
 
     send_live = bool(getattr(args, "send_live", False))
 
+    # Read-only клиент ТОЛЬКО для tradability preflight (справочные данные инструмента
+    # + режим торгов). Не для исполнения; live-токен не используется. Если read-only
+    # API недоступен — работаем без проверки (tradability_checked=false).
+    client = None
+    if not getattr(args, "no_tradability_check", False):
+        try:
+            from api.client import ReadOnlyClient
+            client = ReadOnlyClient()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"Read-only API недоступен ({exc}); tradability preflight "
+                "пропущен (live-отправка будет заблокирована до проверки).")
+            client = None
+
     try:
         result = ile.run(
             ticker=getattr(args, "ticker", ile.DEFAULT_TICKER),
@@ -1229,6 +1243,7 @@ def cmd_income_live_execute(args: argparse.Namespace) -> int:
             preview_report=args.preview_report,
             output_json=args.output_json,
             output_md=args.output_md,
+            client=client,
         )
     except ile.LiveExecutionError as exc:
         logger.error(str(exc))
@@ -1247,6 +1262,11 @@ def cmd_income_live_execute(args: argparse.Namespace) -> int:
           f"ticker: {result['ticker']}")
     print(f"  readiness_gate_passed: {result['readiness_gate_passed']} | "
           f"preview_gate_passed: {result['preview_gate_passed']}")
+    print(f"  live_tradability_checked: {result['live_tradability_checked']} | "
+          f"live_tradability_passed: {result['live_tradability_passed']} | "
+          f"trading_status: {result['live_trading_status']}")
+    print(f"  live_postorder_blocked_before_call: "
+          f"{result['live_postorder_blocked_before_call']}")
     print(f"  live_plan: {lp['ticker']} {lp['side']} {lp['order_type']} "
           f"{lp['lots']} лот(а), cap {lp['max_order_rub']} RUB, "
           f"instrument_id_source={lp['instrument_id_source']}")
@@ -1895,6 +1915,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p_ile.add_argument(
         "--dry-run", dest="dry_run", action="store_true", default=True,
         help="Dry-run (по умолчанию). Реальная отправка только при --send-live")
+    p_ile.add_argument(
+        "--no-tradability-check", dest="no_tradability_check", action="store_true",
+        default=False,
+        help="Не выполнять read-only tradability preflight (offline). При --send-live "
+             "это оставит инструмент непроверенным и заблокирует отправку")
     p_ile.add_argument(
         "--readiness-report", dest="readiness_report",
         default="data/reports/income_live_readiness_report.json",

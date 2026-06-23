@@ -101,6 +101,14 @@ FIELD_REQUEST = _LO + "_request_sanitized"
 FIELD_REQUEST_WIRE = _LO + "_request_wire_sanitized"
 GUARD_ORDERS_SERVICE_USED = GUARD_KEY_LIVE_ORDERS_SERVICE_USED  # imported «*s_service_used»
 
+# Read-only tradability preflight: инструмент должен быть доступен для BUY LIMIT
+# ДО любого вызова PostOrder. Нормальный режим торгов из MarketDataService.
+TRADING_STATUS_NORMAL = "SECURITY_TRADING_STATUS_NORMAL_TRADING"
+
+# Классификация HTTP 400 от live PostOrder (description 30079 / "not available").
+CLASSIFICATION_NOT_AVAILABLE = "INSTRUMENT_NOT_AVAILABLE_FOR_TRADING"
+_DESC_NOT_AVAILABLE = "30079"
+
 
 class LiveExecutionError(Exception):
     """Понятная ошибка для пользователя (без traceback)."""
@@ -186,9 +194,35 @@ def _sanitize_result(raw, *, sent: bool, state_read: bool,
     }
 
 
-def _diagnostic_hint(status: int | None, error_json, wire) -> str | None:
+def classify_live_http_error(status: int | None, error_json,
+                             error_body: str | None) -> str | None:
+    """Классифицирует HTTP-ошибку live PostOrder. 30079 → INSTRUMENT_NOT_AVAILABLE."""
+    blob_parts: list[str] = []
+    if isinstance(error_json, dict):
+        for k in ("code", "message", "description"):
+            v = error_json.get(k)
+            if v is not None:
+                blob_parts.append(str(v))
+    if error_body:
+        blob_parts.append(str(error_body))
+    blob = " ".join(blob_parts).lower()
+    if (_DESC_NOT_AVAILABLE in blob or "not available for trading" in blob
+            or "недоступен для торг" in blob):
+        return CLASSIFICATION_NOT_AVAILABLE
+    return None
+
+
+def _diagnostic_hint(status: int | None, error_json, wire,
+                     classification: str | None = None) -> str | None:
     hints: list[str] = []
-    if status == 400:
+    if classification == CLASSIFICATION_NOT_AVAILABLE:
+        hints.append(
+            "Классификация: INSTRUMENT_NOT_AVAILABLE_FOR_TRADING — инструмент сейчас "
+            "недоступен для торгов (биржа закрыта или инструмент заблокирован). "
+            "НЕ ретраить, НЕ менять instrument_id_source, НЕ market fallback, НЕ "
+            "менять тикер: дождитесь открытия торгов и повторите вручную. Сначала "
+            "помогает read-only tradability preflight (см. live_tradability_*).")
+    elif status == 400:
         hints.append(
             "HTTP 400 от live PostOrder: проверьте instrumentId и его источник "
             "(uid/figi), приращение цены (price increment), quantity (= лоты, "
@@ -204,6 +238,155 @@ def _diagnostic_hint(status: int | None, error_json, wire) -> str | None:
             f"instrumentId={wire.get('instrumentId')} "
             f"(source={wire.get('instrument_id_source')}).")
     return " ".join(hints) or None
+
+
+def _flag(value) -> bool | None:
+    """Коэрсит флаг API (bool/str/None) в bool|None без выдумывания."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in ("true", "1", "yes"):
+            return True
+        if s in ("false", "0", "no", ""):
+            return False
+    return bool(value)
+
+
+def build_default_tradability_provider(client):
+    """Строит read-only tradability-провайдер из ReadOnlyClient (или None).
+
+    Провайдер ТОЛЬКО читает справочные данные инструмента и режим торгов
+    (GetInstrumentBy + GetTradingStatus). Никаких заявок, никакой записи.
+    """
+    if client is None:
+        return None
+
+    def provider(instrument: dict) -> dict:
+        uid = instrument.get("uid")
+        figi = instrument.get("figi")
+        ticker = instrument.get("ticker")
+        class_code = instrument.get("class_code")
+        instr = None
+        try:
+            if uid and hasattr(client, "get_instrument_by_uid"):
+                instr = client.get_instrument_by_uid(uid)
+            if not instr and figi:
+                instr = client.get_instrument_by_figi(figi)
+            if not instr and ticker and class_code:
+                instr = client.find_instrument(ticker, class_code)
+        except Exception as exc:  # noqa: BLE001
+            return {"error": f"GetInstrumentBy недоступен: {exc}",
+                    "source": "readonly_api"}
+        instr = instr if isinstance(instr, dict) else {}
+        # Режим торгов — по тому же instrumentId, что пойдёт в заявку (uid-first).
+        ts_id = uid or figi
+        ts_raw: dict = {}
+        try:
+            if ts_id:
+                ts_raw = client.get_trading_status(ts_id) or {}
+        except Exception:  # noqa: BLE001
+            ts_raw = {}
+        trading_status = ts_raw.get("tradingStatus") or instr.get("tradingStatus")
+        api_flag = ts_raw.get("apiTradeAvailableFlag")
+        if api_flag is None:
+            api_flag = instr.get("apiTradeAvailableFlag")
+        return {
+            "trading_status": trading_status,
+            "api_trade_available_flag": api_flag,
+            "buy_available_flag": instr.get("buyAvailableFlag"),
+            "sell_available_flag": instr.get("sellAvailableFlag"),
+            "for_qual_investor_flag": instr.get("forQualInvestorFlag"),
+            "exchange": instr.get("exchange"),
+            "class_code": instr.get("classCode") or class_code,
+            "min_price_increment": instr.get("minPriceIncrement"),
+            "source": "readonly_api: GetInstrumentBy + GetTradingStatus",
+        }
+
+    return provider
+
+
+def evaluate_live_tradability(provider, instrument: dict, *,
+                              now: datetime) -> dict:
+    """Read-only проверка: доступен ли инструмент для BUY LIMIT прямо сейчас.
+
+    Возвращает плоский dict с полями live_tradability_*. Если провайдера нет —
+    checked=False (проверка не выполнялась). Никаких заявок не отправляет.
+    """
+    result = {
+        "live_tradability_checked": False,
+        "live_tradability_passed": None,
+        "live_trading_status": None,
+        "live_api_trade_available_flag": None,
+        "live_buy_available_flag": None,
+        "live_for_qual_investor_flag": None,
+        "live_sell_available_flag": None,
+        "live_exchange": None,
+        "live_class_code": None,
+        "live_min_price_increment": None,
+        "live_tradability_blocking_reason": None,
+        "live_tradability_source": None,
+        "live_tradability_checked_at": None,
+    }
+    if provider is None:
+        return result
+
+    checked_at = now.isoformat()
+    try:
+        raw = provider(instrument)
+    except Exception as exc:  # noqa: BLE001
+        result.update({
+            "live_tradability_checked": True,
+            "live_tradability_passed": False,
+            "live_tradability_blocking_reason":
+                f"Не удалось проверить торговую доступность (read-only): {exc}",
+            "live_tradability_source": "readonly_api_error",
+            "live_tradability_checked_at": checked_at,
+        })
+        return result
+
+    raw = raw if isinstance(raw, dict) else {}
+    ts = raw.get("trading_status")
+    api_flag = _flag(raw.get("api_trade_available_flag"))
+    buy_flag = _flag(raw.get("buy_available_flag"))
+    result.update({
+        "live_tradability_checked": True,
+        "live_tradability_checked_at": checked_at,
+        "live_tradability_source": raw.get("source") or "readonly_api",
+        "live_trading_status": ts,
+        "live_api_trade_available_flag": api_flag,
+        "live_buy_available_flag": buy_flag,
+        "live_for_qual_investor_flag": _flag(raw.get("for_qual_investor_flag")),
+        "live_sell_available_flag": _flag(raw.get("sell_available_flag")),
+        "live_exchange": raw.get("exchange"),
+        "live_class_code": raw.get("class_code"),
+        "live_min_price_increment": raw.get("min_price_increment"),
+    })
+
+    if raw.get("error"):
+        result["live_tradability_passed"] = False
+        result["live_tradability_blocking_reason"] = (
+            f"Read-only tradability вернула ошибку: {raw.get('error')}")
+        return result
+
+    fails: list[str] = []
+    if api_flag is not True:
+        fails.append(f"api_trade_available_flag={api_flag}")
+    if buy_flag is not True:
+        fails.append(f"buy_available_flag={buy_flag}")
+    if ts != TRADING_STATUS_NORMAL:
+        fails.append(f"trading_status={ts} (требуется {TRADING_STATUS_NORMAL})")
+
+    passed = not fails
+    result["live_tradability_passed"] = passed
+    if not passed:
+        result["live_tradability_blocking_reason"] = (
+            f"{instrument.get('ticker')} (uid {instrument.get('uid')}): инструмент "
+            "сейчас недоступен для BUY LIMIT — " + ", ".join(fails) + ". НЕ ретраим, "
+            "НЕ меняем instrument_id_source, НЕ market fallback, НЕ меняем тикер.")
+    return result
 
 
 def _resolve_live_adapter(adapter):
@@ -404,6 +587,7 @@ def build_report(*, ticker: str, lots: int, max_order_rub: int,
                  live_account_id: str | None, live_token: str | None,
                  live_token_present: bool,
                  adapter, transport_meta: dict,
+                 tradability_provider=None,
                  now: datetime | None = None) -> dict:
     """Собирает F4.1-отчёт. Реальная live-заявка только при пройденных gate'ах."""
     now = now or datetime.now(timezone.utc)
@@ -451,6 +635,23 @@ def build_report(*, ticker: str, lots: int, max_order_rub: int,
     }
     econ = econ or None
 
+    # ── Read-only live tradability preflight (ДО любого PostOrder) ──────────────
+    # Проверяем, доступен ли выбранный инструмент для BUY LIMIT прямо сейчас,
+    # используя ИМЕННО те идентификаторы из F2 preview, что пойдут в заявку.
+    instrument_ids = {
+        "ticker": ticker,
+        "uid": (row or {}).get("uid"),
+        "figi": (row or {}).get("figi"),
+        "class_code": (row or {}).get("class_code"),
+        "instrument_type": (row or {}).get("instrument_type"),
+        "instrument_id_source": instrument_id_source,
+    }
+    trad = evaluate_live_tradability(
+        tradability_provider if row is not None else None,
+        instrument_ids, now=now)
+    live_tradability_ok = bool(
+        trad["live_tradability_checked"] and trad["live_tradability_passed"])
+
     # Намерение заявки (read-only метаданные). Строится только при наличии цены.
     order_request: dict | None = None
     client_order_id = str(uuid.uuid4())
@@ -486,6 +687,7 @@ def build_report(*, ticker: str, lots: int, max_order_rub: int,
     live_http_error_body: str | None = None
     live_http_error_json = None
     live_error_method: str | None = None
+    live_http_error_classification: str | None = None
     diagnostic_hint: str | None = None
     exit_code = 0
 
@@ -500,6 +702,7 @@ def build_report(*, ticker: str, lots: int, max_order_rub: int,
             ("confirmation_matched", confirmation_matched),
             ("live_account_id_present", bool(live_account_id)),
             ("live_trading_token_present", token_ok),
+            ("live_tradability_passed", live_tradability_ok),
         ) if not ok]
 
         if gate_fail:
@@ -516,6 +719,12 @@ def build_report(*, ticker: str, lots: int, max_order_rub: int,
             if not live_account_id:
                 blocking_reasons.append(
                     "--live-account-id обязателен для --send-live.")
+            if not live_tradability_ok:
+                blocking_reasons.append(
+                    trad.get("live_tradability_blocking_reason")
+                    or ("Торговая доступность инструмента не проверена (нет "
+                        "read-only клиента) — live-отправка заблокирована до "
+                        "проверки tradability перед PostOrder."))
         elif order_request is None:
             exit_code = 1
             blocking_reasons.append(
@@ -556,9 +765,13 @@ def build_report(*, ticker: str, lots: int, max_order_rub: int,
                     live_http_error_body = getattr(exc, "safe_response_body", None)
                     live_http_error_json = getattr(exc, "safe_response_json", None)
                     live_error_method = getattr(exc, "method", None)
+                    live_http_error_classification = classify_live_http_error(
+                        live_http_status, live_http_error_json, live_http_error_body)
+                    label = (f" ({live_http_error_classification})"
+                             if live_http_error_classification else "")
                     blocking_reasons.append(
                         f"Ошибка live-адаптера: HTTP {live_http_status} "
-                        f"{live_error_method}. См. live_http_error_body.")
+                        f"{live_error_method}{label}. См. live_http_error_body.")
                 else:
                     blocking_reasons.append(f"Ошибка live-адаптера: {exc}")
                 order_result = _sanitize_result(
@@ -568,7 +781,8 @@ def build_report(*, ticker: str, lots: int, max_order_rub: int,
             if isinstance(wire, dict):
                 order_wire = wire
             diagnostic_hint = _diagnostic_hint(
-                live_http_status, live_http_error_json, order_wire)
+                live_http_status, live_http_error_json, order_wire,
+                live_http_error_classification)
 
         if not order_sent and exit_code == 0:
             exit_code = 1
@@ -638,6 +852,17 @@ def build_report(*, ticker: str, lots: int, max_order_rub: int,
         "preview_lots_mismatch_warning": notional_gate[
             "preview_lots_mismatch_warning"],
         "current_order_notional_gate": notional_gate,
+        # ── read-only live tradability preflight (before any PostOrder) ──
+        "live_tradability_checked": trad["live_tradability_checked"],
+        "live_tradability_passed": trad["live_tradability_passed"],
+        "live_trading_status": trad["live_trading_status"],
+        "live_api_trade_available_flag": trad["live_api_trade_available_flag"],
+        "live_buy_available_flag": trad["live_buy_available_flag"],
+        "live_tradability_blocking_reason": trad["live_tradability_blocking_reason"],
+        "live_tradability_source": trad["live_tradability_source"],
+        "live_tradability_checked_at": trad["live_tradability_checked_at"],
+        "live_postorder_blocked_before_call": bool(send_live and not adapter_invoked),
+        "live_tradability": trad,
         FIELD_SENT: order_sent,
         FIELD_RESULT: order_result,
         FIELD_RESPONSE: order_response,
@@ -645,6 +870,7 @@ def build_report(*, ticker: str, lots: int, max_order_rub: int,
         "live_http_status": live_http_status,
         "live_http_error_body": live_http_error_body,
         "live_http_error_json": live_http_error_json,
+        "live_http_error_classification": live_http_error_classification,
         "live_error_method": live_error_method,
         FIELD_REQUEST: order_request,
         FIELD_REQUEST_WIRE: order_wire,
@@ -745,6 +971,34 @@ def render_md(report: dict) -> str:
         ]
     lines += [
         "",
+        "## Live tradability preflight (read-only, до PostOrder)",
+        "",
+        "> Read-only проверка доступности инструмента для BUY LIMIT ДО любого "
+        "вызова PostOrder. Заявок не отправляет; live-токен не использует.",
+        "",
+        "| Поле | Значение |",
+        "| --- | --- |",
+        f"| live_tradability_checked | {_fmt(report.get('live_tradability_checked'))} |",
+        f"| **live_tradability_passed** | "
+        f"{_fmt(report.get('live_tradability_passed'))} |",
+        f"| live_trading_status | {_fmt(report.get('live_trading_status'))} |",
+        f"| live_api_trade_available_flag | "
+        f"{_fmt(report.get('live_api_trade_available_flag'))} |",
+        f"| live_buy_available_flag | "
+        f"{_fmt(report.get('live_buy_available_flag'))} |",
+        f"| live_tradability_source | {_fmt(report.get('live_tradability_source'))} |",
+        f"| live_tradability_checked_at | "
+        f"{_fmt(report.get('live_tradability_checked_at'))} |",
+        f"| live_postorder_blocked_before_call | "
+        f"{_fmt(report.get('live_postorder_blocked_before_call'))} |",
+    ]
+    if report.get("live_tradability_blocking_reason"):
+        lines += [
+            "",
+            f"> ⛔ {report['live_tradability_blocking_reason']}",
+        ]
+    lines += [
+        "",
         "## Required confirmation phrase",
         "",
         f"```\n{report['required_confirmation_phrase']}\n```",
@@ -804,6 +1058,8 @@ def render_md(report: dict) -> str:
             "## Live HTTP diagnostics",
             "",
             f"- live_http_status: `{_fmt(report.get('live_http_status'))}`",
+            f"- live_http_error_classification: "
+            f"`{_fmt(report.get('live_http_error_classification'))}`",
             f"- live_error_method: `{_fmt(report.get('live_error_method'))}`",
             f"- diagnostic_hint: {_fmt(report.get('diagnostic_hint'))}",
             f"- live_http_error_body: `{_fmt(report.get('live_http_error_body'))}`",
@@ -875,6 +1131,8 @@ def run(*, ticker: str = DEFAULT_TICKER,
         live_token: str | None = None,
         live_token_present: bool | None = None,
         adapter=None,
+        client=None,
+        tradability_provider=None,
         now: datetime | None = None) -> dict:
     """Читает F4.0 readiness + F2 preview, проверяет gate'ы, строит F4.1-отчёт.
 
@@ -918,6 +1176,11 @@ def run(*, ticker: str = DEFAULT_TICKER,
 
     adapter, transport_meta = _resolve_live_adapter(adapter)
 
+    # Read-only tradability-провайдер: инъектируется в тестах; иначе строится из
+    # переданного read-only клиента (никаких заявок, только справочные данные).
+    if tradability_provider is None:
+        tradability_provider = build_default_tradability_provider(client)
+
     report = build_report(
         ticker=ticker, lots=lots, max_order_rub=max_order_rub,
         instrument_id_source=instrument_id_source,
@@ -926,7 +1189,8 @@ def run(*, ticker: str = DEFAULT_TICKER,
         send_live=send_live, confirm=confirm,
         live_account_id=live_account_id, live_token=live_token,
         live_token_present=bool(live_token_present),
-        adapter=adapter, transport_meta=transport_meta, now=now)
+        adapter=adapter, transport_meta=transport_meta,
+        tradability_provider=tradability_provider, now=now)
 
     out_json = Path(output_json or DEFAULT_OUTPUT_JSON)
     out_md = Path(output_md or DEFAULT_OUTPUT_MD)
