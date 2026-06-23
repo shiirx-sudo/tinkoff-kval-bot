@@ -1,14 +1,75 @@
 # Roadmap — tinkoff-kval-bot
 
-_Last updated: 2026-06-22_
+_Last updated: 2026-06-23_
 
 ## Purpose
 
 `tinkoff-kval-bot` is a read-only analytics toolkit for building and monitoring an income-oriented investment portfolio through T-Invest data.
 
-Primary goal: help plan a portfolio intended to generate investment income from dividends, coupons, money-market funds, and other income sources.
+Primary goal: help plan a portfolio intended to generate investment income from dividends, coupons, money-market funds, and other income sources, sized to cover the owner's **real** monthly living basket (see "Real income target / Living basket target" below), not a fixed nominal RUB figure.
 
 Secondary/side goal: track qualified-investor turnover/status where useful. Turnover inflation is not the main objective.
+
+## Real income target / Living basket target
+
+> Replaces the old nominal target of ~100 000 ₽/month. A fixed nominal figure is
+> wrong as a long-term goal because nominal rubles lose purchasing power over time.
+
+The project's income goal is defined in **real purchasing-power terms**, anchored to
+the owner's **personal monthly living basket**, not to a frozen number of rubles.
+
+- **Old nominal target replaced:** ~100 000 ₽/month (fixed nominal) is no longer the goal.
+- **New base monthly living basket:** **150 000 ₽**.
+- This 150 000 ₽ is fixed **only as a baseline** for the base date below; it is not a
+  permanent nominal target and is expected to be indexed upward over time.
+- **Base target date:** **2026-06** (June 2026).
+- Long-term goal is measured in **purchasing power / real purchasing capability**, not
+  in nominal rubles.
+- Target income should cover **1.0×** the base personal monthly living basket,
+  **indexed to the current date**.
+
+### Indexing formula
+
+```
+current_indexed_monthly_target_rub =
+    base_monthly_living_basket_rub × target_index_multiplier
+```
+
+where:
+
+- `base_monthly_living_basket_rub = 150000`
+- `base_target_date = 2026-06`
+- `target_index_multiplier` reflects the growth of the cost of the owner's personal
+  living basket since the base date (≈ 1.0 at the base date, rising over time).
+
+### Reporting fields (read-only analytics)
+
+Project reports should surface the real-income target as the following fields:
+
+- `base_monthly_living_basket_rub = 150000`
+- `base_target_date = 2026-06`
+- `current_indexed_monthly_target_rub` — the baseline basket indexed to today
+- `projected_monthly_income_rub` — modelled income from the planned portfolio
+- `target_coverage_pct` — `projected_monthly_income_rub / current_indexed_monthly_target_rub`
+- `required_capital_for_target` — capital needed to reach 1.0× coverage at the
+  conservative yield assumption
+- `real_income_gap_rub` — `current_indexed_monthly_target_rub − projected_monthly_income_rub`
+
+### Benchmarks: primary vs secondary
+
+- **Primary benchmark — personal living basket.** This is the anchor: you live on a
+  real basket of expenses, not on grams of gold or on burgers, so the target is sized
+  against the personal monthly living basket.
+- **Secondary anti-devaluation benchmark — gold.** Useful as a sanity check against
+  ruble devaluation, but **not** the primary target.
+- **Secondary everyday sanity-check — "burger index".** An intuitive, human-scale
+  cross-check on purchasing power, **not** the primary target.
+
+> Note (docs-only): runtime/config currently has no machine-readable real-income
+> target. A **separate, dedicated PR** should add a machine-readable target config
+> (`base_monthly_living_basket_rub`, `base_target_date`, `target_index_multiplier`)
+> and wire these reporting fields. This roadmap change does **not** touch runtime,
+> trading, sandbox, live, execution, configs, or `.env`.
 
 ## Non-negotiable safety contract
 
@@ -251,7 +312,11 @@ This caused:
 
 - only 75% allocation used due 25% position caps
 - diversification warning
-- required capital around 21.6M RUB for 100k RUB/month target
+- required capital around 21.6M RUB for the old nominal 100k RUB/month target
+  (this nominal figure is now replaced by the real-income / living-basket target —
+  see "Real income target / Living basket target"; required capital must be
+  recomputed against `current_indexed_monthly_target_rub`, baseline 150 000 ₽ as of
+  2026-06)
 
 Next work should focus on filling and auditing `data/config/income_universe.yaml`, expanding eligible instruments, and comparing target scenarios, not on changing execution logic.
 
