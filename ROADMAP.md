@@ -920,7 +920,50 @@ F4 остаётся заблокированным, пока:
 3. F3.1 one-shot sandbox order вручную отправлен и зафиксирован в отчёте;
 4. одобрен отдельный F4 PR.
 
-### Milestone F4 — Tiny live manual-confirmed order
+### Milestone F4.0 — Pre-live readiness
+
+Status: implemented after this PR.
+
+Command: `income-live-readiness`.
+
+Outputs: `data/reports/income_live_readiness_report.json` /
+`data/reports/income_live_readiness_report.md`.
+
+Purpose:
+
+- verify F3 sandbox FILL gate (реальная sandbox-заявка со статусом
+  `EXECUTION_REPORT_STATUS_FILL`);
+- prepare tiny live plan (T, BUY, LIMIT, 1 лот, cap 300 ₽, instrument_id_source
+  uid-first);
+- fix the future exact confirmation phrase `CONFIRM LIVE BUY T 1 LOT MAX 300 RUB`;
+- no live execution;
+- no Orders-service;
+- no token usage (future live send must use a separate
+  `TINKOFF_LIVE_TRADING_TOKEN`; `TINKOFF_TOKEN` stays read-only/analytics).
+
+Work:
+
+- `modules/income_live_readiness.py` — чтение F3-отчёта, проверка gate, tiny live
+  plan, token policy, guards, отчёт json+md;
+- `income-live-readiness` CLI: `--ticker`, `--lots`, `--max-order-rub`,
+  `--sandbox-report`, `--output-json`/`--output-md`;
+- `docs/income_live_readiness.md`;
+- tests `tests/test_income_live_readiness.py` (никаких заявок и сети).
+
+Guarantees: readiness/reporting only; no live order send; no sandbox order send;
+no live `Orders`-сервис / order-endpoint; no execution token; `TINKOFF_TOKEN` не
+используется для исполнения; sandbox-токен не используется для live; токены никогда
+не печатаются; no portfolio/config mutation; no Telegram.
+
+F4.1 (live execution, milestone below) remains blocked until:
+
+1. F4.0 readiness report says `ready=true`;
+2. user explicitly approves a separate F4.1 PR;
+3. live trading token (`TINKOFF_LIVE_TRADING_TOKEN`) and live account id are
+   supplied manually;
+4. the exact confirmation phrase is used.
+
+### Milestone F4 (F4.1) — Tiny live manual-confirmed order
 
 Status: blocked — отдельный PR и отдельное одобрение. Допускается только после
 того, как все условия выполнены по порядку:
