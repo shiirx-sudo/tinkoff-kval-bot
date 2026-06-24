@@ -1334,6 +1334,72 @@ def cmd_income_live_status(args: argparse.Namespace) -> int:
     return int(result.get("_exit_code", 0))
 
 
+def cmd_income_live_position(args: argparse.Namespace) -> int:
+    from modules import income_live_position as ilp
+
+    # Read-only клиент ТОЛЬКО для аналитики/портфеля (TINKOFF_TOKEN). Live/sandbox
+    # токен НЕ используется. Если read-only API недоступен (нет TINKOFF_TOKEN) —
+    # падаем чисто, без сетевых вызовов.
+    client = None
+    client_error = None
+    try:
+        from api.client import ReadOnlyClient
+        client = ReadOnlyClient()
+    except Exception as exc:  # noqa: BLE001
+        client_error = str(exc)
+        client = None
+
+    try:
+        result = ilp.run(
+            ticker=getattr(args, "ticker", "T"),
+            order_id=getattr(args, "order_id", None),
+            live_account_id=getattr(args, "live_account_id", None),
+            f41_report=args.f41_report,
+            f42_report=args.f42_report,
+            output_json=args.output_json,
+            output_md=args.output_md,
+            client=client,
+            client_error=client_error,
+        )
+    except ilp.LivePositionError as exc:
+        logger.error(str(exc))
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка income-live-position-report: {exc}")
+        return 1
+
+    g = result["guards"]
+    print("Income live position report — F4.3 (READ ONLY сверка позиции)")
+    print("Только read-only portfolio/positions. Никаких PostOrder/отмены/продаж/"
+          "ретраев/MARKET. Live/sandbox токен не используется.")
+    print(f"  stage: {result['stage']} | mode: {result['mode']} | "
+          f"ticker: {result['ticker']}")
+    print(f"  order_id: {result['order_id']} | account: "
+          f"{result['live_account_id_masked']}")
+    print(f"  order_status: {result['order_status']} | "
+          f"lots_executed: {result['lots_executed']}")
+    print(f"  position_found: {result['position_found']} | "
+          f"position_quantity_lots: {result['position_quantity_lots']} | "
+          f"position_quantity_units: {result['position_quantity_units']}")
+    print(f"  **reconciliation_passed: {result['reconciliation_passed']}**")
+    print(f"  base_monthly_living_basket_rub: "
+          f"{result['base_monthly_living_basket_rub']} | "
+          f"income_target_coverage_pct: {result['income_target_coverage_pct']}")
+    print(f"  live_token_used: {g['live_token_used']} | "
+          f"sandbox_token_used: {g['sandbox_token_used']} | "
+          f"post_order_called: {g['post_order_called']} | "
+          f"cancel called: {g[ilp.GUARD_CANCEL_CALLED]}")
+    for r in result.get("reconciliation_warnings", []):
+        print(f"  · recon: {r}")
+    for e in result.get("errors", []):
+        print(f"  ! {e}")
+    for w in result.get("warnings", []):
+        print(f"  - {w}")
+    logger.info(f"Отчёт: {result['_output_json']}")
+    logger.info(f"Отчёт: {result['_output_md']}")
+    return int(result.get("_exit_code", 0))
+
+
 def cmd_build_income_universe(args: argparse.Namespace) -> int:
     import json
     import shutil
@@ -2011,6 +2077,33 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--output-md", dest="output_md", default=_ils.DEFAULT_OUTPUT_MD,
         help="Путь для Markdown-отчёта F4.2")
 
+    from modules import income_live_execution as _ile_defaults
+    from modules import income_live_position as _ilp
+    p_ilp = sub.add_parser(
+        "income-live-position-report",
+        help="F4.3 READ-ONLY сверка реальной позиции с завершённой F4.1/F4.2 "
+             "заявкой. Только read-only portfolio; ничего не исполняет")
+    p_ilp.add_argument(
+        "--ticker", dest="ticker", default="T", help="Тикер (по умолчанию T)")
+    p_ilp.add_argument(
+        "--order-id", dest="order_id", required=True,
+        help="ID завершённой live-заявки (read-only сверка)")
+    p_ilp.add_argument(
+        "--live-account-id", dest="live_account_id", required=True,
+        help="Live account id заявки")
+    p_ilp.add_argument(
+        "--f41-report", dest="f41_report", default=_ile_defaults.DEFAULT_OUTPUT_JSON,
+        help="Путь к F4.1 income_live_execution_report.json (только чтение)")
+    p_ilp.add_argument(
+        "--f42-report", dest="f42_report", default=_ils.DEFAULT_OUTPUT_JSON,
+        help="Путь к F4.2 order status report (только чтение)")
+    p_ilp.add_argument(
+        "--output-json", dest="output_json", default=_ilp.DEFAULT_OUTPUT_JSON,
+        help="Путь для JSON-отчёта F4.3")
+    p_ilp.add_argument(
+        "--output-md", dest="output_md", default=_ilp.DEFAULT_OUTPUT_MD,
+        help="Путь для Markdown-отчёта F4.3")
+
     p_biu = sub.add_parser(
         "build-income-universe",
         help="READ-ONLY генератор income universe из rules + T-Invest данных")
@@ -2087,6 +2180,7 @@ _HANDLERS = {
     "income-live-readiness": cmd_income_live_readiness,
     "income-live-execute": cmd_income_live_execute,
     "income-live-order-status": cmd_income_live_status,
+    "income-live-position-report": cmd_income_live_position,
     "build-income-universe": cmd_build_income_universe,
     "telegram-test": cmd_telegram_test,
     "telegram-summary": cmd_telegram_summary,
