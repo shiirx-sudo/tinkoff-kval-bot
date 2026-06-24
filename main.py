@@ -1287,6 +1287,53 @@ def cmd_income_live_execute(args: argparse.Namespace) -> int:
     return int(result.get("_exit_code", 0))
 
 
+def cmd_income_live_status(args: argparse.Namespace) -> int:
+    from modules import income_live_status as ils
+
+    try:
+        result = ils.run(
+            order_id=getattr(args, "order_id", None),
+            live_account_id=getattr(args, "live_account_id", None),
+            watch=bool(getattr(args, "watch", False)),
+            interval_sec=getattr(args, "interval_sec", ils.DEFAULT_INTERVAL_SEC),
+            timeout_sec=getattr(args, "timeout_sec", ils.DEFAULT_TIMEOUT_SEC),
+            output_json=args.output_json,
+            output_md=args.output_md,
+        )
+    except ils.LiveOrderStatusError as exc:
+        logger.error(str(exc))
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка income-live-order-status: {exc}")
+        return 1
+
+    g = result["guards"]
+    print("Income live order status — F4.2 (READ ONLY мониторинг статуса заявки)")
+    print("Только чтение GetOrderState. Никаких PostOrder/отмены/продаж/ретраев/MARKET.")
+    print(f"  stage: {result['stage']} | mode: {result['mode']}")
+    print(f"  order_id: {result['order_id']} | account: "
+          f"{result['live_account_id_masked']}")
+    print(f"  execution_report_status: {result['execution_report_status']}")
+    print(f"  lots_requested: {result['lots_requested']} | "
+          f"lots_executed: {result['lots_executed']}")
+    print(f"  is_terminal: {result['is_terminal']} | is_filled: {result['is_filled']} "
+          f"| is_partially_filled: {result['is_partially_filled']} | "
+          f"is_rejected: {result['is_rejected']} | is_cancelled: {result['is_cancelled']}")
+    print(f"  checks_count: {result['checks_count']} | "
+          f"watch_timed_out: {result['watch_timed_out']}")
+    print(f"  post_order_called: {g['post_order_called']} | "
+          f"cancel called: {g[ils.GUARD_CANCEL_CALLED]} | "
+          f"sell_order_sent: {g['sell_order_sent']} | "
+          f"market_order_used: {g['market_order_used']}")
+    for e in result.get("errors", []):
+        print(f"  ! {e}")
+    for w in result.get("warnings", []):
+        print(f"  - {w}")
+    logger.info(f"Отчёт: {result['_output_json']}")
+    logger.info(f"Отчёт: {result['_output_md']}")
+    return int(result.get("_exit_code", 0))
+
+
 def cmd_build_income_universe(args: argparse.Namespace) -> int:
     import json
     import shutil
@@ -1937,6 +1984,33 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default="data/reports/income_live_execution_report.md",
         help="Путь для Markdown-отчёта F4.1")
 
+    from modules import income_live_status as _ils
+    p_ilos = sub.add_parser(
+        "income-live-order-status",
+        help="F4.2 READ-ONLY мониторинг статуса УЖЕ созданной live-заявки "
+             "(GetOrderState). Не создаёт/не отменяет/не повторяет/не продаёт заявки")
+    p_ilos.add_argument(
+        "--order-id", dest="order_id", required=True,
+        help="ID live-заявки для чтения статуса (read-only)")
+    p_ilos.add_argument(
+        "--live-account-id", dest="live_account_id", required=True,
+        help="Live account id заявки")
+    p_ilos.add_argument(
+        "--watch", dest="watch", action="store_true", default=False,
+        help="Периодически читать статус (read-only) до терминального или timeout")
+    p_ilos.add_argument(
+        "--interval-sec", dest="interval_sec", type=int, default=10,
+        help="Интервал опроса в секундах (по умолчанию 10, только для --watch)")
+    p_ilos.add_argument(
+        "--timeout-sec", dest="timeout_sec", type=int, default=300,
+        help="Максимум опроса в секундах (по умолчанию 300, только для --watch)")
+    p_ilos.add_argument(
+        "--output-json", dest="output_json", default=_ils.DEFAULT_OUTPUT_JSON,
+        help="Путь для JSON-отчёта F4.2")
+    p_ilos.add_argument(
+        "--output-md", dest="output_md", default=_ils.DEFAULT_OUTPUT_MD,
+        help="Путь для Markdown-отчёта F4.2")
+
     p_biu = sub.add_parser(
         "build-income-universe",
         help="READ-ONLY генератор income universe из rules + T-Invest данных")
@@ -2012,6 +2086,7 @@ _HANDLERS = {
     "income-sandbox-account": cmd_income_sandbox_account,
     "income-live-readiness": cmd_income_live_readiness,
     "income-live-execute": cmd_income_live_execute,
+    "income-live-order-status": cmd_income_live_status,
     "build-income-universe": cmd_build_income_universe,
     "telegram-test": cmd_telegram_test,
     "telegram-summary": cmd_telegram_summary,
