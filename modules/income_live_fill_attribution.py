@@ -340,8 +340,9 @@ def render_md(report: dict) -> str:
         row("fill_found_in_operations"), row("fill_operation_id"),
         row("fill_trade_id"), row("fill_datetime"), row("fill_quantity_units"),
         row("fill_quantity_lots"), row("fill_price"), row("fill_gross_amount"),
-        row("fill_commission"), row("fill_net_amount"), row("fill_currency"),
-        row("fill_source"),
+        row("fill_commission_raw"), row("fill_commission_abs"),
+        row("fill_cash_outflow"), row("fill_cash_outflow_formula"),
+        row("fill_net_amount"), row("fill_currency"), row("fill_source"),
         "",
         "## Current TOTAL position (F4.3) — отдельно от новой сделки",
         "",
@@ -570,13 +571,27 @@ def run(*, ticker: str, order_id: str, live_account_id: str,
         fill_currency = order_currency
         fill_source = "f41_f42_f43_reports"
 
-    if fill_commission is None:
+    # Комиссия: брокер для BUY часто отдаёт её со ЗНАКОМ МИНУС (отток денег).
+    # Храним сырое значение со знаком (fill_commission_raw) и нормализованный
+    # модуль (fill_commission_abs). Денежный отток покупки = gross + |commission|.
+    # Это read-only отчётность: знак комиссии — нормальная конвенция брокера, не
+    # ошибка, поэтому при отрицательной комиссии предупреждения НЕТ.
+    fill_commission_raw = fill_commission
+    fill_commission_abs = abs(fill_commission_raw) if fill_commission_raw is not None \
+        else None
+    if fill_commission_raw is None:
+        # Предупреждаем ТОЛЬКО когда комиссия недоступна (не угадываем).
         warnings.append(
             "Комиссия сделки недоступна из операций — не угадываем; "
-            "fill_commission=null.")
-        fill_net = None
+            "fill_commission_raw/abs=null, fill_cash_outflow=частичный (только gross).")
+        fill_cash_outflow = None
     else:
-        fill_net = (fill_gross + fill_commission) if fill_gross is not None else None
+        fill_cash_outflow = ((fill_gross + fill_commission_abs)
+                             if fill_gross is not None else None)
+    fill_cash_outflow_formula = "fill_gross_amount + fill_commission_abs (BUY cash outflow)"
+    # fill_net_amount сохраняется для обратной совместимости и для BUY РАВЕН
+    # fill_cash_outflow (а не gross + signed commission).
+    fill_net = fill_cash_outflow
 
     fq_lots = (fq_units / Decimal(lot_size)
                if (fq_units is not None and lot_size) else
@@ -702,7 +717,14 @@ def run(*, ticker: str, order_id: str, live_account_id: str,
         "fill_quantity_lots": fq_lots,
         "fill_price": fill_price,
         "fill_gross_amount": fill_gross,
-        "fill_commission": fill_commission,
+        # fill_commission — для обратной совместимости = СЫРАЯ комиссия со знаком
+        # (как у брокера); используйте fill_commission_raw/abs для ясности.
+        "fill_commission": fill_commission_raw,
+        "fill_commission_raw": fill_commission_raw,
+        "fill_commission_abs": fill_commission_abs,
+        "fill_cash_outflow": fill_cash_outflow,
+        "fill_cash_outflow_formula": fill_cash_outflow_formula,
+        # fill_net_amount сохранён для совместимости и для BUY == fill_cash_outflow.
         "fill_net_amount": fill_net,
         "fill_currency": fill_currency or cur_currency,
         "fill_source": fill_source,
