@@ -27,6 +27,11 @@ ORDER_DT = "2026-06-23T19:00:00+00:00"
 PRICE_276 = {"currency": "rub", "units": "276", "nano": 140000000}     # 276.14
 PAYMENT_276 = {"currency": "rub", "units": "-276", "nano": -140000000}  # -276.14
 COMM_014 = {"currency": "rub", "units": "0", "nano": 140000000}        # 0.14
+# Реальный кейс F4.4: цена 276.08, комиссия со знаком МИНУС (как у брокера).
+PRICE_27608 = {"currency": "rub", "units": "276", "nano": 80000000}     # 276.08
+PAYMENT_27608 = {"currency": "rub", "units": "-276", "nano": -80000000}  # -276.08
+COMM_NEG_014 = {"currency": "rub", "units": "0", "nano": -140000000}    # -0.14
+COMM_POS_014 = {"currency": "rub", "units": "0", "nano": 140000000}     # +0.14
 
 
 def _f41():
@@ -64,8 +69,8 @@ def _f43():
     }
 
 
-def _op(*, order_id=None, qty=1, with_commission=True, op_id="op1",
-        date="2026-06-23T19:05:00Z"):
+def _op(*, order_id=None, qty=1, with_commission=True, commission=None,
+        price=None, payment=None, op_id="op1", date="2026-06-23T19:05:00Z"):
     op = {
         "id": op_id,
         "instrumentUid": UID,
@@ -74,12 +79,12 @@ def _op(*, order_id=None, qty=1, with_commission=True, op_id="op1",
         "type": "Покупка ЦБ",
         "date": date,
         "quantity": str(qty),
-        "price": dict(PRICE_276),
-        "payment": dict(PAYMENT_276),
+        "price": dict(price or PRICE_276),
+        "payment": dict(payment or PAYMENT_276),
         "tradesInfo": {"trades": [{"num": "trade-1"}]},
     }
     if with_commission:
-        op["commission"] = dict(COMM_014)
+        op["commission"] = dict(commission or COMM_014)
     if order_id:
         op["orderId"] = order_id
     return op
@@ -126,9 +131,13 @@ def test_high_confidence_order_id_match(tmp_path):
     assert rep["fill_trade_id"] == "trade-1"
     assert rep["fill_quantity_units"] == Decimal("1")
     assert rep["fill_price"] == Decimal("276.14")
+    # fill_commission (backward-compat) = raw signed; raw/abs explicit
     assert rep["fill_commission"] == Decimal("0.14")
+    assert rep["fill_commission_raw"] == Decimal("0.14")
+    assert rep["fill_commission_abs"] == Decimal("0.14")
     assert rep["fill_gross_amount"] == Decimal("276.14")
-    assert rep["fill_net_amount"] == Decimal("276.28")
+    assert rep["fill_cash_outflow"] == Decimal("276.28")
+    assert rep["fill_net_amount"] == Decimal("276.28")  # == cash outflow
     assert rep["_exit_code"] == 0
 
 
@@ -196,9 +205,37 @@ def test_no_previous_when_position_equals_fill(tmp_path):
 
 # ─── no guessing: commission / income ─────────────────────────────────────────
 
+def test_commission_negative_sign_buy_cash_outflow(tmp_path):
+    # Реальный кейс: брокер вернул комиссию -0.14 для BUY; отток = gross + |comm|.
+    rep = _run(tmp_path, operations=[_op(
+        order_id=ORDER_ID, commission=COMM_NEG_014,
+        price=PRICE_27608, payment=PAYMENT_27608)])
+    assert rep["fill_gross_amount"] == Decimal("276.08")
+    assert rep["fill_commission_raw"] == Decimal("-0.14")
+    assert rep["fill_commission_abs"] == Decimal("0.14")
+    assert rep["fill_cash_outflow"] == Decimal("276.22")
+    assert rep["fill_net_amount"] == Decimal("276.22")  # не 275.94
+    assert rep["fill_cash_outflow_formula"]
+    # отрицательная комиссия — нормальная конвенция, предупреждения о комиссии нет
+    assert not any("комисси" in w.lower() for w in rep["warnings"])
+
+
+def test_commission_positive_sign_same_cash_outflow(tmp_path):
+    rep = _run(tmp_path, operations=[_op(
+        order_id=ORDER_ID, commission=COMM_POS_014,
+        price=PRICE_27608, payment=PAYMENT_27608)])
+    assert rep["fill_commission_raw"] == Decimal("0.14")
+    assert rep["fill_commission_abs"] == Decimal("0.14")
+    assert rep["fill_cash_outflow"] == Decimal("276.22")
+    assert rep["fill_net_amount"] == Decimal("276.22")
+
+
 def test_commission_not_guessed_when_unavailable(tmp_path):
     rep = _run(tmp_path, operations=[_op(order_id=ORDER_ID, with_commission=False)])
     assert rep["fill_commission"] is None
+    assert rep["fill_commission_raw"] is None
+    assert rep["fill_commission_abs"] is None
+    assert rep["fill_cash_outflow"] is None
     assert rep["fill_net_amount"] is None
     assert any("комисси" in w.lower() for w in rep["warnings"])
 
@@ -317,6 +354,8 @@ def test_reports_created_and_fields(tmp_path):
                 "instrument_uid", "figi", "lot_size", "current_total_position_units",
                 "current_total_unrealized_pnl", "fill_found_in_operations",
                 "fill_quantity_units", "fill_price", "fill_commission",
+                "fill_commission_raw", "fill_commission_abs", "fill_cash_outflow",
+                "fill_cash_outflow_formula", "fill_net_amount",
                 "fill_attribution_confidence", "attribution_method",
                 "estimated_previous_position_units", "estimated_new_fill_unrealized_pnl",
                 "base_monthly_living_basket_rub", "checked_at", "guards",
