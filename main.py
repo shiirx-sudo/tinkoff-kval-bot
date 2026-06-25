@@ -1468,6 +1468,75 @@ def cmd_income_live_fill_attribution(args: argparse.Namespace) -> int:
     return int(result.get("_exit_code", 0))
 
 
+def cmd_income_live_fill_economics(args: argparse.Namespace) -> int:
+    from modules import income_live_fill_economics as ilfe
+
+    # Read-only клиент ТОЛЬКО для опционального refresh цены (TINKOFF_TOKEN), и то
+    # лишь если current_price отсутствует в отчётах. Live/sandbox токен НЕ
+    # используется. Нет TINKOFF_TOKEN — не блокирует, если отчётов достаточно.
+    client = None
+    client_error = None
+    try:
+        from api.client import ReadOnlyClient
+        client = ReadOnlyClient()
+    except Exception as exc:  # noqa: BLE001
+        client_error = str(exc)
+        client = None
+
+    try:
+        result = ilfe.run(
+            ticker=getattr(args, "ticker", "T"),
+            order_id=getattr(args, "order_id", None),
+            live_account_id=getattr(args, "live_account_id", None),
+            f41_report=args.f41_report,
+            f42_report=args.f42_report,
+            f43_report=args.f43_report,
+            f44_report=args.f44_report,
+            output_json=args.output_json,
+            output_md=args.output_md,
+            client=client,
+            client_error=client_error,
+        )
+    except ilfe.FillEconomicsError as exc:
+        logger.error(str(exc))
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка income-live-fill-economics: {exc}")
+        return 1
+
+    g = result["guards"]
+    print("Income live fill economics — F4.5 (READ ONLY экономика сделки)")
+    print("Только read-only отчёты/цена. Никаких PostOrder/отмены/продаж/ретраев/"
+          "MARKET. Live/sandbox токен не используется.")
+    print(f"  stage: {result['stage']} | mode: {result['mode']} | "
+          f"ticker: {result['ticker']}")
+    print(f"  order_id: {result['order_id']} | account: "
+          f"{result['live_account_id_masked']}")
+    print(f"  fill: units={result['fill_quantity_units']} "
+          f"price={result['fill_price']} gross={result['fill_gross_amount']} "
+          f"cash_outflow={result['fill_cash_outflow']}")
+    print(f"  new-fill gross PnL: {result['new_fill_gross_unrealized_pnl']} "
+          f"| net PnL (after commission): "
+          f"{result['new_fill_net_unrealized_pnl_after_commission']}")
+    print(f"  commission_drag_rub: {result['commission_drag_rub']} | "
+          f"break_even: {result['break_even_price_after_commission']} | "
+          f"distance_to_break_even_rub: {result['distance_to_break_even_rub']}")
+    print(f"  TOTAL position PnL (отдельно): "
+          f"{result['current_total_unrealized_pnl']} "
+          f"(kept_separate={result['total_position_pnl_kept_separate']})")
+    print(f"  live_token_used: {g['live_token_used']} | "
+          f"sandbox_token_used: {g['sandbox_token_used']} | "
+          f"post_order_called: {g['post_order_called']} | "
+          f"cancel called: {g[ilfe.GUARD_CANCEL_CALLED]}")
+    for e in result.get("errors", []):
+        print(f"  ! {e}")
+    for w in result.get("warnings", []):
+        print(f"  - {w}")
+    logger.info(f"Отчёт: {result['_output_json']}")
+    logger.info(f"Отчёт: {result['_output_md']}")
+    return int(result.get("_exit_code", 0))
+
+
 def cmd_build_income_universe(args: argparse.Namespace) -> int:
     import json
     import shutil
@@ -2201,6 +2270,38 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--output-md", dest="output_md", default=_ilfa.DEFAULT_OUTPUT_MD,
         help="Путь для Markdown-отчёта F4.4")
 
+    from modules import income_live_fill_economics as _ilfe
+    p_ilfe = sub.add_parser(
+        "income-live-fill-economics",
+        help="F4.5 READ-ONLY экономика новой сделки поверх F4.4 (gross vs net "
+             "PnL, комиссионный drag, безубыток). Только read-only; ничего не исполняет")
+    p_ilfe.add_argument(
+        "--ticker", dest="ticker", default="T", help="Тикер (по умолчанию T)")
+    p_ilfe.add_argument(
+        "--order-id", dest="order_id", required=True,
+        help="ID завершённой live-заявки (read-only экономика)")
+    p_ilfe.add_argument(
+        "--live-account-id", dest="live_account_id", required=True,
+        help="Live account id заявки")
+    p_ilfe.add_argument(
+        "--f41-report", dest="f41_report", default=_ile_defaults.DEFAULT_OUTPUT_JSON,
+        help="Путь к F4.1 income_live_execution_report.json (только чтение)")
+    p_ilfe.add_argument(
+        "--f42-report", dest="f42_report", default=_ils.DEFAULT_OUTPUT_JSON,
+        help="Путь к F4.2 order status report (только чтение)")
+    p_ilfe.add_argument(
+        "--f43-report", dest="f43_report", default=_ilp.DEFAULT_OUTPUT_JSON,
+        help="Путь к F4.3 position report (только чтение)")
+    p_ilfe.add_argument(
+        "--f44-report", dest="f44_report", default=_ilfa.DEFAULT_OUTPUT_JSON,
+        help="Путь к F4.4 fill attribution report (основной источник, только чтение)")
+    p_ilfe.add_argument(
+        "--output-json", dest="output_json", default=_ilfe.DEFAULT_OUTPUT_JSON,
+        help="Путь для JSON-отчёта F4.5")
+    p_ilfe.add_argument(
+        "--output-md", dest="output_md", default=_ilfe.DEFAULT_OUTPUT_MD,
+        help="Путь для Markdown-отчёта F4.5")
+
     p_biu = sub.add_parser(
         "build-income-universe",
         help="READ-ONLY генератор income universe из rules + T-Invest данных")
@@ -2279,6 +2380,7 @@ _HANDLERS = {
     "income-live-order-status": cmd_income_live_status,
     "income-live-position-report": cmd_income_live_position,
     "income-live-fill-attribution": cmd_income_live_fill_attribution,
+    "income-live-fill-economics": cmd_income_live_fill_economics,
     "build-income-universe": cmd_build_income_universe,
     "telegram-test": cmd_telegram_test,
     "telegram-summary": cmd_telegram_summary,
