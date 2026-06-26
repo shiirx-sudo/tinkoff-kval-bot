@@ -1610,6 +1610,40 @@ def cmd_income_live_income_validation(args: argparse.Namespace) -> int:
     return int(result.get("_exit_code", 0))
 
 
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    # F4.7 локальный READ-ONLY дашборд. НЕ инициализирует брокер-клиент, НЕ читает
+    # токены, НЕ ходит в сеть. Только читает локальные data/reports/*.json.
+    from modules import read_only_dashboard as dash
+
+    host = getattr(args, "host", dash.DEFAULT_HOST)
+    port = int(getattr(args, "port", dash.DEFAULT_PORT))
+    reports_dir = getattr(args, "reports_dir", dash.DEFAULT_REPORTS_DIR)
+
+    print("F4.7 read-only dashboard — локальный просмотрщик отчётов (READ ONLY)")
+    print("Только data/reports/*.json. Не торгует, без токенов/брокера/сети, "
+          "без POST/действий.")
+    if host not in dash._LOCAL_HOSTS:
+        print(f"  ⚠️ ВНИМАНИЕ: host={host} (не localhost) — дашборд может быть "
+              "доступен другим в сети. Рекомендуется 127.0.0.1.")
+
+    try:
+        httpd = dash.serve(host=host, port=port, reports_dir=reports_dir)
+    except OSError as exc:
+        logger.error(f"Не удалось привязать {host}:{port}: {exc}")
+        return 1
+
+    url = f"http://{host}:{port}"
+    print(f"  Открой в браузере: {url}")
+    print("  Остановить: Ctrl+C")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\n  Остановлено (Ctrl+C).")
+    finally:
+        httpd.server_close()
+    return 0
+
+
 def cmd_build_income_universe(args: argparse.Namespace) -> int:
     import json
     import shutil
@@ -2410,6 +2444,21 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--output-md", dest="output_md", default=_iliv.DEFAULT_OUTPUT_MD,
         help="Путь для Markdown-отчёта F4.6")
 
+    from modules import read_only_dashboard as _dash
+    p_dash = sub.add_parser(
+        "dashboard",
+        help="F4.7 локальный READ-ONLY веб-дашборд: визуализирует data/reports/"
+             "*.json. Не торгует, без токенов/брокера/сети, без POST/действий")
+    p_dash.add_argument(
+        "--host", dest="host", default=_dash.DEFAULT_HOST,
+        help="Адрес привязки (по умолчанию 127.0.0.1; другой host = предупреждение)")
+    p_dash.add_argument(
+        "--port", dest="port", type=int, default=_dash.DEFAULT_PORT,
+        help="Порт (по умолчанию 8765)")
+    p_dash.add_argument(
+        "--reports-dir", dest="reports_dir", default=_dash.DEFAULT_REPORTS_DIR,
+        help="Каталог с локальными отчётами (только чтение)")
+
     p_biu = sub.add_parser(
         "build-income-universe",
         help="READ-ONLY генератор income universe из rules + T-Invest данных")
@@ -2490,6 +2539,7 @@ _HANDLERS = {
     "income-live-fill-attribution": cmd_income_live_fill_attribution,
     "income-live-fill-economics": cmd_income_live_fill_economics,
     "income-live-income-validation": cmd_income_live_income_validation,
+    "dashboard": cmd_dashboard,
     "build-income-universe": cmd_build_income_universe,
     "telegram-test": cmd_telegram_test,
     "telegram-summary": cmd_telegram_summary,
