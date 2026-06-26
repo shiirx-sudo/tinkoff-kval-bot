@@ -1644,6 +1644,45 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_portfolio_dashboard(args: argparse.Namespace) -> int:
+    # F4.9 локальный READ-ONLY портфельный кокпит. НЕ инициализирует брокер-клиент,
+    # НЕ читает токены, НЕ ходит в сеть. Рендерит только data/reports/
+    # portfolio_dashboard_data.json (отчёт F4.8).
+    from pathlib import Path
+
+    from modules import portfolio_dashboard as pdash
+
+    host = getattr(args, "host", pdash.DEFAULT_HOST)
+    port = int(getattr(args, "port", pdash.DEFAULT_PORT))
+    report_path = getattr(args, "report_path", pdash.DEFAULT_REPORT_PATH)
+
+    print("F4.9 portfolio cockpit — локальный read-only дашборд (РЕНДЕР F4.8)")
+    print("Только data/reports/portfolio_dashboard_data.json. Не торгует, без "
+          "токенов/брокера/сети, без POST/действий.")
+    if host not in pdash._LOCAL_HOSTS:
+        print(f"  ⚠️ ВНИМАНИЕ: host={host} (не localhost) — дашборд может быть "
+              "доступен другим в сети. Рекомендуется 127.0.0.1.")
+    if not Path(report_path).exists():
+        print(f"  ⚠️ Отчёт F4.8 не найден ({report_path}). Сначала запустите: "
+              "python main.py portfolio-dashboard-data --live-account-id <ACCOUNT_ID>")
+
+    try:
+        httpd = pdash.serve(host=host, port=port, report_path=report_path)
+    except OSError as exc:
+        logger.error(f"Не удалось привязать {host}:{port}: {exc}")
+        return 1
+
+    print(f"  Открой в браузере: http://{host}:{port}")
+    print("  Остановить: Ctrl+C")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\n  Остановлено (Ctrl+C).")
+    finally:
+        httpd.server_close()
+    return 0
+
+
 def cmd_portfolio_dashboard_data(args: argparse.Namespace) -> int:
     from modules import portfolio_dashboard_data as pdd
 
@@ -2535,6 +2574,21 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--output-md", dest="output_md", default=_pdd.DEFAULT_OUTPUT_MD,
         help="Путь для Markdown-отчёта F4.8")
 
+    from modules import portfolio_dashboard as _pdash
+    p_pdash = sub.add_parser(
+        "portfolio-dashboard",
+        help="F4.9 локальный READ-ONLY портфельный кокпит: рендерит отчёт F4.8 "
+             "portfolio_dashboard_data.json. Не торгует, без токенов/брокера/сети")
+    p_pdash.add_argument(
+        "--host", dest="host", default=_pdash.DEFAULT_HOST,
+        help="Адрес привязки (по умолчанию 127.0.0.1; другой host = предупреждение)")
+    p_pdash.add_argument(
+        "--port", dest="port", type=int, default=_pdash.DEFAULT_PORT,
+        help="Порт (по умолчанию 8766)")
+    p_pdash.add_argument(
+        "--report-path", dest="report_path", default=_pdash.DEFAULT_REPORT_PATH,
+        help="Путь к отчёту F4.8 (только чтение)")
+
     p_biu = sub.add_parser(
         "build-income-universe",
         help="READ-ONLY генератор income universe из rules + T-Invest данных")
@@ -2617,6 +2671,7 @@ _HANDLERS = {
     "income-live-income-validation": cmd_income_live_income_validation,
     "dashboard": cmd_dashboard,
     "portfolio-dashboard-data": cmd_portfolio_dashboard_data,
+    "portfolio-dashboard": cmd_portfolio_dashboard,
     "build-income-universe": cmd_build_income_universe,
     "telegram-test": cmd_telegram_test,
     "telegram-summary": cmd_telegram_summary,
