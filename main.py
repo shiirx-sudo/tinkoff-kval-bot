@@ -1644,6 +1644,60 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_portfolio_dashboard_data(args: argparse.Namespace) -> int:
+    from modules import portfolio_dashboard_data as pdd
+
+    # Read-only клиент ТОЛЬКО для аналитики (portfolio/operations/market/dividends)
+    # через TINKOFF_TOKEN. Live/sandbox токен НЕ используется. Нет токена — не
+    # блокируем: partial-режим из локальных отчётов.
+    client = None
+    try:
+        from api.client import ReadOnlyClient
+        client = ReadOnlyClient()
+    except Exception:  # noqa: BLE001 — без токена работаем partial
+        client = None
+
+    try:
+        result = pdd.run(
+            live_account_id=getattr(args, "live_account_id", None),
+            reports_dir=getattr(args, "reports_dir", "data/reports"),
+            contribution_plan_path=getattr(args, "contribution_plan", None),
+            output_json=args.output_json,
+            output_md=args.output_md,
+            client=client,
+        )
+    except pdd.PortfolioDashboardError as exc:
+        logger.error(str(exc))
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Ошибка portfolio-dashboard-data: {exc}")
+        return 1
+
+    g = result["guards"]
+    kpi = result["dashboard_kpi"]
+    print("Portfolio dashboard data — F4.8 (READ ONLY модель данных)")
+    print("Только read-only отчёты/портфель/операции. Не торгует, без записи/мутаций. "
+          "Live/sandbox токен не используется.")
+    print(f"  stage: {result['stage']} | mode: {result['mode']} | account: "
+          f"{result['live_account_id_masked']}")
+    print(f"  data_freshness: {result['data_freshness'].get('overall')} | "
+          f"sources: {result['data_sources_used']}")
+    print(f"  portfolio_value: {kpi['portfolio_value_rub']} | cash: {kpi['cash_rub']} "
+          f"| positions: {result['portfolio_summary']['positions_count']}")
+    print(f"  passive_income/mo: {kpi['passive_income_monthly_rub']} | coverage%: "
+          f"{kpi['passive_income_coverage_pct']} | gap/mo: {kpi['income_gap_rub_monthly']}")
+    print(f"  turnover_ytd: {kpi['turnover_ytd_rub']} / {kpi['turnover_annual_target_rub']} "
+          f"(progress% {kpi['turnover_ytd_progress_pct']})")
+    print(f"  safety_status: {kpi['safety_status']} | live_token_used: "
+          f"{g['live_token_used']} | sandbox_token_used: {g['sandbox_token_used']} | "
+          f"cancel called: {g[pdd.GUARD_CANCEL_CALLED]}")
+    for w in result.get("warnings", []):
+        print(f"  - {w}")
+    logger.info(f"Отчёт: {result['_output_json']}")
+    logger.info(f"Отчёт: {result['_output_md']}")
+    return int(result.get("_exit_code", 0))
+
+
 def cmd_build_income_universe(args: argparse.Namespace) -> int:
     import json
     import shutil
@@ -2459,6 +2513,28 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--reports-dir", dest="reports_dir", default=_dash.DEFAULT_REPORTS_DIR,
         help="Каталог с локальными отчётами (только чтение)")
 
+    from modules import portfolio_dashboard_data as _pdd
+    p_pdd = sub.add_parser(
+        "portfolio-dashboard-data",
+        help="F4.8 READ-ONLY модель данных портфельного дашборда (агрегирует "
+             "F4.1–F4.6 + опц. read-only портфель/операции). Не торгует")
+    p_pdd.add_argument(
+        "--live-account-id", dest="live_account_id", required=True,
+        help="Live account id (read-only; маскируется в отчёте)")
+    p_pdd.add_argument(
+        "--reports-dir", dest="reports_dir", default="data/reports",
+        help="Каталог с локальными отчётами F4.1–F4.6 (только чтение)")
+    p_pdd.add_argument(
+        "--contribution-plan", dest="contribution_plan",
+        default=_pdd.DEFAULT_CONTRIBUTION_PLAN,
+        help="Путь к contribution_plan.json (локальный; иначе tracking disabled)")
+    p_pdd.add_argument(
+        "--output-json", dest="output_json", default=_pdd.DEFAULT_OUTPUT_JSON,
+        help="Путь для JSON-отчёта F4.8")
+    p_pdd.add_argument(
+        "--output-md", dest="output_md", default=_pdd.DEFAULT_OUTPUT_MD,
+        help="Путь для Markdown-отчёта F4.8")
+
     p_biu = sub.add_parser(
         "build-income-universe",
         help="READ-ONLY генератор income universe из rules + T-Invest данных")
@@ -2540,6 +2616,7 @@ _HANDLERS = {
     "income-live-fill-economics": cmd_income_live_fill_economics,
     "income-live-income-validation": cmd_income_live_income_validation,
     "dashboard": cmd_dashboard,
+    "portfolio-dashboard-data": cmd_portfolio_dashboard_data,
     "build-income-universe": cmd_build_income_universe,
     "telegram-test": cmd_telegram_test,
     "telegram-summary": cmd_telegram_summary,
