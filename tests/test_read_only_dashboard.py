@@ -406,3 +406,139 @@ def test_cli_registers_dashboard():
     assert args.host == "127.0.0.1"
     assert args.port == 8765
     assert "dashboard" in main._HANDLERS
+
+
+# ─── F4.7.1 UX / HTML well-formedness ─────────────────────────────────────────
+
+from html.parser import HTMLParser  # noqa: E402
+
+
+class _CardNestingParser(HTMLParser):
+    """Стек div-ов: отслеживает, не вложена ли одна card в другую, и баланс div."""
+
+    def __init__(self):
+        super().__init__()
+        self.stack = []            # для каждого открытого <div>: True если это card
+        self.max_card_depth = 0
+        self.div_balance = 0
+        self.nested_card = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag != "div":
+            return
+        classes = dict(attrs).get("class", "") or ""
+        is_card = "card" in classes.split()
+        if is_card and any(self.stack):
+            self.nested_card = True
+        self.stack.append(is_card)
+        self.div_balance += 1
+        self.max_card_depth = max(self.max_card_depth, sum(self.stack))
+
+    def handle_endtag(self, tag):
+        if tag != "div":
+            return
+        self.div_balance -= 1
+        if self.stack:
+            self.stack.pop()
+
+
+def _html_all_reports(tmp_path):
+    return dash.build_dashboard_html(
+        dash.load_dashboard_state(_write_reports(tmp_path, _all_reports())))
+
+
+def test_html_well_formed_no_nested_cards(tmp_path):
+    html = _html_all_reports(tmp_path)
+    # баланс table-тегов (регрессия незакрытого <table> в income-card)
+    assert html.count("<table") == html.count("</table>")
+    p = _CardNestingParser()
+    p.feed(html)
+    assert p.div_balance == 0, "несбалансированные <div>"
+    assert p.nested_card is False, "card вложена в другую card"
+    assert p.max_card_depth == 1
+
+
+def test_safety_card_not_inside_income_card(tmp_path):
+    html = _html_all_reports(tmp_path)
+    inc_idx = html.find("5 · Валидация дохода")
+    saf_idx = html.find("6 · Безопасность")
+    assert inc_idx != -1 and saf_idx != -1
+    # income раньше safety
+    assert inc_idx < saf_idx
+    # между заголовком income и заголовком safety таблица income закрыта
+    between = html[inc_idx:saf_idx]
+    assert between.count("<table") == between.count("</table>")
+
+
+def test_income_card_closes_table_regression(tmp_path):
+    # Точная регрессия: income-card должна закрывать </table> перед tax-note/закрытием.
+    html = _html_all_reports(tmp_path)
+    inc_idx = html.find("5 · Валидация дохода")
+    saf_idx = html.find("6 · Безопасность")
+    income_html = html[inc_idx:saf_idx]
+    assert "<table" in income_html and "</table>" in income_html
+    assert income_html.index("</table>") > income_html.index("<table")
+
+
+def test_kpi_strip_present(tmp_path):
+    html = _html_all_reports(tmp_path)
+    assert 'class="kpis"' in html
+    for label in ("Текущая цена", "PnL всей позиции",
+                  "PnL новой сделки (с комиссией)", "Покрытие цели 150 000 ₽/мес.",
+                  "Безопасность"):
+        assert label in html
+
+
+def test_russian_business_labels(tmp_path):
+    html = _html_all_reports(tmp_path)
+    for label in ("Тикер", "ID заявки", "Цена сделки",
+                  "Фактический расход с комиссией", "PnL без комиссии",
+                  "PnL с учётом комиссии", "Цена безубытка", "До безубытка",
+                  "Всего бумаг", "Средняя цена позиции", "Текущая цена",
+                  "PnL всей позиции", "Ожидаемый дивиденд на 1 шт.",
+                  "Покрытие цели 150 000 ₽/мес."):
+        assert label in html, label
+    # технические имена не должны оставаться видимыми ярлыками
+    assert "income_data_checked" not in html.split("debug")[0]
+
+
+def test_interpretation_text_for_coverage(tmp_path):
+    html = _html_all_reports(tmp_path)
+    assert "Что сейчас" in html
+    assert "150 000" in html
+    assert "покрывает только" in html
+    assert "0.0069%" in html  # покрытие цели всей позицией
+
+
+def test_units_and_currency_formatting(tmp_path):
+    html = _html_all_reports(tmp_path)
+    assert "шт." in html        # единицы
+    assert "₽" in html          # рубли
+    assert "0.0069%" in html    # проценты
+
+
+def test_raw_reports_collapsed_by_default(tmp_path):
+    html = _html_all_reports(tmp_path)
+    assert "Технические JSON-отчёты" in html
+    # details без атрибута open → свёрнуто по умолчанию
+    assert "<details open" not in html
+    assert "<details>" in html
+
+
+def test_freshness_badge_stale_not_unsafe(tmp_path):
+    d = _write_reports(tmp_path, _all_reports())
+    now = datetime(2026, 7, 1, tzinfo=timezone.utc)  # отчёты сильно устарели
+    state = dash.load_dashboard_state(d, now=now, stale_after_hours=48)
+    assert state["safety_summary"]["any_unsafe"] is False
+    html = dash.build_dashboard_html(state)
+    assert "STALE" in html              # бейдж свежести
+    assert "BLOCKED_UNSAFE" not in html  # устаревание ≠ небезопасно
+
+
+def test_missing_reports_freshness_partial(tmp_path):
+    # часть отчётов отсутствует → PARTIAL, но не падает
+    reps = _all_reports()
+    del reps["f41"]
+    d = _write_reports(tmp_path, reps)
+    html = dash.build_dashboard_html(dash.load_dashboard_state(d))
+    assert "PARTIAL" in html

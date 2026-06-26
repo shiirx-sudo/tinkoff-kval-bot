@@ -455,28 +455,49 @@ _CSS = """
 *{box-sizing:border-box}
 body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
 margin:0;padding:24px;background:#0f1419;color:#e6e6e6;line-height:1.5}
-h1{font-size:22px;margin:0 0 4px}
+.container{max-width:1520px;margin:0 auto}
+header{margin-bottom:18px}
+h1{font-size:24px;margin:0 0 6px;display:flex;align-items:center;gap:12px;
+flex-wrap:wrap}
 h2{font-size:16px;margin:0 0 12px;color:#9ad}
-.sub{color:#8a96a3;font-size:13px;margin-bottom:20px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}
-.card{background:#161b22;border:1px solid #2a313c;border-radius:10px;padding:16px}
-table{width:100%;border-collapse:collapse;font-size:13px}
-td,th{text-align:left;padding:4px 8px;border-bottom:1px solid #232a33;
+h3{font-size:13px;margin:14px 0 6px;color:#8a96a3;text-transform:uppercase;
+letter-spacing:.04em}
+.sub{color:#8a96a3;font-size:13px}
+.sub code{color:#aeb9c4}
+.kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin:18px 0}
+.kpi{background:#161b22;border:1px solid #2a313c;border-radius:10px;padding:14px 16px}
+.kpi .label{font-size:12px;color:#8a96a3;margin-bottom:6px}
+.kpi .val{font-size:20px;font-weight:700}
+.layout{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:16px;
+align-items:start;margin-top:16px}
+.col{display:flex;flex-direction:column;gap:16px}
+.card{background:#161b22;border:1px solid #2a313c;border-radius:10px;padding:18px}
+.card.full{margin-top:16px}
+table{width:100%;border-collapse:collapse;font-size:14px}
+td,th{text-align:left;padding:6px 8px;border-bottom:1px solid #232a33;
 vertical-align:top}
 th{color:#8a96a3;font-weight:600}
-.k{color:#8a96a3;white-space:nowrap}
-.badge{display:inline-block;padding:3px 10px;border-radius:999px;font-weight:700;
+.kv td.k{color:#9aa6b2;white-space:nowrap;width:58%}
+.kv td.v{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}
+.badge{display:inline-block;padding:4px 12px;border-radius:999px;font-weight:700;
 font-size:13px}
+.badge.lg{font-size:18px;padding:8px 18px}
 .ok{background:#10331f;color:#5fe08a;border:1px solid #1c5a36}
 .warn{background:#3a3211;color:#f0d264;border:1px solid #6b5c1e}
 .bad{background:#3a1414;color:#ff8a8a;border:1px solid #6b1e1e}
 .muted{color:#6b7785}
+.neg{color:#ff8a8a}.pos{color:#5fe08a}
+ul.tight{margin:6px 0 0;padding-left:20px}
+ul.tight li{margin:3px 0}
 pre{background:#0b0f14;border:1px solid #232a33;border-radius:8px;padding:12px;
 overflow:auto;font-size:12px;max-height:420px}
 details{margin:8px 0}
 summary{cursor:pointer;color:#9ad;font-weight:600}
-.note{font-size:12px;color:#8a96a3;margin-top:8px}
+.note{font-size:12.5px;color:#8a96a3;margin-top:10px}
 .flag-ok{color:#5fe08a}.flag-bad{color:#ff8a8a;font-weight:700}
+@media(max-width:1100px){.kpis{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:900px){.layout{grid-template-columns:1fr}
+.kpis{grid-template-columns:repeat(2,1fr)}}
 """
 
 
@@ -496,10 +517,87 @@ def _rows(pairs) -> str:
     return "".join(out)
 
 
-def _badge(status: str) -> str:
+def _badge(status: str, *, big: bool = False) -> str:
     cls = {"OK": "ok", STATUS_OK: "ok", STATUS_WARN: "warn",
-           STATUS_BLOCKED: "bad", "FAIL": "bad", "MISSING": "warn"}.get(status, "warn")
-    return f'<span class="badge {cls}">{html.escape(status)}</span>'
+           STATUS_BLOCKED: "bad", "FAIL": "bad", "MISSING": "warn",
+           "STALE": "warn", "PARTIAL": "warn"}.get(status, "warn")
+    size = " lg" if big else ""
+    return f'<span class="badge{size} {cls}">{html.escape(status)}</span>'
+
+
+# ─── форматирование значений (₽ / % / шт.) ────────────────────────────────────
+
+_DASH = '<span class="muted">—</span>'
+
+
+def _to_num(value):
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _money(value) -> str:
+    """Денежное значение в рублях, 2 знака, без знаковой раскраски."""
+    n = _to_num(value)
+    if n is None:
+        return _esc(value) if value is not None else _DASH
+    return f"{n:.2f}&nbsp;₽"
+
+
+def _pnl(value) -> str:
+    """PnL/денежная дельта: 2 знака, раскраска по знаку."""
+    n = _to_num(value)
+    if n is None:
+        return _esc(value) if value is not None else _DASH
+    cls = "neg" if n < 0 else ("pos" if n > 0 else "")
+    return f'<span class="{cls}">{n:.2f}&nbsp;₽</span>'
+
+
+def _pct(value) -> str:
+    """Процент: 4 знака для крошечных (|v|<1), иначе 2 знака."""
+    n = _to_num(value)
+    if n is None:
+        return _DASH
+    dec = 4 if abs(n) < 1 else 2
+    return f"{n:.{dec}f}%"
+
+
+def _units(value) -> str:
+    n = _to_num(value)
+    if n is None:
+        return _esc(value) if value is not None else _DASH
+    body = f"{int(n)}" if n == int(n) else f"{n:g}"
+    return f"{body}&nbsp;шт."
+
+
+def _kv(pairs) -> str:
+    """Таблица «ключ → значение»; значения уже отформатированы как HTML."""
+    out = []
+    for label, value_html in pairs:
+        out.append(f'<tr><td class="k">{html.escape(label)}</td>'
+                   f'<td class="v">{value_html}</td></tr>')
+    return f'<table class="kv">{"".join(out)}</table>'
+
+
+def _card(title: str, body: str, *, klass: str = "card") -> str:
+    """Гарантированно корректная карточка: <div><h2>…</h2>body</div>."""
+    return f'<div class="{klass}"><h2>{title}</h2>{body}</div>'
+
+
+def _freshness(state: dict) -> str:
+    if state.get("reports_missing"):
+        return "PARTIAL"
+    if state.get("reports_stale_or_invalid"):
+        return "STALE"
+    return "OK"
+
+
+def _kpi(label: str, value_html: str) -> str:
+    return (f'<div class="kpi"><div class="label">{html.escape(label)}</div>'
+            f'<div class="val">{value_html}</div></div>')
 
 
 def _overview_table(overview: list[dict]) -> str:
@@ -521,15 +619,29 @@ def _overview_table(overview: list[dict]) -> str:
 def _safety_card(safety: dict) -> str:
     guards = safety.get("guards_summary") or {}
     seen = safety.get("guards_seen") or {}
+    any_unsafe = bool(safety.get("any_unsafe"))
+    unsafe_flags = safety.get("unsafe_flags") or []
+
+    verdict = (_badge("BLOCKED / UNSAFE", big=True) if any_unsafe
+               else _badge("READ-ONLY SAFE", big=True))
+    head_note = ('<div class="note">Вердикт по read-only стадиям F4.2–F4.6 '
+                 '(их guard-флаги должны быть все «нет»).</div>')
+
+    unsafe_html = ""
+    if unsafe_flags:
+        items = "".join(f'<li class="flag-bad">{html.escape(k)} = ДА</li>'
+                        for k in unsafe_flags)
+        unsafe_html = (f'<h3>Небезопасные флаги</h3><ul class="tight">{items}</ul>')
+
     rows = []
     for key in EXPECTED_GUARDS:
         val = guards.get(key)
         if not seen.get(key):
             cell = '<span class="muted">— (нет в отчётах)</span>'
         elif val:
-            cell = f'<span class="flag-bad">{key} = ДА (НЕБЕЗОПАСНО)</span>'
+            cell = f'<span class="flag-bad">{html.escape(key)} = ДА (НЕБЕЗОПАСНО)</span>'
         else:
-            cell = f'<span class="flag-ok">{key} = нет</span>'
+            cell = f'<span class="flag-ok">{html.escape(key)} = нет</span>'
         rows.append(f"<tr><td>{cell}</td></tr>")
     tp = safety.get("token_policy_summary") or {}
     tp_rows = _rows([
@@ -541,22 +653,23 @@ def _safety_card(safety: dict) -> str:
         ("sandbox_token_used", tp.get("sandbox_token_used")),
         ("token_printed", tp.get("token_printed")),
     ])
-    verdict = (_badge(STATUS_BLOCKED) if safety.get("any_unsafe")
-               else _badge("OK"))
+    details = (
+        '<details><summary>Полная таблица guards и token_policy</summary>'
+        f'<table>{"".join(rows)}</table>'
+        '<h3>token_policy (latest read-only)</h3>'
+        f'<table>{tp_rows}</table></details>')
+
     exec_html = ""
     es = safety.get("execution_stage")
     if es and es.get("present"):
         exec_html = (
-            '<div class="note" style="margin-top:12px">F4.1 execution stage: '
+            '<div class="note">F4.1 execution stage (исторический факт): '
             f'order_was_sent={_esc(es.get("order_was_sent"))}, '
             f'live_token_used={_esc(es.get("live_token_used"))} — '
             f'{html.escape(es.get("note", ""))}</div>')
-    return (f'<div class="card"><h2>6 · Safety</h2>{verdict}'
-            '<div class="note">Вердикт по read-only стадиям F4.2–F4.6 '
-            '(их guard-флаги должны быть все «нет»).</div>'
-            f'<table>{"".join(rows)}</table>{exec_html}'
-            f'<h2 style="margin-top:14px">token_policy (latest read-only)</h2>'
-            f'<table>{tp_rows}</table></div>')
+
+    body = f"{verdict}{head_note}{unsafe_html}{exec_html}{details}"
+    return _card("6 · Безопасность (Safety)", body)
 
 
 def _raw_card(raw_reports: dict) -> str:
@@ -571,9 +684,49 @@ def _raw_card(raw_reports: dict) -> str:
         blocks.append(
             f"<details><summary>{html.escape(name)}</summary>"
             f"<pre>{html.escape(pretty)}</pre></details>")
-    return (f'<div class="card"><h2>7 · Raw reports (read-only)</h2>'
-            f'<div class="note">JSON санитизирован: токеноподобные строки '
-            f'отредактированы, account id маскируется.</div>{"".join(blocks)}</div>')
+    body = (f'<div class="note">Технические JSON-отчёты, для отладки. JSON '
+            f'санитизирован: токеноподобные строки отредактированы, account id '
+            f'маскируется.</div>{"".join(blocks)}')
+    return _card("7 · Технические JSON-отчёты (read-only, debug)", body,
+                 klass="card full")
+
+
+def _interpretation_card(t: dict, p: dict, e: dict, inc: dict) -> str:
+    """Блок «Что сейчас»: бизнес-интерпретация фактов (без советов)."""
+    bullets = []
+    qty = t.get("fill_quantity_units")
+    if qty is not None:
+        bullets.append(f"Куплено в этой отслеживаемой сделке: {_units(qty)}.")
+    total_u = p.get("current_total_position_units")
+    if total_u is not None:
+        bullets.append(f"Всего в позиции: {_units(total_u)}.")
+    if e.get("net_pnl_after_commission") is not None:
+        bullets.append(f"PnL новой сделки (с комиссией): "
+                       f"{_pnl(e.get('net_pnl_after_commission'))}.")
+    if p.get("total_unrealized_pnl") is not None:
+        bullets.append(f"PnL всей позиции: {_pnl(p.get('total_unrealized_pnl'))}.")
+    if inc.get("reliable_income_data_found") and \
+            inc.get("expected_dividend_per_unit_rub") is not None:
+        ev = inc.get("next_known_income_event_date")
+        ev_txt = f", дата события {html.escape(str(ev))}" if ev else ""
+        bullets.append(
+            "Найдены надёжные данные о дивидендах: "
+            f"{_money(inc.get('expected_dividend_per_unit_rub'))} на 1 шт.{ev_txt}.")
+    elif inc.get("income_data_checked") is not None:
+        bullets.append("Надёжных данных о дивидендах для оценки годового дохода нет.")
+    monthly = inc.get("expected_income_rub_monthly_total_position")
+    if monthly is not None:
+        bullets.append("Текущий ожидаемый доход всей позиции: "
+                       f"{_money(monthly)}/мес. (брутто).")
+    cov = inc.get("income_target_coverage_pct_total_position")
+    interp = ""
+    if cov is not None:
+        bullets.append("Покрытие цели 150 000 ₽/мес.: " + _pct(cov) + ".")
+        interp = (f'<div class="note">Эта позиция почти не влияет на цель '
+                  f'150 000 ₽/мес.; она покрывает только {_pct(cov)} цели. '
+                  f'(Факт, не инвестиционный совет.)</div>')
+    body = f'<ul class="tight">{"".join(f"<li>{b}</li>" for b in bullets)}</ul>{interp}'
+    return _card("Что сейчас", body)
 
 
 def build_dashboard_html(state: dict) -> str:
@@ -584,92 +737,118 @@ def build_dashboard_html(state: dict) -> str:
     e = state.get("economics_summary") or {}
     inc = state.get("income_summary") or {}
     safety = state.get("safety_summary") or {}
+    overall = state.get("overall_status", "OK")
+    fresh = _freshness(state)
 
-    trade_card = (
-        '<div class="card"><h2>2 · First live trade</h2><table>' + _rows([
-            ("ticker", t.get("ticker")),
-            ("order_id", t.get("order_id")),
-            ("account (masked)", t.get("account_masked")),
-            ("fill quantity (units)", t.get("fill_quantity_units")),
-            ("fill price", t.get("fill_price")),
-            ("gross amount", t.get("fill_gross_amount")),
-            ("commission raw", t.get("fill_commission_raw")),
-            ("commission abs", t.get("fill_commission_abs")),
-            ("cash outflow", t.get("fill_cash_outflow")),
-            ("attribution confidence", t.get("attribution_confidence")),
-            ("attribution method", t.get("attribution_method")),
-        ]) + "</table></div>")
+    # ── KPI-полоса ──
+    safe_badge = (_badge("BLOCKED") if safety.get("any_unsafe")
+                  else _badge("READ-ONLY SAFE"))
+    kpis = "".join([
+        _kpi("Текущая цена", _money(p.get("current_price"))),
+        _kpi("PnL всей позиции", _pnl(p.get("total_unrealized_pnl"))),
+        _kpi("PnL новой сделки (с комиссией)",
+             _pnl(e.get("net_pnl_after_commission"))),
+        _kpi("Ожидаемый доход / мес. (вся позиция)",
+             _money(inc.get("expected_income_rub_monthly_total_position"))),
+        _kpi("Покрытие цели 150 000 ₽/мес.",
+             _pct(inc.get("income_target_coverage_pct_total_position"))),
+        _kpi("Безопасность", safe_badge),
+    ])
 
-    position_card = (
-        '<div class="card"><h2>3 · Position</h2><table>' + _rows([
-            ("total position units", p.get("current_total_position_units")),
-            ("average position price", p.get("average_position_price")),
-            ("current price", p.get("current_price")),
-            ("current position value", p.get("current_position_value")),
-            ("total unrealized PnL", p.get("total_unrealized_pnl")),
-            ("currency", p.get("currency")),
-        ]) + f'</table><div class="note">{_esc(p.get("note"))}</div></div>')
+    # ── основные карточки ──
+    trade_card = _card("2 · Сделка (first live trade)", _kv([
+        ("Тикер", _esc(t.get("ticker"))),
+        ("ID заявки", _esc(t.get("order_id"))),
+        ("Счёт (маскирован)", _esc(t.get("account_masked"))),
+        ("Количество", _units(t.get("fill_quantity_units"))),
+        ("Цена сделки", _money(t.get("fill_price"))),
+        ("Сумма без комиссии", _money(t.get("fill_gross_amount"))),
+        ("Комиссия (raw)", _money(t.get("fill_commission_raw"))),
+        ("Комиссия (модуль)", _money(t.get("fill_commission_abs"))),
+        ("Фактический расход с комиссией", _money(t.get("fill_cash_outflow"))),
+        ("Достоверность атрибуции", _esc(t.get("attribution_confidence"))),
+        ("Метод атрибуции", _esc(t.get("attribution_method"))),
+    ]))
 
-    economics_card = (
-        '<div class="card"><h2>4 · New-fill economics</h2><table>' + _rows([
-            ("gross PnL (before commission)",
-             e.get("gross_pnl_before_commission")),
-            ("net PnL (after commission)", e.get("net_pnl_after_commission")),
-            ("commission drag (RUB)", e.get("commission_drag_rub")),
-            ("break-even price", e.get("break_even_price_after_commission")),
-            ("distance to break-even (RUB)", e.get("distance_to_break_even_rub")),
-            ("new-fill weight in position %",
-             e.get("new_fill_weight_in_total_position_pct")),
-            ("total position PnL kept separate",
-             e.get("total_position_pnl_kept_separate")),
-        ]) + '</table><div class="note">PnL новой сделки и PnL всей позиции — '
-        'разные величины (раздельно).</div></div>')
+    position_card = _card("3 · Позиция", _kv([
+        ("Всего бумаг", _units(p.get("current_total_position_units"))),
+        ("Средняя цена позиции", _money(p.get("average_position_price"))),
+        ("Текущая цена", _money(p.get("current_price"))),
+        ("Стоимость позиции", _money(p.get("current_position_value"))),
+        ("PnL всей позиции", _pnl(p.get("total_unrealized_pnl"))),
+        ("Валюта", _esc(p.get("currency"))),
+    ]) + '<div class="note">PnL всей позиции держится ОТДЕЛЬНО от PnL новой '
+        'сделки (см. карточку «Экономика сделки»).</div>')
 
-    income_card = (
-        '<div class="card"><h2>5 · Income validation</h2><table>' + _rows([
-            ("income_data_checked", inc.get("income_data_checked")),
-            ("reliable_income_data_found", inc.get("reliable_income_data_found")),
-            ("confidence", inc.get("confidence")),
-            ("source", inc.get("source")),
-            ("expected dividend / unit", inc.get("expected_dividend_per_unit_rub")),
-            ("new-fill income yearly",
-             inc.get("expected_income_rub_yearly_new_fill")),
-            ("new-fill income monthly",
-             inc.get("expected_income_rub_monthly_new_fill")),
-            ("total income yearly",
-             inc.get("expected_income_rub_yearly_total_position")),
-            ("total income monthly",
-             inc.get("expected_income_rub_monthly_total_position")),
-            ("coverage % (new-fill)",
-             inc.get("income_target_coverage_pct_new_fill")),
-            ("coverage % (total)",
-             inc.get("income_target_coverage_pct_total_position")),
-            ("target RUB/month", inc.get("base_monthly_living_basket_rub")),
-            ("next event date", inc.get("next_known_income_event_date")),
-            ("next event type", inc.get("next_known_income_event_type")),
-            ("next event amount/unit",
-             inc.get("next_known_income_event_amount_per_unit")),
-            ("income_validation_passed", inc.get("income_validation_passed")),
-        ]) + (f'<div class="note">{_esc(inc.get("tax_note"))}</div>'
-              if inc.get("tax_note") else "") + "</div>")
+    economics_card = _card("4 · Экономика сделки (new-fill)", _kv([
+        ("PnL без комиссии", _pnl(e.get("gross_pnl_before_commission"))),
+        ("PnL с учётом комиссии", _pnl(e.get("net_pnl_after_commission"))),
+        ("Влияние комиссии", _money(e.get("commission_drag_rub"))),
+        ("Цена безубытка", _money(e.get("break_even_price_after_commission"))),
+        ("До безубытка", _pnl(e.get("distance_to_break_even_rub"))),
+        ("Доля сделки в позиции", _pct(e.get("new_fill_weight_in_total_position_pct"))),
+        ("PnL сделки и позиции раздельно",
+         _esc(e.get("total_position_pnl_kept_separate"))),
+    ]) + '<div class="note">PnL новой сделки и PnL всей позиции — разные '
+        'величины (раздельно).</div>')
 
-    warn_html = ""
-    if state.get("warnings"):
-        items = "".join(f"<li>{html.escape(str(w))}</li>"
-                        for w in state["warnings"])
-        warn_html += f'<div class="card"><h2 class="warn">Warnings</h2><ul>{items}</ul></div>'
-    if state.get("errors"):
-        items = "".join(f"<li>{html.escape(str(x))}</li>"
-                        for x in state["errors"])
-        warn_html += f'<div class="card"><h2 class="bad">Errors</h2><ul>{items}</ul></div>'
+    tax_note = (f'<div class="note">{_esc(inc.get("tax_note"))}</div>'
+                if inc.get("tax_note") else "")
+    income_card = _card("5 · Валидация дохода (income)", _kv([
+        ("Данные проверены", _esc(inc.get("income_data_checked"))),
+        ("Надёжные данные найдены", _esc(inc.get("reliable_income_data_found"))),
+        ("Достоверность", _esc(inc.get("confidence"))),
+        ("Источник", _esc(inc.get("source"))),
+        ("Ожидаемый дивиденд на 1 шт.",
+         _money(inc.get("expected_dividend_per_unit_rub"))),
+        ("Доход новой сделки / год",
+         _money(inc.get("expected_income_rub_yearly_new_fill"))),
+        ("Доход новой сделки / мес.",
+         _money(inc.get("expected_income_rub_monthly_new_fill"))),
+        ("Ожидаемый доход всей позиции / год",
+         _money(inc.get("expected_income_rub_yearly_total_position"))),
+        ("Ожидаемый доход всей позиции / мес.",
+         _money(inc.get("expected_income_rub_monthly_total_position"))),
+        ("Покрытие цели (новая сделка)",
+         _pct(inc.get("income_target_coverage_pct_new_fill"))),
+        ("Покрытие цели 150 000 ₽/мес.",
+         _pct(inc.get("income_target_coverage_pct_total_position"))),
+        ("Цель, ₽/мес.", _money(inc.get("base_monthly_living_basket_rub"))),
+        ("Ближайшее событие — дата",
+         _esc(inc.get("next_known_income_event_date"))),
+        ("Ближайшее событие — тип",
+         _esc(inc.get("next_known_income_event_type"))),
+        ("Ближайшее событие — на 1 шт.",
+         _money(inc.get("next_known_income_event_amount_per_unit"))),
+        ("Валидация пройдена", _esc(inc.get("income_validation_passed"))),
+    ]) + tax_note)
+
+    # ── свежесть данных + предупреждения (сайдбар) ──
+    fresh_badge = _badge(fresh)
+    data_warnings = state.get("warnings") or []
+    safety_errors = state.get("errors") or []
+    warn_body = (f'<div>Свежесть данных: {fresh_badge}</div>')
+    if data_warnings:
+        items = "".join(f"<li>{html.escape(str(w))}</li>" for w in data_warnings)
+        warn_body += (f'<h3>Предупреждения о данных</h3>'
+                      f'<ul class="tight">{items}</ul>')
+    else:
+        warn_body += '<div class="note">Предупреждений о данных нет.</div>'
+    if safety_errors:
+        items = "".join(f'<li class="flag-bad">{html.escape(str(x))}</li>'
+                        for x in safety_errors)
+        warn_body += (f'<h3 class="bad">Ошибки / безопасность</h3>'
+                      f'<ul class="tight">{items}</ul>')
+    warnings_card = _card("Данные и предупреждения", warn_body)
+
+    overview_card = _card(
+        "1 · Цепочка статусов (F4.1–F4.6)",
+        _overview_table(state.get("overview") or []), klass="card full")
 
     host_banner = ""
     if state.get("host_warning"):
         host_banner = (f'<div class="card bad">⚠️ {html.escape(state["host_warning"])}'
                        "</div>")
-
-    overview_card = (f'<div class="card"><h2>1 · Overview / status chain</h2>'
-                     f'{_overview_table(state.get("overview") or [])}</div>')
 
     return f"""<!doctype html>
 <html lang="ru"><head><meta charset="utf-8">
@@ -677,25 +856,33 @@ def build_dashboard_html(state: dict) -> str:
 <title>F4.7 read-only dashboard</title>
 <style>{_CSS}</style></head>
 <body>
-<h1>F4.7 — read-only dashboard {_badge(state.get("overall_status", "OK"))}</h1>
-<div class="sub">stage <code>{html.escape(STAGE)}</code> · mode
-<code>{html.escape(MODE)}</code> · reports_dir
-<code>{html.escape(str(state.get("reports_dir")))}</code> · latest
+<div class="container">
+<header>
+<h1>F4.7 — дашборд (read-only) {_badge(overall, big=True)} {fresh_badge}</h1>
+<div class="sub">Локальный просмотрщик отчётов · последний отчёт
 <code>{_esc(state.get("latest_generated_at"))}</code> ·
-<strong>read-only viewer — не торгует, без токенов, без сети</strong></div>
+<strong>read-only — не торгует, без токенов, без сети</strong></div>
+</header>
 {host_banner}
-{warn_html}
-<div class="grid">
+<div class="kpis">{kpis}</div>
+{_interpretation_card(t, p, e, inc)}
 {overview_card}
+<div class="layout">
+<div class="col">
 {trade_card}
 {position_card}
 {economics_card}
+</div>
+<div class="col">
 {income_card}
 {_safety_card(safety)}
+{warnings_card}
+</div>
 </div>
 {_raw_card(state.get("raw_reports") or {})}
 <div class="note" style="margin-top:20px">F4.7 — только просмотр. Нет POST/действий,
 нет кнопок торговли. Остановить сервер: Ctrl+C.</div>
+</div>
 </body></html>"""
 
 
