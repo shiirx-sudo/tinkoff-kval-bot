@@ -430,3 +430,144 @@ def test_default_constants():
     assert pdash.DEFAULT_PORT == 8766
     assert pdash.DEFAULT_HOST == "127.0.0.1"
     assert pdash.DEFAULT_REPORT_PATH == "data/reports/portfolio_dashboard_data.json"
+
+
+# ─── F4.9.1 visual redesign ───────────────────────────────────────────────────
+
+def test_sidebar_navigation_anchors(tmp_path):
+    html = _html(tmp_path)
+    assert 'class="sidebar"' in html
+    for anchor, label in (("overview", "Overview"), ("portfolio", "Portfolio"),
+                          ("income", "Income"), ("turnover", "Turnover"),
+                          ("contributions", "Contributions"), ("risk", "Risk"),
+                          ("lasttrade", "Last trade"), ("raw", "Raw JSON")):
+        assert f'href="#{anchor}"' in html, anchor
+        assert label in html, label
+    # секции имеют соответствующие id-якоря
+    for anchor in ("overview", "portfolio", "income", "turnover", "contributions",
+                   "risk", "positions", "lasttrade", "raw"):
+        assert f'id="{anchor}"' in html, anchor
+
+
+def test_header_subtitle_and_badges(tmp_path):
+    html = _html(tmp_path)
+    assert "Read-only portfolio overview from F4.8" in html
+    assert "READ_ONLY_SAFE" in html
+    assert "full" in html               # data freshness badge
+    assert "***1918" in html            # account masked badge
+    assert "2026-06-26" in html         # generated_at
+
+
+def test_kpi_grid_redesigned(tmp_path):
+    html = _html(tmp_path)
+    assert 'class="kpis"' in html
+    assert 'class="kpi ' in html or 'class="kpi"' in html
+    for label in ("Стоимость портфеля", "Пассивный доход / мес.",
+                  "Покрытие цели 150 000 ₽/мес.", "Свободный кэш",
+                  "Оборот YTD (цель 60M)", "PnL портфеля"):
+        assert label in html, label
+
+
+def test_passive_income_progress_bar(tmp_path):
+    html = _html(tmp_path)
+    assert "Пассивный доход к цели 150 000 ₽/мес." in html
+    assert 'class="track"' in html and 'class="fill' in html
+
+
+def test_turnover_progress_bar(tmp_path):
+    html = _html(tmp_path)
+    assert "Оборот YTD к цели 60M" in html
+    assert 'class="track"' in html
+
+
+def test_position_weight_allocation_donut_svg(tmp_path):
+    html = _html(tmp_path)
+    assert "<svg" in html
+    assert "Position weight allocation" in html
+    assert "это НЕ классы активов" in html or "НЕ классы активов" in html
+
+
+def test_income_calendar_bar_chart(tmp_path):
+    html = _html(tmp_path)
+    assert "Календарь дохода по месяцам" in html
+    assert 'class="chart"' in html
+    assert "2026-08" in html
+
+
+def test_turnover_side_and_month_bars(tmp_path):
+    html = _html(tmp_path)
+    assert "Оборот по сторонам" in html
+    assert "Оборот по месяцам" in html
+    assert html.count('class="chart"') >= 2  # календарь + обороты
+
+
+def test_executive_summary_cards(tmp_path):
+    html = _html(tmp_path)
+    assert 'class="execs"' in html
+    assert 'class="exec"' in html
+    for t in ("Portfolio", "Income", "Turnover", "Contributions", "Risk"):
+        assert f'class="et">{t}' in html
+    assert "Что сейчас" in html
+    assert "не торговая рекомендация" in html.lower() or \
+        "НЕ торговая рекомендация" in html
+
+
+def test_positions_section_after_overview(tmp_path):
+    html = _html(tmp_path)
+    assert html.find('id="positions"') > html.find('id="overview"')
+    assert html.find('id="positions"') > html.find('id="risk"')
+    # таблица позиций по-прежнему рендерит все позиции с раскраской строк
+    assert "B · Позиции (9)" in html
+    assert 'class="tbl"' in html
+    assert "row-neg" in html
+
+
+def test_risk_display_threshold_labeled(tmp_path):
+    html = _html(tmp_path)
+    assert "пороги дашборда" in html
+    assert "Display threshold, not investment advice" in html
+
+
+def test_missing_report_page_visually_consistent(tmp_path):
+    state = pdash.load_portfolio_dashboard_report(str(tmp_path / "nope.json"))
+    html = pdash.build_portfolio_dashboard_html(state)
+    assert 'class="sidebar"' in html       # тот же каркас
+    assert "Portfolio cockpit" in html
+    assert "Отчёт F4.8 не найден" in html
+    assert "portfolio-dashboard-data" in html
+
+
+def test_redesign_html_well_formed(tmp_path):
+    from html.parser import HTMLParser
+    html = _html(tmp_path)
+    assert html.count("<table") == html.count("</table>")
+
+    class _P(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.stack = []
+            self.bal = 0
+            self.nested = False
+            self.maxd = 0
+
+        def handle_starttag(self, tag, attrs):
+            if tag != "div":
+                return
+            card = "card" in (dict(attrs).get("class", "") or "").split()
+            if card and any(self.stack):
+                self.nested = True
+            self.stack.append(card)
+            self.bal += 1
+            self.maxd = max(self.maxd, sum(self.stack))
+
+        def handle_endtag(self, tag):
+            if tag == "div":
+                self.bal -= 1
+                if self.stack:
+                    self.stack.pop()
+
+    p = _P()
+    p.feed(html)
+    assert p.bal == 0
+    assert p.nested is False
+    assert p.maxd == 1
