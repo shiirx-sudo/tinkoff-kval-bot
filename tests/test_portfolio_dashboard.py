@@ -81,16 +81,44 @@ def _f48():
             "turnover_definition": "sum_abs_buy_sell_gross_amount",
             "turnover_partial": False, "turnover_ytd_rub": 34669.88,
             "turnover_mtd_rub": 34669.88, "turnover_qtd_rub": 34669.88,
-            "turnover_annual_target_rub": 60000000,
-            "turnover_ytd_plan_to_date_rub": 9534246.58,
-            "turnover_ytd_gap_rub": 9499576.70, "turnover_ytd_progress_pct": 0.0578,
-            "turnover_forecast_year_end_rub": 72000.0,
-            "turnover_remaining_year_rub": 59965330.12,
-            "turnover_daily_required_rub": 447502.46,
+            "turnover_annual_target_rub": 6000000,
+            "turnover_monthly_target_rub": 500000,
+            "turnover_quarterly_target_rub": 1500000,
+            "turnover_ytd_plan_to_date_rub": 953424.66,
+            "turnover_ytd_gap_rub": 918754.78, "turnover_ytd_progress_pct": 0.5778,
             "commissions_ytd_rub": 62.26, "commission_rate_pct_of_turnover": 0.1796,
+            "turnover_current_month_rub": 34669.88,
+            "turnover_current_month_target_rub": 500000,
+            "turnover_current_month_progress_pct": 6.9340,
+            "turnover_current_month_gap_rub": 465330.12,
+            "turnover_current_quarter_rub": 34669.88,
+            "turnover_current_quarter_target_rub": 1500000,
+            "turnover_current_quarter_progress_pct": 2.3113,
+            "turnover_current_quarter_gap_rub": 1465330.12,
+            "turnover_daily_required_month_rub": 232665.06,
+            "turnover_daily_required_quarter_rub": 25264.31,
             "turnover_by_side": {"BUY": 20000.0, "SELL": 14669.88},
             "turnover_by_instrument": {"T": 276.08, "P0": 34393.80},
-            "turnover_by_month": {"2026-06": 34669.88}},
+            "turnover_by_month": {"2026-06": 34669.88},
+            "turnover_by_quarter": {"2026-Q2": 34669.88},
+            "trades_by_month": {"2026-06": 4}, "trades_by_quarter": {"2026-Q2": 4},
+            "kval_turnover_target_rub": 6000000,
+            "kval_turnover_period": "trailing_4_quarters",
+            "kval_turnover_trailing_4q_rub": 34669.88,
+            "kval_turnover_progress_pct": 0.5778,
+            "kval_turnover_gap_rub": 5965330.12,
+            "kval_quarters_checked": 4, "kval_months_checked": 12,
+            "kval_trade_count_trailing_4q": 4,
+            "kval_trade_count_by_quarter": {"2025-Q3": 0, "2025-Q4": 0,
+                                            "2026-Q1": 0, "2026-Q2": 4},
+            "kval_trade_count_by_month": {"2026-06": 4},
+            "kval_avg_trades_per_quarter": 1.0,
+            "kval_min_trades_per_quarter_required": 10,
+            "kval_monthly_activity_required": True,
+            "kval_months_without_trades": 11,
+            "kval_frequency_passed": False, "kval_turnover_passed": False,
+            "kval_criteria_passed": False, "kval_criteria_status": "NOT_PASSED",
+            "kval_warnings": []},
         "contributions_summary": {
             "contributions_tracking_enabled": False,
             "contribution_plan_weekly_rub": None,
@@ -118,8 +146,11 @@ def _f48():
             "portfolio_value_rub": 26298.74, "cash_rub": 562.34, "cash_pct": 2.1383,
             "passive_income_monthly_rub": 26.53, "passive_income_target_rub": 150000,
             "passive_income_coverage_pct": 0.0177, "income_gap_rub_monthly": 149973.47,
-            "turnover_ytd_rub": 34669.88, "turnover_annual_target_rub": 60000000,
-            "turnover_ytd_progress_pct": 0.0578, "turnover_gap_rub": 9499576.70,
+            "turnover_ytd_rub": 34669.88, "turnover_annual_target_rub": 6000000,
+            "turnover_ytd_progress_pct": 0.5778, "turnover_gap_rub": 918754.78,
+            "kval_turnover_trailing_4q_rub": 34669.88,
+            "kval_turnover_target_rub": 6000000, "kval_turnover_progress_pct": 0.5778,
+            "kval_turnover_gap_rub": 5965330.12, "kval_criteria_status": "NOT_PASSED",
             "portfolio_unrealized_pnl_rub": -2970.94,
             "portfolio_unrealized_pnl_pct": -10.3491, "safety_status": "READ_ONLY_SAFE"},
         "guards": {"live_order_sent": False, "post_order_called": False,
@@ -170,7 +201,7 @@ def test_kpi_strip_contains_key_metrics(tmp_path):
     html = _html(tmp_path)
     assert 'class="kpis"' in html
     for label in ("Стоимость портфеля", "Свободный кэш", "Пассивный доход / мес.",
-                  "Покрытие цели 150 000 ₽/мес.", "Оборот YTD (цель 60M)",
+                  "Покрытие цели 150 000 ₽/мес.", "Квал-оборот 4Q",
                   "PnL портфеля", "Взносы", "Безопасность"):
         assert label in html, label
     assert "26 298.74 ₽" in html       # стоимость портфеля
@@ -214,6 +245,28 @@ def test_turnover_section_buy_sell_gross_not_dividends(tmp_path):
     assert "buy+sell gross" in html.lower()
     assert "НЕ дивиденды" in html
     assert "34 669.88 ₽" in html
+
+
+def test_dashboard_uses_6m_trailing_4q_not_60m(tmp_path):
+    html = _html(tmp_path)
+    assert "60M" not in html
+    assert "6M за 4 квартала" in html
+    assert "Квал-оборот 4Q" in html                  # KPI label
+    assert "Квал-оборот к цели 6M за 4 квартала" in html  # progress bar
+
+
+def test_turnover_section_kval_tracker(tmp_path):
+    html = _html(tmp_path)
+    # цели месяца/квартала и trailing 4Q
+    assert "Текущий месяц" in html and "Текущий квартал" in html
+    assert "Квал-оборот 4Q" in html
+    # частота сделок
+    assert "Сделок за 4 квартала" in html
+    assert "Месяцев без сделок" in html
+    assert "Критерии квалинвестора" in html
+    # бейдж pass/fail/partial и дисклеймер (не сертификация)
+    assert "NOT_PASSED" in html
+    assert "НЕ юридическая сертификация" in html
 
 
 def test_contributions_disabled_warning(tmp_path):
@@ -464,7 +517,7 @@ def test_kpi_grid_redesigned(tmp_path):
     assert 'class="kpi ' in html or 'class="kpi"' in html
     for label in ("Стоимость портфеля", "Пассивный доход / мес.",
                   "Покрытие цели 150 000 ₽/мес.", "Свободный кэш",
-                  "Оборот YTD (цель 60M)", "PnL портфеля"):
+                  "Квал-оборот 4Q", "PnL портфеля"):
         assert label in html, label
 
 
@@ -476,7 +529,7 @@ def test_passive_income_progress_bar(tmp_path):
 
 def test_turnover_progress_bar(tmp_path):
     html = _html(tmp_path)
-    assert "Оборот YTD к цели 60M" in html
+    assert "Квал-оборот к цели 6M за 4 квартала" in html
     assert 'class="track"' in html
 
 

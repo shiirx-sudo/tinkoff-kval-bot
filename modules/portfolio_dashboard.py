@@ -449,8 +449,9 @@ def _kpi_strip(state: dict) -> str:
              sub="до 150 000 ₽/мес.", cls="k-warn"),
         _kpi("Свободный кэш", _money(kpi.get("cash_rub")),
              sub=_pct(kpi.get("cash_pct")) + " портфеля"),
-        _kpi("Оборот YTD (цель 60M)", _money(kpi.get("turnover_ytd_rub")),
-             sub=_pct(kpi.get("turnover_ytd_progress_pct")) + " прогресс"),
+        _kpi("Квал-оборот 4Q", _money(kpi.get("kval_turnover_trailing_4q_rub")),
+             sub=_pct(kpi.get("kval_turnover_progress_pct"))
+             + " к цели 6M за 4 квартала"),
         _kpi("PnL портфеля", _pnl(kpi.get("portfolio_unrealized_pnl_rub")),
              sub=_pct(kpi.get("portfolio_unrealized_pnl_pct")), cls=pnl_cls),
         _kpi("Взносы", _badge("настроены" if contrib_on else "не настроены"),
@@ -480,10 +481,10 @@ def _interpretation(state: dict) -> str:
          f"/мес.; покрытие цели 150 000 ₽/мес. — {_pct(cov)}, покрывает только "
          f"{_pct(cov)} цели."),
         ("Turnover",
-         f"Оборот {_money(tn.get('turnover_ytd_rub'))} из "
-         f"{_money(tn.get('turnover_annual_target_rub'))} "
-         f"({_pct(tn.get('turnover_ytd_progress_pct'))}); требуется в день "
-         f"{_money(tn.get('turnover_daily_required_rub'))}."),
+         f"Квал-оборот {_money(tn.get('kval_turnover_trailing_4q_rub'))} из "
+         f"{_money(tn.get('kval_turnover_target_rub'))} за 4 квартала "
+         f"({_pct(tn.get('kval_turnover_progress_pct'))}); критерии: "
+         f"{_esc(tn.get('kval_criteria_status'))}."),
         ("Contributions",
          "Взносы настроены." if cn.get("contributions_tracking_enabled")
          else "Взносы НЕ настроены — учёт выключен."),
@@ -512,10 +513,10 @@ def _progress_card(state: dict) -> str:
             + _money(inc.get("target_monthly_income_rub")),
             inc.get("income_target_coverage_pct"), color="warn")
         + _progress(
-            "Оборот YTD к цели 60M",
-            _money(tn.get("turnover_ytd_rub")) + " / "
-            + _money(tn.get("turnover_annual_target_rub")),
-            tn.get("turnover_ytd_progress_pct"), color="ok")
+            "Квал-оборот к цели 6M за 4 квартала",
+            _money(tn.get("kval_turnover_trailing_4q_rub")) + " / "
+            + _money(tn.get("kval_turnover_target_rub")),
+            tn.get("kval_turnover_progress_pct"), color="ok")
         + _progress(
             "Доля свободного кэша", _pct(pf.get("cash_pct")),
             pf.get("cash_pct"), color="ok"))
@@ -622,25 +623,58 @@ def _income_card(state: dict) -> str:
     return _card("C · Пассивный доход / FIRE", body, klass="card full")
 
 
+def _kval_badge(status) -> str:
+    s = str(status or "")
+    cls = "ok" if s == "PASSED" else ("bad" if s == "NOT_PASSED" else "warn")
+    return f'<span class="badge {cls}">{html.escape(s or "—")}</span>'
+
+
 def _turnover_card(state: dict) -> str:
     tn = state.get("turnover_summary") or {}
     body = _kv([
         ("Определение", _esc(tn.get("turnover_definition"))
          + " (buy+sell gross, НЕ дивиденды/купоны)"),
         ("Режим", _badge("partial" if tn.get("turnover_partial") else "full")),
-        ("Оборот YTD", _money(tn.get("turnover_ytd_rub"))),
-        ("Оборот MTD / QTD",
-         _money(tn.get("turnover_mtd_rub")) + " / " + _money(tn.get("turnover_qtd_rub"))),
-        ("Годовая цель", _money(tn.get("turnover_annual_target_rub"))),
-        ("Прогресс", _pct(tn.get("turnover_ytd_progress_pct"))),
-        ("План-на-сегодня", _money(tn.get("turnover_ytd_plan_to_date_rub"))),
-        ("Разрыв до плана", _money(tn.get("turnover_ytd_gap_rub"))),
-        ("Прогноз на конец года", _money(tn.get("turnover_forecast_year_end_rub"))),
-        ("Осталось за год", _money(tn.get("turnover_remaining_year_rub"))),
-        ("Требуется в день", _money(tn.get("turnover_daily_required_rub"))),
-        ("Комиссии YTD", _money(tn.get("commissions_ytd_rub"))),
+        ("Текущий месяц",
+         _money(tn.get("turnover_current_month_rub")) + " / "
+         + _money(tn.get("turnover_current_month_target_rub"))
+         + " (" + _pct(tn.get("turnover_current_month_progress_pct")) + ")"),
+        ("Текущий квартал",
+         _money(tn.get("turnover_current_quarter_rub")) + " / "
+         + _money(tn.get("turnover_current_quarter_target_rub"))
+         + " (" + _pct(tn.get("turnover_current_quarter_progress_pct")) + ")"),
+        ("Квал-оборот 4Q",
+         _money(tn.get("kval_turnover_trailing_4q_rub")) + " / "
+         + _money(tn.get("kval_turnover_target_rub"))
+         + " (" + _pct(tn.get("kval_turnover_progress_pct")) + ")"),
+        ("Разрыв до 6M", _money(tn.get("kval_turnover_gap_rub"))),
+        ("Требуется в день (месяц / квартал)",
+         _money(tn.get("turnover_daily_required_month_rub")) + " / "
+         + _money(tn.get("turnover_daily_required_quarter_rub"))),
+        ("Оборот YTD (вторично)", _money(tn.get("turnover_ytd_rub"))),
+        ("Комиссии YTD (отдельно от оборота)",
+         _money(tn.get("commissions_ytd_rub"))),
         ("Ставка комиссии", _pct(tn.get("commission_rate_pct_of_turnover"))),
     ])
+    # kval-трекер: частота сделок
+    body += (
+        "<h3>Квалинвестор: частота сделок</h3>"
+        + _kv([
+            ("Сделок за 4 квартала", _esc(tn.get("kval_trade_count_trailing_4q"))),
+            ("В среднем сделок / квартал",
+             _esc(tn.get("kval_avg_trades_per_quarter")) + " (нужно ≥ "
+             + _esc(tn.get("kval_min_trades_per_quarter_required")) + ")"),
+            ("Месяцев без сделок", _esc(tn.get("kval_months_without_trades"))),
+            ("Оборот ≥ 6M", _badge("да" if tn.get("kval_turnover_passed")
+                                   else "нет")),
+            ("Частота OK", _badge("да" if tn.get("kval_frequency_passed")
+                                  else "нет")),
+            ("Критерии квалинвестора", _kval_badge(tn.get("kval_criteria_status"))),
+        ]))
+    body += ('<div class="caution">Дашборд отслеживает путь по обороту/частоте к '
+             'критериям квалинвестора. Итоговое признание зависит от правил '
+             'брокера/регулятора и документов — это НЕ юридическая сертификация.'
+             '</div>')
     by_side = tn.get("turnover_by_side") or {}
     if by_side:
         body += ("<h3>Оборот по сторонам (buy/sell)</h3>"
@@ -649,11 +683,21 @@ def _turnover_card(state: dict) -> str:
     if by_month:
         body += ("<h3>Оборот по месяцам</h3>"
                  + _barchart({str(k): v for k, v in by_month.items()}))
+    trades_month = tn.get("trades_by_month") or {}
+    if trades_month:
+        body += ("<h3>Сделок по месяцам</h3>"
+                 + _barchart({str(k): v for k, v in trades_month.items()},
+                             fmt=lambda v: f"{int(v)}"))
+    trades_q = tn.get("trades_by_quarter") or {}
+    if trades_q:
+        body += ("<h3>Сделок по кварталам</h3>"
+                 + _barchart({str(k): v for k, v in trades_q.items()},
+                             fmt=lambda v: f"{int(v)}"))
     by_instr = tn.get("turnover_by_instrument") or {}
     if by_instr:
         rows = [[html.escape(str(k)), _money(v)] for k, v in by_instr.items()]
         body += "<h3>Оборот по инструментам</h3>" + _table(["Инструмент", "Оборот"], rows)
-    return _card("D · Оборот (цель 60M/год)", body, klass="card full")
+    return _card("D · Оборот (цель 6M за 4 квартала)", body, klass="card full")
 
 
 def _contributions_card(state: dict) -> str:

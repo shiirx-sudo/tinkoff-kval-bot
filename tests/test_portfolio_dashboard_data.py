@@ -231,9 +231,111 @@ def test_turnover_partial_from_known_T_buy_when_no_operations(tmp_path):
 
 def test_turnover_targets_present(tmp_path):
     tn = _run(tmp_path)["turnover_summary"]
-    assert tn["turnover_annual_target_rub"] == 60000000
-    assert tn["turnover_monthly_target_rub"] == 5000000
-    assert tn["turnover_quarterly_target_rub"] == 15000000
+    # F4.11: цель оборота = путь к квалинвестору (6M за trailing 4 квартала)
+    assert tn["turnover_annual_target_rub"] == 6000000
+    assert tn["turnover_monthly_target_rub"] == 500000
+    assert tn["turnover_quarterly_target_rub"] == 1500000
+    assert tn["kval_turnover_target_rub"] == 6000000
+    assert tn["kval_turnover_period"] == "trailing_4_quarters"
+
+
+# ─── F4.11 kval-турновер/частота (trailing 4 квартала) ────────────────────────
+
+# окно trailing 4 квартала относительно NOW=2026-06-26 (Q2): 2025-07 … 2026-06
+WINDOW_MONTHS = ([f"2025-{m:02d}" for m in range(7, 13)]
+                 + [f"2026-{m:02d}" for m in range(1, 7)])
+
+
+def _ops_each_month(months, per_month=4, price=10, qty=100):
+    ops = []
+    for m in months:
+        for i in range(per_month):
+            ops.append(_op("OPERATION_TYPE_BUY", price, qty, 0.1, f"{m}-1{i}T10:00:00Z"))
+    return ops
+
+
+def test_monthly_turnover_progress_uses_500k(tmp_path):
+    ops = [_op("OPERATION_TYPE_BUY", 2500, 100, 0.5, "2026-06-10T10:00:00Z")]  # 250000
+    tn = _run(tmp_path, operations_provider=lambda acc: ops)["turnover_summary"]
+    assert tn["turnover_current_month_target_rub"] == 500000
+    assert tn["turnover_current_month_rub"] == Decimal("250000.00")
+    assert tn["turnover_current_month_progress_pct"] == Decimal("50.0000")
+    assert tn["turnover_current_month_gap_rub"] == Decimal("250000.00")
+
+
+def test_quarterly_turnover_progress_uses_1_5m(tmp_path):
+    ops = [_op("OPERATION_TYPE_BUY", 2500, 100, 0.5, "2026-06-10T10:00:00Z")]  # 250000
+    tn = _run(tmp_path, operations_provider=lambda acc: ops)["turnover_summary"]
+    assert tn["turnover_current_quarter_target_rub"] == 1500000
+    assert tn["turnover_current_quarter_rub"] == Decimal("250000.00")
+    assert tn["turnover_current_quarter_progress_pct"] == Decimal("16.6667")
+
+
+def test_trailing_4q_progress_uses_6m(tmp_path):
+    ops = [_op("OPERATION_TYPE_BUY", 2500, 100, 0.5, "2026-06-10T10:00:00Z")]  # 250000
+    tn = _run(tmp_path, operations_provider=lambda acc: ops)["turnover_summary"]
+    assert tn["kval_turnover_target_rub"] == 6000000
+    assert tn["kval_turnover_trailing_4q_rub"] == Decimal("250000.00")
+    assert tn["kval_turnover_progress_pct"] == Decimal("4.1667")
+    assert tn["kval_turnover_gap_rub"] == Decimal("5750000.00")
+
+
+def test_trade_count_by_month_and_quarter(tmp_path):
+    ops = [_op("OPERATION_TYPE_BUY", 10, 100, 0.5, "2026-06-10T10:00:00Z"),
+           _op("OPERATION_TYPE_SELL", 20, 50, 0.7, "2026-06-12T10:00:00Z")]
+    tn = _run(tmp_path, operations_provider=lambda acc: ops)["turnover_summary"]
+    assert tn["trades_by_month"]["2026-06"] == 2
+    assert tn["trades_by_quarter"]["2026-Q2"] == 2
+    assert tn["kval_trade_count_trailing_4q"] == 2
+
+
+def test_month_without_trades_flagged(tmp_path):
+    ops = [_op("OPERATION_TYPE_BUY", 10, 100, 0.5, "2026-06-10T10:00:00Z")]
+    tn = _run(tmp_path, operations_provider=lambda acc: ops)["turnover_summary"]
+    # из 12 месяцев окна сделки только в июне → 11 месяцев без сделок
+    assert tn["kval_months_without_trades"] == 11
+    assert tn["kval_frequency_passed"] is False
+
+
+def test_frequency_passes_with_enough_trades_every_month(tmp_path):
+    ops = _ops_each_month(WINDOW_MONTHS, per_month=4)   # 48 сделок, ≥1/мес
+    tn = _run(tmp_path, operations_provider=lambda acc: ops)["turnover_summary"]
+    assert tn["kval_avg_trades_per_quarter"] == Decimal("12.00")  # 48/4
+    assert tn["kval_months_without_trades"] == 0
+    assert tn["kval_frequency_passed"] is True
+
+
+def test_missing_month_fails_frequency(tmp_path):
+    # пропускаем один месяц окна → частота не пройдена даже при высоком среднем
+    ops = _ops_each_month([m for m in WINDOW_MONTHS if m != "2025-09"], per_month=4)
+    tn = _run(tmp_path, operations_provider=lambda acc: ops)["turnover_summary"]
+    assert tn["kval_avg_trades_per_quarter"] >= Decimal("10")
+    assert tn["kval_months_without_trades"] >= 1
+    assert tn["kval_frequency_passed"] is False
+
+
+def test_incomplete_history_gives_partial_data(tmp_path):
+    # нет operations (только F4.4) → PARTIAL_DATA, не ложная уверенность
+    tn = _run(tmp_path)["turnover_summary"]
+    assert tn["turnover_partial"] is True
+    assert tn["kval_criteria_status"] == "PARTIAL_DATA"
+    assert "operations_history_incomplete_for_kval_tracking" in tn["kval_warnings"]
+
+
+def test_kval_criteria_status_not_passed_with_full_but_below(tmp_path):
+    ops = [_op("OPERATION_TYPE_BUY", 10, 100, 0.5, "2026-06-10T10:00:00Z")]
+    tn = _run(tmp_path, operations_provider=lambda acc: ops)["turnover_summary"]
+    assert tn["kval_criteria_status"] == "NOT_PASSED"
+    assert tn["kval_turnover_passed"] is False
+    assert tn["kval_criteria_passed"] is False
+
+
+def test_no_60m_hardcoded_in_modules():
+    from pathlib import Path
+    for mod in ("modules/portfolio_dashboard_data.py", "modules/portfolio_dashboard.py"):
+        src = Path(mod).read_text(encoding="utf-8")
+        assert "60000000" not in src, mod
+        assert "60_000_000" not in src, mod
 
 
 # ─── contributions ────────────────────────────────────────────────────────────
