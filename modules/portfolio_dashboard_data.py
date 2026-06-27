@@ -70,9 +70,15 @@ LIVE_TRADING_TOKEN_ENV = "TINKOFF_LIVE_TRADING_TOKEN"
 
 BASE_MONTHLY_LIVING_BASKET_RUB = 150000
 BASE_INCOME_DATE = "2026-06"
-TURNOVER_ANNUAL_TARGET_RUB = 60_000_000
-TURNOVER_MONTHLY_TARGET_RUB = 5_000_000
-TURNOVER_QUARTERLY_TARGET_RUB = 15_000_000
+# Цель оборота — путь к статусу квалинвестора: 6 000 000 ₽ за trailing 4 квартала
+# (НЕ произвольные 60M/год). Месяц/квартал — пропорциональные ориентиры.
+KVAL_TURNOVER_TARGET_RUB = 6_000_000
+KVAL_TURNOVER_PERIOD = "trailing_4_quarters"
+KVAL_MIN_TRADES_PER_QUARTER = 10
+TURNOVER_ANNUAL_TARGET_RUB = 6_000_000       # = kval target (6M за 4 квартала)
+TURNOVER_MONTHLY_TARGET_RUB = 500_000
+TURNOVER_QUARTERLY_TARGET_RUB = 1_500_000
+WARN_KVAL_PARTIAL = "operations_history_incomplete_for_kval_tracking"
 # Явное допущение доходности для оценки требуемого капитала (не реальная доходность).
 REQUIRED_CAPITAL_ASSUMED_YIELD_PCT = Decimal("10.0")
 
@@ -441,17 +447,63 @@ def _period_starts(now: datetime):
     return year_start, month_start, quarter_start
 
 
+def _quarter_num(month: int) -> int:
+    return (month - 1) // 3 + 1
+
+
+def _q_index(year: int, month: int) -> int:
+    return year * 4 + (_quarter_num(month) - 1)
+
+
+def _q_key_from_index(idx: int) -> str:
+    return f"{idx // 4}-Q{idx % 4 + 1}"
+
+
+def _q_start_from_index(idx: int, tz) -> datetime:
+    return datetime(idx // 4, (idx % 4) * 3 + 1, 1, tzinfo=tz)
+
+
+def _month_keys(start: datetime, end: datetime) -> list[str]:
+    keys, y, m = [], start.year, start.month
+    while (y, m) <= (end.year, end.month):
+        keys.append(f"{y}-{m:02d}")
+        m = 1 if m == 12 else m + 1
+        y = y + 1 if m == 1 else y
+    return keys
+
+
+def _business_days(start: datetime, end: datetime) -> int:
+    """Грубая оценка торговых дней (5/7 календарных), минимум 1 при наличии дней."""
+    days = max(0, (end - start).days)
+    return max(1, int(days * 5 / 7)) if days > 0 else 1
+
+
 def build_turnover_summary(*, operations, f44, now, warnings: list[str],
                            resolver=None) -> dict:
     definition = "sum_abs_buy_sell_gross_amount"
+    tz = now.tzinfo or timezone.utc
     year_start, month_start, quarter_start = _period_starts(now)
     ytd = mtd = qtd = Decimal(0)
     comm_ytd = comm_mtd = comm_qtd = Decimal(0)
     by_instrument: dict[str, Decimal] = {}
     by_side = {"BUY": Decimal(0), "SELL": Decimal(0)}
     by_month: dict[str, Decimal] = {}
+    by_quarter: dict[str, Decimal] = {}
+    trades_by_month: dict[str, int] = {}
+    trades_by_quarter: dict[str, int] = {}
     partial = False
     have_data = False
+
+    def _record(dt, gross, comm, side, label, trades):
+        by_side[side] += gross
+        by_instrument[label] = by_instrument.get(label, Decimal(0)) + gross
+        if dt is None:
+            return
+        ym, qk = dt.strftime("%Y-%m"), _q_key_from_index(_q_index(dt.year, dt.month))
+        by_month[ym] = by_month.get(ym, Decimal(0)) + gross
+        by_quarter[qk] = by_quarter.get(qk, Decimal(0)) + gross
+        trades_by_month[ym] = trades_by_month.get(ym, 0) + trades
+        trades_by_quarter[qk] = trades_by_quarter.get(qk, 0) + trades
 
     if operations:
         have_data = True
@@ -465,11 +517,9 @@ def build_turnover_summary(*, operations, f44, now, warnings: list[str],
             comm = abs(_money(op.get("commission")) or Decimal(0))
             side = "BUY" if is_buy(op) else "SELL"
             label = res.ticker or res.instrument_uid[:8] or res.operation_id
-            by_side[side] += gross
-            by_instrument[label] = by_instrument.get(label, Decimal(0)) + gross
+            # 1 квалифицирующая операция = 1 сделка (deal) для частоты квал-критерия.
+            _record(dt, gross, comm, side, label, 1)
             if dt is not None:
-                by_month[dt.strftime("%Y-%m")] = \
-                    by_month.get(dt.strftime("%Y-%m"), Decimal(0)) + gross
                 if dt >= year_start:
                     ytd += gross
                     comm_ytd += comm
@@ -487,10 +537,8 @@ def build_turnover_summary(*, operations, f44, now, warnings: list[str],
         comm = abs(_to_decimal(f44.get("fill_commission_abs")) or Decimal(0))
         dt = _parse_dt(f44.get("fill_datetime"))
         label = f44.get("ticker") or "?"
-        by_side["BUY"] += gross
-        by_instrument[label] = gross
+        _record(dt, gross, comm, "BUY", label, 1)
         if dt is not None:
-            by_month[dt.strftime("%Y-%m")] = gross
             if dt >= year_start:
                 ytd, comm_ytd = gross, comm
             if dt >= month_start:
@@ -507,6 +555,7 @@ def build_turnover_summary(*, operations, f44, now, warnings: list[str],
             "История операций недоступна — оборот не рассчитан (поля = null).")
         return _empty_turnover(definition)
 
+    # ── YTD (вторичная метрика) против годового ориентира (= kval target) ──
     fraction, _days_remaining = _year_fraction(now)
     annual = Decimal(TURNOVER_ANNUAL_TARGET_RUB)
     plan_to_date = _q2(annual * fraction)
@@ -518,8 +567,46 @@ def build_turnover_summary(*, operations, f44, now, warnings: list[str],
     daily_required = (_q2(remaining / Decimal(trading_days_remaining))
                       if trading_days_remaining > 0 and remaining is not None
                       else None)
-    turnover_total = ytd
-    comm_rate = _pct(comm_ytd, turnover_total) if turnover_total else None
+    comm_rate = _pct(comm_ytd, ytd) if ytd else None
+
+    # ── текущий месяц / квартал против пропорциональных ориентиров ──
+    m_target = Decimal(TURNOVER_MONTHLY_TARGET_RUB)
+    q_target = Decimal(TURNOVER_QUARTERLY_TARGET_RUB)
+    m_gap = _q2(max(m_target - mtd, Decimal(0)))
+    q_gap = _q2(max(q_target - qtd, Decimal(0)))
+    next_month = (datetime(now.year + 1, 1, 1, tzinfo=tz) if now.month == 12
+                  else datetime(now.year, now.month + 1, 1, tzinfo=tz))
+    cur_idx = _q_index(now.year, now.month)
+    quarter_end = _q_start_from_index(cur_idx + 1, tz)
+    daily_req_month = _q2(m_gap / Decimal(_business_days(now, next_month)))
+    daily_req_quarter = _q2(q_gap / Decimal(_business_days(now, quarter_end)))
+
+    # ── kval: trailing 4 квартала (текущий + 3 предыдущих) ──
+    window_idx = [cur_idx - 3, cur_idx - 2, cur_idx - 1, cur_idx]
+    window_keys = [_q_key_from_index(i) for i in window_idx]
+    window_start = _q_start_from_index(window_idx[0], tz)
+    month_keys = _month_keys(window_start, now)
+    t4q = sum((by_quarter.get(k, Decimal(0)) for k in window_keys), Decimal(0))
+    trades_4q = sum(trades_by_quarter.get(k, 0) for k in window_keys)
+    quarters_checked = len(window_keys)
+    months_checked = len(month_keys)
+    months_without_trades = sum(
+        1 for mk in month_keys if trades_by_month.get(mk, 0) == 0)
+    avg_per_quarter = _q2(Decimal(trades_4q) / Decimal(quarters_checked))
+    kval_target = Decimal(KVAL_TURNOVER_TARGET_RUB)
+    kval_turnover_passed = t4q >= kval_target
+    kval_freq_passed = (avg_per_quarter >= Decimal(KVAL_MIN_TRADES_PER_QUARTER)
+                        and months_without_trades == 0)
+    kval_passed = bool(kval_turnover_passed and kval_freq_passed)
+    incomplete = partial or not operations
+    kval_warnings: list[str] = []
+    if incomplete:
+        kval_status = "PARTIAL_DATA"
+        kval_warnings.append(WARN_KVAL_PARTIAL)
+        if WARN_KVAL_PARTIAL not in warnings:
+            warnings.append(WARN_KVAL_PARTIAL)
+    else:
+        kval_status = "PASSED" if kval_passed else "NOT_PASSED"
 
     return {
         "turnover_definition": definition,
@@ -541,9 +628,46 @@ def build_turnover_summary(*, operations, f44, now, warnings: list[str],
         "commissions_mtd_rub": _q2(comm_mtd),
         "commissions_qtd_rub": _q2(comm_qtd),
         "commission_rate_pct_of_turnover": comm_rate,
+        # текущий месяц / квартал
+        "turnover_current_month_rub": _q2(mtd),
+        "turnover_current_month_target_rub": TURNOVER_MONTHLY_TARGET_RUB,
+        "turnover_current_month_progress_pct": _pct(mtd, m_target),
+        "turnover_current_month_gap_rub": m_gap,
+        "turnover_current_quarter_rub": _q2(qtd),
+        "turnover_current_quarter_target_rub": TURNOVER_QUARTERLY_TARGET_RUB,
+        "turnover_current_quarter_progress_pct": _pct(qtd, q_target),
+        "turnover_current_quarter_gap_rub": q_gap,
+        "turnover_daily_required_month_rub": daily_req_month,
+        "turnover_daily_required_quarter_rub": daily_req_quarter,
+        # разбивки
         "turnover_by_instrument": {k: _q2(v) for k, v in by_instrument.items()},
         "turnover_by_side": {k: _q2(v) for k, v in by_side.items()},
         "turnover_by_month": {k: _q2(v) for k, v in sorted(by_month.items())},
+        "turnover_by_quarter": {k: _q2(v) for k, v in sorted(by_quarter.items())},
+        "trades_by_month": dict(sorted(trades_by_month.items())),
+        "trades_by_quarter": dict(sorted(trades_by_quarter.items())),
+        # kval-трекер (путь к статусу квалинвестора, НЕ юр. сертификация)
+        "kval_turnover_target_rub": KVAL_TURNOVER_TARGET_RUB,
+        "kval_turnover_period": KVAL_TURNOVER_PERIOD,
+        "kval_turnover_trailing_4q_rub": _q2(t4q),
+        "kval_turnover_progress_pct": _pct(t4q, kval_target),
+        "kval_turnover_gap_rub": _q2(max(kval_target - t4q, Decimal(0))),
+        "kval_quarters_checked": quarters_checked,
+        "kval_months_checked": months_checked,
+        "kval_trade_count_trailing_4q": trades_4q,
+        "kval_trade_count_by_quarter": {
+            k: trades_by_quarter.get(k, 0) for k in window_keys},
+        "kval_trade_count_by_month": {
+            k: trades_by_month.get(k, 0) for k in month_keys},
+        "kval_avg_trades_per_quarter": avg_per_quarter,
+        "kval_min_trades_per_quarter_required": KVAL_MIN_TRADES_PER_QUARTER,
+        "kval_monthly_activity_required": True,
+        "kval_months_without_trades": months_without_trades,
+        "kval_frequency_passed": kval_freq_passed,
+        "kval_turnover_passed": kval_turnover_passed,
+        "kval_criteria_passed": kval_passed,
+        "kval_criteria_status": kval_status,
+        "kval_warnings": kval_warnings,
     }
 
 
@@ -560,93 +684,48 @@ def _empty_turnover(definition: str) -> dict:
         "turnover_remaining_year_rub": None, "turnover_daily_required_rub": None,
         "trading_days_remaining_estimate": None, "commissions_ytd_rub": None,
         "commissions_mtd_rub": None, "commissions_qtd_rub": None,
-        "commission_rate_pct_of_turnover": None, "turnover_by_instrument": {},
-        "turnover_by_side": {}, "turnover_by_month": {},
+        "commission_rate_pct_of_turnover": None,
+        "turnover_current_month_rub": None,
+        "turnover_current_month_target_rub": TURNOVER_MONTHLY_TARGET_RUB,
+        "turnover_current_month_progress_pct": None,
+        "turnover_current_month_gap_rub": None,
+        "turnover_current_quarter_rub": None,
+        "turnover_current_quarter_target_rub": TURNOVER_QUARTERLY_TARGET_RUB,
+        "turnover_current_quarter_progress_pct": None,
+        "turnover_current_quarter_gap_rub": None,
+        "turnover_daily_required_month_rub": None,
+        "turnover_daily_required_quarter_rub": None,
+        "turnover_by_instrument": {}, "turnover_by_side": {},
+        "turnover_by_month": {}, "turnover_by_quarter": {},
+        "trades_by_month": {}, "trades_by_quarter": {},
+        "kval_turnover_target_rub": KVAL_TURNOVER_TARGET_RUB,
+        "kval_turnover_period": KVAL_TURNOVER_PERIOD,
+        "kval_turnover_trailing_4q_rub": None, "kval_turnover_progress_pct": None,
+        "kval_turnover_gap_rub": None, "kval_quarters_checked": 0,
+        "kval_months_checked": 0, "kval_trade_count_trailing_4q": 0,
+        "kval_trade_count_by_quarter": {}, "kval_trade_count_by_month": {},
+        "kval_avg_trades_per_quarter": None,
+        "kval_min_trades_per_quarter_required": KVAL_MIN_TRADES_PER_QUARTER,
+        "kval_monthly_activity_required": True, "kval_months_without_trades": None,
+        "kval_frequency_passed": False, "kval_turnover_passed": False,
+        "kval_criteria_passed": False, "kval_criteria_status": "PARTIAL_DATA",
+        "kval_warnings": [WARN_KVAL_PARTIAL],
     }
 
 
 # ─── contributions summary ────────────────────────────────────────────────────
 
 def build_contributions_summary(*, plan, now, warnings: list[str]) -> dict:
-    empty = {
-        "contributions_tracking_enabled": False,
-        "contribution_plan_weekly_rub": None,
-        "contribution_plan_monthly_rub": None,
-        "contribution_fact_weekly_rub": None,
-        "contribution_fact_monthly_rub": None,
-        "contribution_fact_ytd_rub": None,
-        "contribution_gap_weekly_rub": None,
-        "contribution_gap_monthly_rub": None,
-        "missed_contributions_count_month": None,
-        "missed_contributions_count_ytd": None,
-        "next_planned_contribution_date": None,
-        "contribution_required_to_catch_up_rub": None,
-        "contribution_source": None,
-        "warnings": [],
-    }
-    if not plan or not plan.get("enabled"):
-        empty["warnings"].append(WARN_CONTRIB_NOT_CONFIGURED)
-        if WARN_CONTRIB_NOT_CONFIGURED not in warnings:
-            warnings.append(WARN_CONTRIB_NOT_CONFIGURED)
-        return empty
-
-    plan_weekly = _to_decimal(plan.get("plan_weekly_rub"))
-    plan_monthly = _to_decimal(plan.get("plan_monthly_rub"))
-    facts = plan.get("facts") or []
-    year_start, month_start, _q = _period_starts(now)
-    fact_month = Decimal(0)
-    fact_ytd = Decimal(0)
-    fact_week = Decimal(0)
-    from datetime import timedelta
-    week_start = now.replace(hour=0, minute=0, second=0, microsecond=0) \
-        - timedelta(days=now.weekday())
-    for f in facts:
-        amt = _to_decimal((f or {}).get("amount_rub"))
-        dt = _parse_dt((f or {}).get("date"))
-        if amt is None or dt is None:
-            continue
-        if dt >= year_start:
-            fact_ytd += amt
-        if dt >= month_start:
-            fact_month += amt
-        if dt >= week_start:
-            fact_week += amt
-
-    gap_weekly = (_q2(plan_weekly - fact_week) if plan_weekly is not None else None)
-    gap_monthly = (_q2(plan_monthly - fact_month)
-                   if plan_monthly is not None else None)
-    # пропущенные взносы (помесячно/за год) по плану понедельной суммы
-    missed_month = None
-    if plan_weekly and plan_weekly > 0:
-        expected_weeks = ((now - month_start).days // 7) + 1
-        expected_month = plan_weekly * Decimal(expected_weeks)
-        missed_month = max(0, int((expected_month - fact_month) / plan_weekly)) \
-            if expected_month > fact_month else 0
-    missed_ytd = None
-    if plan_weekly and plan_weekly > 0:
-        expected_weeks_ytd = ((now - year_start).days // 7) + 1
-        expected_ytd = plan_weekly * Decimal(expected_weeks_ytd)
-        missed_ytd = max(0, int((expected_ytd - fact_ytd) / plan_weekly)) \
-            if expected_ytd > fact_ytd else 0
-    catch_up = None
-    if gap_monthly is not None:
-        catch_up = gap_monthly if gap_monthly > 0 else Decimal(0)
-    return {
-        "contributions_tracking_enabled": True,
-        "contribution_plan_weekly_rub": _q2(plan_weekly),
-        "contribution_plan_monthly_rub": _q2(plan_monthly),
-        "contribution_fact_weekly_rub": _q2(fact_week),
-        "contribution_fact_monthly_rub": _q2(fact_month),
-        "contribution_fact_ytd_rub": _q2(fact_ytd),
-        "contribution_gap_weekly_rub": gap_weekly,
-        "contribution_gap_monthly_rub": gap_monthly,
-        "missed_contributions_count_month": missed_month,
-        "missed_contributions_count_ytd": missed_ytd,
-        "next_planned_contribution_date": plan.get("next_planned_contribution_date"),
-        "contribution_required_to_catch_up_rub": catch_up,
-        "contribution_source": plan.get("source") or "manual",
-        "warnings": [],
-    }
+    """F4.8 contributions_summary через общий модуль F4.10 (единая логика)."""
+    from modules.contribution_plan import (
+        WARN_NOT_CONFIGURED,
+        summarize_for_dashboard,
+    )
+    summary = summarize_for_dashboard(plan, as_of=now.date())
+    if not summary.get("contributions_tracking_enabled"):
+        if WARN_NOT_CONFIGURED not in warnings:
+            warnings.append(WARN_NOT_CONFIGURED)
+    return summary
 
 
 # ─── risk summary ─────────────────────────────────────────────────────────────
@@ -720,6 +799,11 @@ def build_dashboard_kpi(*, portfolio, income, turnover, contributions,
         "turnover_annual_target_rub": turnover.get("turnover_annual_target_rub"),
         "turnover_ytd_progress_pct": turnover.get("turnover_ytd_progress_pct"),
         "turnover_gap_rub": turnover.get("turnover_ytd_gap_rub"),
+        "kval_turnover_trailing_4q_rub": turnover.get("kval_turnover_trailing_4q_rub"),
+        "kval_turnover_target_rub": turnover.get("kval_turnover_target_rub"),
+        "kval_turnover_progress_pct": turnover.get("kval_turnover_progress_pct"),
+        "kval_turnover_gap_rub": turnover.get("kval_turnover_gap_rub"),
+        "kval_criteria_status": turnover.get("kval_criteria_status"),
         "contribution_monthly_fact_rub": contributions.get(
             "contribution_fact_monthly_rub"),
         "contribution_monthly_plan_rub": contributions.get(
@@ -850,15 +934,23 @@ def render_md(report: dict) -> str:
                  "required_capital_gap_rub"]),
         f"\n> {inc.get('income_tax_warning')}",
         "",
-        "## Оборот (buy+sell gross, не дивиденды)",
+        "## Оборот (buy+sell gross, не дивиденды; цель 6M за 4 квартала)",
         "",
         "| Поле | Значение |",
         "| --- | --- |",
-        kv(tn, ["turnover_definition", "turnover_partial", "turnover_ytd_rub",
-                "turnover_mtd_rub", "turnover_qtd_rub", "turnover_annual_target_rub",
-                "turnover_ytd_plan_to_date_rub", "turnover_ytd_gap_rub",
-                "turnover_ytd_progress_pct", "turnover_forecast_year_end_rub",
-                "commissions_ytd_rub", "commission_rate_pct_of_turnover"]),
+        kv(tn, ["turnover_definition", "turnover_partial",
+                "turnover_current_month_rub", "turnover_current_month_target_rub",
+                "turnover_current_quarter_rub", "turnover_current_quarter_target_rub",
+                "kval_turnover_trailing_4q_rub", "kval_turnover_target_rub",
+                "kval_turnover_progress_pct", "kval_turnover_gap_rub",
+                "turnover_ytd_rub", "commissions_ytd_rub",
+                "commission_rate_pct_of_turnover",
+                "kval_trade_count_trailing_4q", "kval_avg_trades_per_quarter",
+                "kval_months_without_trades", "kval_criteria_status"]),
+        "",
+        "> Трекер пути к критериям квалинвестора (оборот/частота). Итоговое "
+        "признание зависит от правил брокера/регулятора и документов — это НЕ "
+        "юридическая сертификация.",
         "",
         "## Взносы",
         "",
