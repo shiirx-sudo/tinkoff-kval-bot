@@ -1737,6 +1737,137 @@ def cmd_portfolio_dashboard_data(args: argparse.Namespace) -> int:
     return int(result.get("_exit_code", 0))
 
 
+# ─── F4.10 contribution plan (локальный учёт, не торговля) ─────────────────────
+
+def _cp_as_of(args):
+    from datetime import date
+
+    from modules import contribution_plan as cp
+    raw = getattr(args, "as_of", None)
+    if raw:
+        d = date.fromisoformat(str(raw)) if _cp_valid_date(raw) else None
+        if d is None:
+            raise cp.ContributionPlanError(f"Невалидная --as-of дата: {raw}")
+        return d
+    return cp.today()
+
+
+def _cp_valid_date(value) -> bool:
+    from datetime import date
+    try:
+        date.fromisoformat(str(value))
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+def _cp_print_status(cp, status: dict) -> None:
+    print(f"  status: {status['status']} | as_of: {status['as_of_date']} | "
+          f"включён: {status['contributions_tracking_enabled']}")
+    print(f"  план: неделя={status['plan_weekly_rub']} месяц={status['plan_monthly_rub']}")
+    print(f"  факт: неделя={status['contribution_fact_weekly_rub']} "
+          f"месяц={status['contribution_fact_monthly_rub']} "
+          f"ytd={status['contribution_fact_ytd_rub']}")
+    print(f"  разрыв: неделя={status['contribution_gap_weekly_rub']} "
+          f"месяц={status['contribution_gap_monthly_rub']} "
+          f"ytd={status['contribution_gap_ytd_rub']}")
+    print(f"  пропущено: неделя={status['missed_contributions_count_week']} "
+          f"месяц={status['missed_contributions_count_month']} "
+          f"ytd={status['missed_contributions_count_ytd']}")
+    print(f"  след. взнос: {status['next_planned_contribution_date']} "
+          f"(через {status['days_until_next_planned_contribution']} дн.) | "
+          f"довнести: {status['contribution_required_to_catch_up_rub']}")
+    g = status["guards"]
+    print(f"  guards: broker_api_called={g['broker_api_called']} "
+          f"config_mutated={g['config_mutated']} "
+          f"telegram_sent={g['telegram_sent']} token_printed={g['token_printed']}")
+    for w in status.get("warnings", []):
+        print(f"  - {w}")
+    for e in status.get("errors", []):
+        print(f"  ! {e}")
+
+
+def cmd_contribution_plan_init(args: argparse.Namespace) -> int:
+    from modules import contribution_plan as cp
+    path = getattr(args, "config_path", cp.DEFAULT_CONFIG_PATH)
+    try:
+        existing = cp.load_plan(path)
+        plan = cp.init_plan(
+            weekly_rub=args.weekly_rub, monthly_rub=args.monthly_rub,
+            start_date=args.start_date, next_date=args.next_date,
+            currency=getattr(args, "currency", "rub"),
+            source=getattr(args, "source", "manual"),
+            existing=existing, reset_facts=getattr(args, "reset_facts", False))
+        out_path = cp.save_plan(plan, path)
+    except cp.ContributionPlanError as exc:
+        logger.error(str(exc))
+        return 1
+    kept = len(plan.get("facts") or [])
+    print("Contribution plan init — F4.10 (ЛОКАЛЬНО, не торговля)")
+    print("Только data/config/contribution_plan.json. Без брокера/токенов/сети.")
+    print(f"  записан: {out_path}")
+    print(f"  план: неделя={plan['plan_weekly_rub']} месяц={plan['plan_monthly_rub']} "
+          f"старт={plan['plan_start_date']} след={plan['next_planned_contribution_date']}")
+    print(f"  фактов сохранено: {kept}"
+          + (" (reset)" if getattr(args, 'reset_facts', False) else ""))
+    return 0
+
+
+def cmd_contribution_plan_add(args: argparse.Namespace) -> int:
+    from modules import contribution_plan as cp
+    path = getattr(args, "config_path", cp.DEFAULT_CONFIG_PATH)
+    plan = cp.load_plan(path)
+    if plan is None:
+        logger.error("План не найден. Сначала: " + cp.SETUP_HINT)
+        return 1
+    try:
+        plan, added = cp.add_fact(
+            plan, date_str=args.date, amount_rub=args.amount_rub,
+            note=getattr(args, "note", None),
+            allow_duplicate=getattr(args, "allow_duplicate", False))
+    except cp.ContributionPlanError as exc:
+        logger.error(str(exc))
+        return 1
+    if not added:
+        print(f"Дубликат {args.date} / {args.amount_rub} ₽ не добавлен "
+              "(используйте --allow-duplicate).")
+        return 0
+    out_path = cp.save_plan(plan, path)
+    try:
+        as_of = _cp_as_of(args)
+    except cp.ContributionPlanError as exc:
+        logger.error(str(exc))
+        return 1
+    status = cp.compute_status(plan, as_of=as_of)
+    print("Contribution plan add — F4.10 (ЛОКАЛЬНО, не торговля)")
+    print(f"  добавлен факт: {args.date} / {args.amount_rub} ₽ → {out_path}")
+    print(f"  фактов всего: {len(plan.get('facts') or [])}")
+    _cp_print_status(cp, status)
+    return 0
+
+
+def cmd_contribution_plan_status(args: argparse.Namespace) -> int:
+    from modules import contribution_plan as cp
+    path = getattr(args, "config_path", cp.DEFAULT_CONFIG_PATH)
+    plan = cp.load_plan(path)
+    try:
+        as_of = _cp_as_of(args)
+    except cp.ContributionPlanError as exc:
+        logger.error(str(exc))
+        return 1
+    status = cp.compute_status(plan, as_of=as_of)
+    result = cp.write_status_report(
+        status,
+        json_path=getattr(args, "output_json", cp.DEFAULT_STATUS_JSON),
+        md_path=getattr(args, "output_md", cp.DEFAULT_STATUS_MD))
+    print("Contribution plan status — F4.10 (ЛОКАЛЬНО, не торговля)")
+    print("Только локальные config/reports. Без брокера/токенов/сети/торговли.")
+    _cp_print_status(cp, status)
+    logger.info(f"Отчёт: {result['_output_json']}")
+    logger.info(f"Отчёт: {result['_output_md']}")
+    return 0
+
+
 def cmd_build_income_universe(args: argparse.Namespace) -> int:
     import json
     import shutil
@@ -2589,6 +2720,56 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--report-path", dest="report_path", default=_pdash.DEFAULT_REPORT_PATH,
         help="Путь к отчёту F4.8 (только чтение)")
 
+    from modules import contribution_plan as _cp
+    p_cpi = sub.add_parser(
+        "contribution-plan-init",
+        help="F4.10 ЛОКАЛЬНО: создать/обновить план пополнений "
+             "data/config/contribution_plan.json (не торговля, без брокера)")
+    p_cpi.add_argument("--weekly-rub", dest="weekly_rub", required=True,
+                       help="Плановое пополнение в неделю, ₽")
+    p_cpi.add_argument("--monthly-rub", dest="monthly_rub", required=True,
+                       help="Плановое пополнение в месяц, ₽")
+    p_cpi.add_argument("--start-date", dest="start_date", required=True,
+                       help="Дата старта плана YYYY-MM-DD")
+    p_cpi.add_argument("--next-date", dest="next_date", default=None,
+                       help="Дата следующего планового взноса YYYY-MM-DD (или пусто)")
+    p_cpi.add_argument("--currency", dest="currency", default="rub")
+    p_cpi.add_argument("--source", dest="source", default="manual")
+    p_cpi.add_argument("--reset-facts", dest="reset_facts", action="store_true",
+                       help="Очистить существующие facts (по умолчанию сохраняются)")
+    p_cpi.add_argument("--force", dest="force", action="store_true",
+                       help="Явно разрешить перезапись (facts сохраняются)")
+    p_cpi.add_argument("--config-path", dest="config_path",
+                       default=_cp.DEFAULT_CONFIG_PATH)
+
+    p_cpa = sub.add_parser(
+        "contribution-plan-add",
+        help="F4.10 ЛОКАЛЬНО: добавить факт пополнения в план (не торговля)")
+    p_cpa.add_argument("--date", dest="date", required=True,
+                       help="Дата факта YYYY-MM-DD")
+    p_cpa.add_argument("--amount-rub", dest="amount_rub", required=True,
+                       help="Сумма пополнения, ₽ (> 0)")
+    p_cpa.add_argument("--note", dest="note", default=None)
+    p_cpa.add_argument("--allow-duplicate", dest="allow_duplicate",
+                       action="store_true", help="Разрешить дубликат date+amount")
+    p_cpa.add_argument("--as-of", dest="as_of", default=None,
+                       help="Дата расчёта статуса YYYY-MM-DD (по умолчанию сегодня)")
+    p_cpa.add_argument("--config-path", dest="config_path",
+                       default=_cp.DEFAULT_CONFIG_PATH)
+
+    for _name in ("contribution-plan-status", "contribution-plan-report"):
+        p_cps = sub.add_parser(
+            _name,
+            help="F4.10 ЛОКАЛЬНО: статус плана пополнений + отчёт (не торговля)")
+        p_cps.add_argument("--as-of", dest="as_of", default=None,
+                           help="Дата расчёта YYYY-MM-DD (по умолчанию сегодня)")
+        p_cps.add_argument("--config-path", dest="config_path",
+                           default=_cp.DEFAULT_CONFIG_PATH)
+        p_cps.add_argument("--output-json", dest="output_json",
+                           default=_cp.DEFAULT_STATUS_JSON)
+        p_cps.add_argument("--output-md", dest="output_md",
+                           default=_cp.DEFAULT_STATUS_MD)
+
     p_biu = sub.add_parser(
         "build-income-universe",
         help="READ-ONLY генератор income universe из rules + T-Invest данных")
@@ -2672,6 +2853,10 @@ _HANDLERS = {
     "dashboard": cmd_dashboard,
     "portfolio-dashboard-data": cmd_portfolio_dashboard_data,
     "portfolio-dashboard": cmd_portfolio_dashboard,
+    "contribution-plan-init": cmd_contribution_plan_init,
+    "contribution-plan-add": cmd_contribution_plan_add,
+    "contribution-plan-status": cmd_contribution_plan_status,
+    "contribution-plan-report": cmd_contribution_plan_status,
     "build-income-universe": cmd_build_income_universe,
     "telegram-test": cmd_telegram_test,
     "telegram-summary": cmd_telegram_summary,

@@ -568,85 +568,16 @@ def _empty_turnover(definition: str) -> dict:
 # ─── contributions summary ────────────────────────────────────────────────────
 
 def build_contributions_summary(*, plan, now, warnings: list[str]) -> dict:
-    empty = {
-        "contributions_tracking_enabled": False,
-        "contribution_plan_weekly_rub": None,
-        "contribution_plan_monthly_rub": None,
-        "contribution_fact_weekly_rub": None,
-        "contribution_fact_monthly_rub": None,
-        "contribution_fact_ytd_rub": None,
-        "contribution_gap_weekly_rub": None,
-        "contribution_gap_monthly_rub": None,
-        "missed_contributions_count_month": None,
-        "missed_contributions_count_ytd": None,
-        "next_planned_contribution_date": None,
-        "contribution_required_to_catch_up_rub": None,
-        "contribution_source": None,
-        "warnings": [],
-    }
-    if not plan or not plan.get("enabled"):
-        empty["warnings"].append(WARN_CONTRIB_NOT_CONFIGURED)
-        if WARN_CONTRIB_NOT_CONFIGURED not in warnings:
-            warnings.append(WARN_CONTRIB_NOT_CONFIGURED)
-        return empty
-
-    plan_weekly = _to_decimal(plan.get("plan_weekly_rub"))
-    plan_monthly = _to_decimal(plan.get("plan_monthly_rub"))
-    facts = plan.get("facts") or []
-    year_start, month_start, _q = _period_starts(now)
-    fact_month = Decimal(0)
-    fact_ytd = Decimal(0)
-    fact_week = Decimal(0)
-    from datetime import timedelta
-    week_start = now.replace(hour=0, minute=0, second=0, microsecond=0) \
-        - timedelta(days=now.weekday())
-    for f in facts:
-        amt = _to_decimal((f or {}).get("amount_rub"))
-        dt = _parse_dt((f or {}).get("date"))
-        if amt is None or dt is None:
-            continue
-        if dt >= year_start:
-            fact_ytd += amt
-        if dt >= month_start:
-            fact_month += amt
-        if dt >= week_start:
-            fact_week += amt
-
-    gap_weekly = (_q2(plan_weekly - fact_week) if plan_weekly is not None else None)
-    gap_monthly = (_q2(plan_monthly - fact_month)
-                   if plan_monthly is not None else None)
-    # пропущенные взносы (помесячно/за год) по плану понедельной суммы
-    missed_month = None
-    if plan_weekly and plan_weekly > 0:
-        expected_weeks = ((now - month_start).days // 7) + 1
-        expected_month = plan_weekly * Decimal(expected_weeks)
-        missed_month = max(0, int((expected_month - fact_month) / plan_weekly)) \
-            if expected_month > fact_month else 0
-    missed_ytd = None
-    if plan_weekly and plan_weekly > 0:
-        expected_weeks_ytd = ((now - year_start).days // 7) + 1
-        expected_ytd = plan_weekly * Decimal(expected_weeks_ytd)
-        missed_ytd = max(0, int((expected_ytd - fact_ytd) / plan_weekly)) \
-            if expected_ytd > fact_ytd else 0
-    catch_up = None
-    if gap_monthly is not None:
-        catch_up = gap_monthly if gap_monthly > 0 else Decimal(0)
-    return {
-        "contributions_tracking_enabled": True,
-        "contribution_plan_weekly_rub": _q2(plan_weekly),
-        "contribution_plan_monthly_rub": _q2(plan_monthly),
-        "contribution_fact_weekly_rub": _q2(fact_week),
-        "contribution_fact_monthly_rub": _q2(fact_month),
-        "contribution_fact_ytd_rub": _q2(fact_ytd),
-        "contribution_gap_weekly_rub": gap_weekly,
-        "contribution_gap_monthly_rub": gap_monthly,
-        "missed_contributions_count_month": missed_month,
-        "missed_contributions_count_ytd": missed_ytd,
-        "next_planned_contribution_date": plan.get("next_planned_contribution_date"),
-        "contribution_required_to_catch_up_rub": catch_up,
-        "contribution_source": plan.get("source") or "manual",
-        "warnings": [],
-    }
+    """F4.8 contributions_summary через общий модуль F4.10 (единая логика)."""
+    from modules.contribution_plan import (
+        WARN_NOT_CONFIGURED,
+        summarize_for_dashboard,
+    )
+    summary = summarize_for_dashboard(plan, as_of=now.date())
+    if not summary.get("contributions_tracking_enabled"):
+        if WARN_NOT_CONFIGURED not in warnings:
+            warnings.append(WARN_NOT_CONFIGURED)
+    return summary
 
 
 # ─── risk summary ─────────────────────────────────────────────────────────────
