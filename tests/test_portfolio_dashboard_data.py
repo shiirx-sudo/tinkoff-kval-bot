@@ -364,6 +364,80 @@ def test_contribution_plan_fixture_calculates_gaps(tmp_path):
     assert cn["missed_contributions_count_month"] is not None
 
 
+# ─── F4.10.1 API-based contribution facts ─────────────────────────────────────
+
+def _cash_op(op_type, amount, date_str, op_id):
+    return {"id": op_id, "operationType": op_type, "instrumentType": "",
+            "date": date_str, "payment": _quot(amount, "rub"),
+            "commission": _quot(0, "rub")}
+
+
+def _api_plan(tmp_path, **over):
+    plan = {"enabled": True, "currency": "rub", "plan_weekly_rub": 50000,
+            "plan_monthly_rub": 200000, "plan_start_date": "2026-06-01",
+            "next_planned_contribution_date": "2026-07-06", "source": "manual",
+            "fact_source": "api_operations", "manual_facts_enabled": False,
+            "facts": []}
+    plan.update(over)
+    p = tmp_path / "plan.json"
+    p.write_text(json.dumps(plan), encoding="utf-8")
+    return str(p)
+
+
+def test_f48_passes_operations_to_contribution_summary(tmp_path):
+    plan_path = _api_plan(tmp_path)
+    ops = [_cash_op("OPERATION_TYPE_INPUT", 200000, "2026-06-10T10:00:00Z", "d1"),
+           _cash_op("OPERATION_TYPE_OUTPUT", -50000, "2026-06-11T10:00:00Z", "w1")]
+    rep = _run(tmp_path, contribution_plan_path=plan_path,
+               operations_provider=lambda acc: ops)
+    cn = rep["contributions_summary"]
+    assert cn["contribution_source"] == "readonly_operations_api"
+    assert cn["contribution_data_quality"] == "full"
+    assert cn["contribution_fact_monthly_rub"] == Decimal("200000.00")
+    assert cn["withdrawal_fact_monthly_rub"] == Decimal("50000.00")
+    assert cn["net_cash_flow_monthly_rub"] == Decimal("150000.00")
+    assert cn["contribution_api_deposit_facts_count"] == 1
+
+
+def test_f48_contribution_manual_fallback_without_operations(tmp_path):
+    plan_path = _api_plan(tmp_path, facts=[{"date": "2026-06-10",
+                                            "amount_rub": 120000}])
+    rep = _run(tmp_path, contribution_plan_path=plan_path)  # без operations_provider
+    cn = rep["contributions_summary"]
+    assert cn["contribution_source"] == "manual_fallback"
+    assert "contribution_api_operations_unavailable_manual_fallback" in rep["warnings"]
+    assert cn["contribution_fact_monthly_rub"] == Decimal("120000.00")
+
+
+def test_f48_report_contains_api_contribution_fields(tmp_path):
+    plan_path = _api_plan(tmp_path)
+    ops = [_cash_op("OPERATION_TYPE_INPUT", 200000, "2026-06-10T10:00:00Z", "d1")]
+    rep = _run(tmp_path, contribution_plan_path=plan_path,
+               operations_provider=lambda acc: ops)
+    cn = rep["contributions_summary"]
+    for key in ("contribution_source", "contribution_data_quality",
+                "contribution_fact_source_preferred",
+                "contribution_api_deposit_facts_count",
+                "contribution_api_withdrawal_facts_count",
+                "withdrawal_fact_monthly_rub", "net_cash_flow_monthly_rub",
+                "last_contribution_date", "last_contribution_amount_rub",
+                "contribution_facts_preview", "contribution_plan_started",
+                "days_until_plan_start"):
+        assert key in cn, key
+
+
+def test_f48_contribution_pre_start_not_behind(tmp_path):
+    plan_path = _api_plan(tmp_path, plan_start_date="2027-01-01")  # будущий старт
+    ops = [_cash_op("OPERATION_TYPE_INPUT", 5000, "2026-06-10T10:00:00Z", "d1")]
+    rep = _run(tmp_path, contribution_plan_path=plan_path,
+               operations_provider=lambda acc: ops)
+    cn = rep["contributions_summary"]
+    assert cn["contribution_status"] == "NOT_STARTED"
+    assert cn["contribution_plan_started"] is False
+    assert cn["contribution_gap_monthly_rub"] == Decimal("0.00")
+    assert cn["missed_contributions_count_month"] == 0
+
+
 # ─── risk ─────────────────────────────────────────────────────────────────────
 
 def test_risk_summary_weights_and_cash(tmp_path):

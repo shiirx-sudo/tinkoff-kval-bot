@@ -310,6 +310,223 @@ def test_f48_uses_shared_logic(tmp_path):
     assert "contribution_gap_ytd_rub" in cs
 
 
+# ─── F4.10.1 pre-start status ─────────────────────────────────────────────────
+
+def _quot(value):
+    units = int(value)
+    nano = int(round((Decimal(str(value)) - units) * Decimal(10**9)))
+    return {"units": str(units), "nano": nano}
+
+
+def _op(op_type, amount, date_str, op_id="op-x", itype=""):
+    return {"id": op_id, "operationType": op_type, "instrumentType": itype,
+            "date": date_str, "payment": _quot(amount)}
+
+
+def test_pre_start_no_behind_no_gap_no_missed():
+    # plan_start в будущем относительно as_of → не BEHIND, нули вместо долга
+    plan = _plan(plan_start_date="2026-06-29")
+    st = cp.compute_status(plan, as_of=date(2026, 6, 27))
+    assert st["status"] == "NOT_STARTED"
+    assert st["contribution_plan_started"] is False
+    assert st["days_until_plan_start"] == 2
+    assert st["contribution_expected_weekly_rub"] == Decimal("0.00")
+    assert st["contribution_expected_monthly_rub"] == Decimal("0.00")
+    assert st["contribution_expected_ytd_rub"] == Decimal("0.00")
+    assert st["contribution_gap_weekly_rub"] == Decimal("0.00")
+    assert st["contribution_gap_monthly_rub"] == Decimal("0.00")
+    assert st["contribution_gap_ytd_rub"] == Decimal("0.00")
+    assert st["missed_contributions_count_week"] == 0
+    assert st["missed_contributions_count_month"] == 0
+    assert st["missed_contributions_count_ytd"] == 0
+
+
+def test_pre_start_facts_still_shown():
+    # факт показывается до старта, но долг не создаётся
+    plan = _plan(plan_start_date="2026-06-29",
+                 facts=[{"date": "2026-06-25", "amount_rub": 12345}])
+    st = cp.compute_status(plan, as_of=date(2026, 6, 27))
+    assert st["status"] == "NOT_STARTED"
+    assert st["contribution_fact_weekly_rub"] == Decimal("12345.00")
+    assert st["contribution_gap_weekly_rub"] == Decimal("0.00")
+
+
+def test_on_start_date_normal_logic_applies():
+    plan = _plan(plan_start_date="2026-06-29", facts=[])
+    st = cp.compute_status(plan, as_of=date(2026, 6, 29))
+    assert st["contribution_plan_started"] is True
+    assert st["days_until_plan_start"] == 0
+    assert st["status"] == "BEHIND"  # ожидание > 0, факта нет
+
+
+# ─── F4.10.1 API contribution extraction ──────────────────────────────────────
+
+def test_api_deposit_recognized_and_counted():
+    ops = [_op("OPERATION_TYPE_INPUT", 2000, "2026-06-29T10:00:00Z", "d1")]
+    res = cp.extract_api_contribution_facts(ops)
+    assert len(res["deposit_facts"]) == 1
+    f = res["deposit_facts"][0]
+    assert f["amount_rub"] == 2000
+    assert f["date"] == "2026-06-29"
+    assert f["operation_id"] == "d1"
+    assert f["source"] == "readonly_operations_api"
+    assert res["withdrawal_facts"] == []
+    assert res["partial"] is False
+    assert cp.is_api_contribution_operation(ops[0]) is True
+
+
+def test_api_withdrawal_recognized_separately_not_positive():
+    ops = [_op("OPERATION_TYPE_OUTPUT", -5000, "2026-06-29T10:00:00Z", "w1")]
+    res = cp.extract_api_contribution_facts(ops)
+    assert res["deposit_facts"] == []
+    assert len(res["withdrawal_facts"]) == 1
+    assert res["withdrawal_facts"][0]["amount_rub"] == 5000  # положительная величина
+    assert cp.is_api_withdrawal_operation(ops[0]) is True
+
+
+def test_api_buy_sell_not_contributions():
+    ops = [_op("OPERATION_TYPE_BUY", -1000, "2026-06-10T10:00:00Z", "b1", "share"),
+           _op("OPERATION_TYPE_SELL", 1000, "2026-06-12T10:00:00Z", "s1", "share")]
+    res = cp.extract_api_contribution_facts(ops)
+    assert res["deposit_facts"] == []
+    assert res["withdrawal_facts"] == []
+    assert res["partial"] is False  # распознаны как НЕ-взносы
+
+
+def test_api_dividends_coupons_not_contributions():
+    ops = [_op("OPERATION_TYPE_DIVIDEND", 300, "2026-06-15T10:00:00Z", "dv1", "share"),
+           _op("OPERATION_TYPE_COUPON", 120, "2026-06-16T10:00:00Z", "cp1", "bond")]
+    res = cp.extract_api_contribution_facts(ops)
+    assert res["deposit_facts"] == []
+    assert res["partial"] is False
+
+
+def test_api_commissions_taxes_not_contributions():
+    ops = [_op("OPERATION_TYPE_BROKER_FEE", -5, "2026-06-10T10:00:00Z", "f1"),
+           _op("OPERATION_TYPE_TAX", -50, "2026-06-11T10:00:00Z", "t1")]
+    res = cp.extract_api_contribution_facts(ops)
+    assert res["deposit_facts"] == []
+    assert res["partial"] is False
+
+
+def test_api_duplicate_operation_id_not_double_counted():
+    ops = [_op("OPERATION_TYPE_INPUT", 2000, "2026-06-29T10:00:00Z", "dup"),
+           _op("OPERATION_TYPE_INPUT", 2000, "2026-06-29T10:00:00Z", "dup")]
+    res = cp.extract_api_contribution_facts(ops)
+    assert len(res["deposit_facts"]) == 1
+
+
+def test_api_unknown_type_warns_and_no_fact():
+    ops = [_op("OPERATION_TYPE_SOME_FUTURE_THING", 999, "2026-06-29T10:00:00Z", "u1")]
+    res = cp.extract_api_contribution_facts(ops)
+    assert res["deposit_facts"] == []
+    assert res["partial"] is True
+    assert cp.WARN_API_UNRECOGNIZED in res["warnings"]
+
+
+# ─── F4.10.1 summarize source priority ────────────────────────────────────────
+
+def test_summarize_api_deposits_used_for_periods():
+    plan = _plan(plan_start_date="2026-06-01", fact_source="api_operations")
+    ops = [_op("OPERATION_TYPE_INPUT", 50000, f"{MON}T10:00:00Z", "d1"),
+           _op("OPERATION_TYPE_INPUT", 30000, "2026-06-10T10:00:00Z", "d2")]
+    s = cp.summarize_for_dashboard(plan, as_of=AS_OF, api_operations=ops)
+    assert s["contribution_source"] == "readonly_operations_api"
+    assert s["contribution_data_quality"] == "full"
+    assert s["contribution_fact_weekly_rub"] == Decimal("50000.00")   # только MON
+    assert s["contribution_fact_monthly_rub"] == Decimal("80000.00")  # оба
+    assert s["contribution_api_deposit_facts_count"] == 2
+    assert s["last_contribution_date"] == MON
+    assert s["last_contribution_amount_rub"] == Decimal("50000.00")
+
+
+def test_summarize_withdrawals_and_net_cash_flow():
+    plan = _plan(plan_start_date="2026-06-01", fact_source="api_operations")
+    ops = [_op("OPERATION_TYPE_INPUT", 80000, "2026-06-10T10:00:00Z", "d1"),
+           _op("OPERATION_TYPE_OUTPUT", -20000, "2026-06-11T10:00:00Z", "w1")]
+    s = cp.summarize_for_dashboard(plan, as_of=AS_OF, api_operations=ops)
+    assert s["contribution_fact_monthly_rub"] == Decimal("80000.00")
+    assert s["withdrawal_fact_monthly_rub"] == Decimal("20000.00")
+    assert s["net_cash_flow_monthly_rub"] == Decimal("60000.00")
+    assert s["contribution_api_withdrawal_facts_count"] == 1
+
+
+def test_summarize_api_available_but_no_deposits_is_zero():
+    plan = _plan(plan_start_date="2026-06-01", fact_source="api_operations")
+    ops = [_op("OPERATION_TYPE_BUY", -1000, "2026-06-10T10:00:00Z", "b1", "share")]
+    s = cp.summarize_for_dashboard(plan, as_of=AS_OF, api_operations=ops)
+    assert s["contribution_source"] == "readonly_operations_api"
+    assert s["contribution_fact_monthly_rub"] == Decimal("0.00")
+    assert s["contribution_api_deposit_facts_count"] == 0
+
+
+def test_summarize_manual_fallback_when_api_unavailable():
+    plan = _plan(plan_start_date="2026-06-01", fact_source="api_operations",
+                 facts=[{"date": "2026-06-10", "amount_rub": 70000}])
+    s = cp.summarize_for_dashboard(plan, as_of=AS_OF, api_operations=None)
+    assert s["contribution_source"] == "manual_fallback"
+    assert s["contribution_data_quality"] == "manual_fallback"
+    assert cp.WARN_API_UNAVAILABLE in s["warnings"]
+    assert s["contribution_fact_monthly_rub"] == Decimal("70000.00")
+
+
+def test_summarize_mixed_dedup_by_date_amount():
+    plan = _plan(plan_start_date="2026-06-01", fact_source="mixed",
+                 manual_facts_enabled=True,
+                 facts=[{"date": "2026-06-10", "amount_rub": 30000},   # дубль API
+                        {"date": "2026-06-20", "amount_rub": 15000}])  # уникален
+    ops = [_op("OPERATION_TYPE_INPUT", 30000, "2026-06-10T10:00:00Z", "d1")]
+    s = cp.summarize_for_dashboard(plan, as_of=AS_OF, api_operations=ops)
+    assert s["contribution_source"] == "mixed_api_plus_manual_adjustments"
+    # 30000 (API, дедуп с ручным) + 15000 (ручной уникальный) = 45000
+    assert s["contribution_fact_monthly_rub"] == Decimal("45000.00")
+
+
+def test_summarize_source_values_for_modes():
+    api_plan = _plan(plan_start_date="2026-06-01", fact_source="api_operations")
+    manual_plan = _plan(plan_start_date="2026-06-01", fact_source="manual")
+    ops = [_op("OPERATION_TYPE_INPUT", 1000, "2026-06-10T10:00:00Z", "d1")]
+    assert cp.summarize_for_dashboard(api_plan, as_of=AS_OF, api_operations=ops)[
+        "contribution_source"] == "readonly_operations_api"
+    assert cp.summarize_for_dashboard(manual_plan, as_of=AS_OF, api_operations=ops)[
+        "contribution_source"] == "manual_fallback"
+
+
+def test_summarize_pre_start_no_behind_with_api():
+    plan = _plan(plan_start_date="2026-06-29", fact_source="api_operations")
+    ops = [_op("OPERATION_TYPE_INPUT", 100, "2026-06-25T10:00:00Z", "d1")]
+    s = cp.summarize_for_dashboard(plan, as_of=date(2026, 6, 27), api_operations=ops)
+    assert s["contribution_status"] == "NOT_STARTED"
+    assert s["contribution_plan_started"] is False
+    assert s["days_until_plan_start"] == 2
+    assert s["contribution_gap_monthly_rub"] == Decimal("0.00")
+
+
+# ─── F4.10.1 config compat ────────────────────────────────────────────────────
+
+def test_init_writes_api_fact_source_defaults():
+    plan = cp.init_plan(weekly_rub=50000, monthly_rub=200000,
+                        start_date="2026-06-01", next_date="2026-07-06")
+    assert plan["fact_source"] == "api_operations"
+    assert plan["manual_facts_enabled"] is False
+    assert plan["facts"] == []
+
+
+def test_old_config_without_fact_source_still_loads():
+    old = {"enabled": True, "currency": "rub", "plan_weekly_rub": 50000,
+           "plan_monthly_rub": 200000, "plan_start_date": "2026-01-01",
+           "source": "manual", "facts": []}
+    assert cp.validate_plan(old) == []
+    # summarize должен работать и подставить дефолтный fact_source
+    s = cp.summarize_for_dashboard(old, as_of=AS_OF, api_operations=[])
+    assert s["contribution_fact_source_preferred"] == "api_operations"
+
+
+def test_invalid_fact_source_rejected():
+    errs = cp.validate_plan(_plan(fact_source="from_thin_air"))
+    assert any("fact_source" in e for e in errs)
+
+
 # ─── safety / source scan ─────────────────────────────────────────────────────
 
 def test_module_no_broker_no_token_no_network():
@@ -346,3 +563,57 @@ def test_cli_commands_registered():
     a2 = main._parse_args(["contribution-plan-init", "--weekly-rub", "50000",
                            "--monthly-rub", "200000", "--start-date", "2026-06-01"])
     assert a2.weekly_rub == "50000"
+    assert a2.fact_source == "api_operations"          # дефолт API
+    assert a2.manual_facts_enabled is False
+    a3 = main._parse_args(["contribution-plan-init", "--weekly-rub", "1",
+                           "--monthly-rub", "1", "--start-date", "2026-06-01",
+                           "--fact-source", "mixed", "--manual-facts-enabled"])
+    assert a3.fact_source == "mixed"
+    assert a3.manual_facts_enabled is True
+
+
+def test_cli_init_writes_new_keys(tmp_path, capsys):
+    import main
+    cfg = str(tmp_path / "cp.json")
+    args = main._parse_args(["contribution-plan-init", "--weekly-rub", "50000",
+                             "--monthly-rub", "200000", "--start-date", "2026-06-01",
+                             "--config-path", cfg])
+    assert main.cmd_contribution_plan_init(args) == 0
+    loaded = cp.load_plan(cfg)
+    assert loaded["fact_source"] == "api_operations"
+    assert loaded["manual_facts_enabled"] is False
+    out = capsys.readouterr().out
+    assert "fact_source=api_operations" in out
+
+
+def test_cli_add_prints_fallback_warning(tmp_path, capsys):
+    import main
+    cfg = str(tmp_path / "cp.json")
+    init = main._parse_args(["contribution-plan-init", "--weekly-rub", "50000",
+                             "--monthly-rub", "200000", "--start-date", "2026-06-01",
+                             "--config-path", cfg])
+    main.cmd_contribution_plan_init(init)
+    capsys.readouterr()
+    add = main._parse_args(["contribution-plan-add", "--date", "2026-06-10",
+                            "--amount-rub", "50000", "--config-path", cfg,
+                            "--as-of", "2026-06-27"])
+    assert main.cmd_contribution_plan_add(add) == 0
+    out = capsys.readouterr().out
+    assert "fallback" in out.lower()
+
+
+def test_cli_status_notes_api_in_dashboard(tmp_path, capsys):
+    import main
+    cfg = str(tmp_path / "cp.json")
+    init = main._parse_args(["contribution-plan-init", "--weekly-rub", "50000",
+                             "--monthly-rub", "200000", "--start-date", "2026-06-01",
+                             "--config-path", cfg])
+    main.cmd_contribution_plan_init(init)
+    capsys.readouterr()
+    st = main._parse_args(["contribution-plan-status", "--config-path", cfg,
+                           "--as-of", "2026-06-27",
+                           "--output-json", str(tmp_path / "s.json"),
+                           "--output-md", str(tmp_path / "s.md")])
+    assert main.cmd_contribution_plan_status(st) == 0
+    out = capsys.readouterr().out
+    assert "F4.8" in out  # упоминание авторитетного дашборда

@@ -15,11 +15,17 @@ from loguru import logger
 from brokers.tinkoff.rest_client import TinkoffReadOnlyClient
 from config.settings import settings
 
-# Типы операций, которые запрашиваем у API (фильтрацию делаем и в operation_filter)
+# Типы операций, которые запрашиваем у API (фильтрацию делаем и в operation_filter).
+# BUY/SELL/BUY_CARD — для оборота; INPUT/OUTPUT — read-only денежные пополнения/выводы
+# для F4.10.1 (взносы). Оборот/квал-логика всё равно фильтрует через
+# is_qualifying_operation, поэтому INPUT/OUTPUT их не затрагивают. Это тот же
+# read-вызов GetOperationsByCursor — НЕ новый эндпоинт и НЕ запись.
 _FETCH_OPERATION_TYPES = [
     "OPERATION_TYPE_BUY",
     "OPERATION_TYPE_SELL",
     "OPERATION_TYPE_BUY_CARD",
+    "OPERATION_TYPE_INPUT",
+    "OPERATION_TYPE_OUTPUT",
 ]
 
 

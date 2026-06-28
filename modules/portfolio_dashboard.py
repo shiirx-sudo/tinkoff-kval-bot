@@ -700,20 +700,61 @@ def _turnover_card(state: dict) -> str:
     return _card("D · Оборот (цель 6M за 4 квартала)", body, klass="card full")
 
 
+_CONTRIB_SOURCE_LABELS = {
+    "readonly_operations_api": "API операций (read-only)",
+    "manual_fallback": "ручной fallback",
+    "mixed_api_plus_manual_adjustments": "API + ручные корректировки",
+}
+_CONTRIB_QUALITY_LABELS = {
+    "full": "полные данные",
+    "partial": "частичные данные",
+    "manual_fallback": "ручной fallback",
+}
+
+
 def _contributions_card(state: dict) -> str:
     cn = state.get("contributions_summary") or {}
     enabled = cn.get("contributions_tracking_enabled")
+    source = cn.get("contribution_source")
+    quality = cn.get("contribution_data_quality")
+    started = cn.get("contribution_plan_started")
+    src_label = _CONTRIB_SOURCE_LABELS.get(str(source), _esc(source))
+    q_label = _CONTRIB_QUALITY_LABELS.get(str(quality), _esc(quality))
+    started_badge = (_badge("стартовал" if started else "не стартовал")
+                     if enabled else _DASH)
     body = _kv([
         ("Учёт включён", _badge("да" if enabled else "выкл")),
+        ("Источник факта", src_label),
+        ("Качество данных", q_label),
+        ("План стартовал", started_badge),
+        ("Дней до старта плана", _esc(cn.get("days_until_plan_start"))),
         ("План / неделя", _money(cn.get("contribution_plan_weekly_rub"))),
         ("План / месяц", _money(cn.get("contribution_plan_monthly_rub"))),
         ("Факт / неделя", _money(cn.get("contribution_fact_weekly_rub"))),
         ("Факт / месяц", _money(cn.get("contribution_fact_monthly_rub"))),
         ("Разрыв / месяц", _money(cn.get("contribution_gap_monthly_rub"))),
         ("Пропущено (месяц)", _esc(cn.get("missed_contributions_count_month"))),
+        ("Последний взнос",
+         _esc(cn.get("last_contribution_date")) + " · "
+         + _money(cn.get("last_contribution_amount_rub"))),
+        ("API-депозитов", _esc(cn.get("contribution_api_deposit_facts_count"))),
+        ("Ручных фактов", _esc(cn.get("contribution_manual_facts_count"))),
         ("След. плановый взнос", _esc(cn.get("next_planned_contribution_date"))),
         ("Нужно довнести", _money(cn.get("contribution_required_to_catch_up_rub"))),
     ])
+    # вторичные метрики: выводы и net cash flow
+    body += ("<h3>Выводы и чистый денежный поток (вторично)</h3>"
+             + _kv([
+                 ("Выводы / месяц", _money(cn.get("withdrawal_fact_monthly_rub"))),
+                 ("Выводы / YTD", _money(cn.get("withdrawal_fact_ytd_rub"))),
+                 ("Net cash flow / месяц",
+                  _pnl(cn.get("net_cash_flow_monthly_rub"))),
+                 ("Net cash flow / YTD", _pnl(cn.get("net_cash_flow_ytd_rub"))),
+             ]))
+    if str(source) == "manual_fallback" and enabled:
+        body += ('<div class="caution">Факт пополнений взят из ручного fallback: '
+                 'read-only операции API недоступны. По умолчанию факт берётся из '
+                 'операций брокера; ручные facts — только корректировки.</div>')
     if not enabled:
         body += ('<div class="caution">Учёт взносов не настроен. Создайте '
                  '<code>data/config/contribution_plan.json</code> на основе '

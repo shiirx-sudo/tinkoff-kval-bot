@@ -1797,6 +1797,8 @@ def cmd_contribution_plan_init(args: argparse.Namespace) -> int:
             start_date=args.start_date, next_date=args.next_date,
             currency=getattr(args, "currency", "rub"),
             source=getattr(args, "source", "manual"),
+            fact_source=getattr(args, "fact_source", cp.DEFAULT_FACT_SOURCE),
+            manual_facts_enabled=getattr(args, "manual_facts_enabled", False),
             existing=existing, reset_facts=getattr(args, "reset_facts", False))
         out_path = cp.save_plan(plan, path)
     except cp.ContributionPlanError as exc:
@@ -1808,6 +1810,10 @@ def cmd_contribution_plan_init(args: argparse.Namespace) -> int:
     print(f"  записан: {out_path}")
     print(f"  план: неделя={plan['plan_weekly_rub']} месяц={plan['plan_monthly_rub']} "
           f"старт={plan['plan_start_date']} след={plan['next_planned_contribution_date']}")
+    print(f"  fact_source={plan['fact_source']} "
+          f"manual_facts_enabled={plan['manual_facts_enabled']}")
+    print("  Факт пополнений по умолчанию берётся из read-only операций брокера "
+          "(F4.8 dashboard). Ручные facts — только fallback/корректировки.")
     print(f"  фактов сохранено: {kept}"
           + (" (reset)" if getattr(args, 'reset_facts', False) else ""))
     return 0
@@ -1842,6 +1848,9 @@ def cmd_contribution_plan_add(args: argparse.Namespace) -> int:
     print("Contribution plan add — F4.10 (ЛОКАЛЬНО, не торговля)")
     print(f"  добавлен факт: {args.date} / {args.amount_rub} ₽ → {out_path}")
     print(f"  фактов всего: {len(plan.get('facts') or [])}")
+    print("  ВНИМАНИЕ: ручные facts — это fallback/корректировки. По умолчанию "
+          "факт пополнений для дашборда F4.8 берётся из read-only операций брокера "
+          "(fact_source=api_operations).")
     _cp_print_status(cp, status)
     return 0
 
@@ -1862,6 +1871,9 @@ def cmd_contribution_plan_status(args: argparse.Namespace) -> int:
         md_path=getattr(args, "output_md", cp.DEFAULT_STATUS_MD))
     print("Contribution plan status — F4.10 (ЛОКАЛЬНО, не торговля)")
     print("Только локальные config/reports. Без брокера/токенов/сети/торговли.")
+    print("  ПРИМЕЧАНИЕ: read-only операции брокера в этой CLI-команде НЕ читаются — "
+          "факт здесь только локальный/ручной. Авторитетный факт пополнений считает "
+          "дашборд F4.8 (portfolio-dashboard-data) из read-only операций API.")
     _cp_print_status(cp, status)
     logger.info(f"Отчёт: {result['_output_json']}")
     logger.info(f"Отчёт: {result['_output_md']}")
@@ -2735,6 +2747,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                        help="Дата следующего планового взноса YYYY-MM-DD (или пусто)")
     p_cpi.add_argument("--currency", dest="currency", default="rub")
     p_cpi.add_argument("--source", dest="source", default="manual")
+    p_cpi.add_argument(
+        "--fact-source", dest="fact_source", default=_cp.DEFAULT_FACT_SOURCE,
+        choices=_cp.ALLOWED_FACT_SOURCES,
+        help="Источник факта пополнений: api_operations (по умолчанию, read-only "
+             "операции F4.8) | manual | mixed")
+    p_cpi.add_argument(
+        "--manual-facts-enabled", dest="manual_facts_enabled", action="store_true",
+        help="Разрешить ручные facts как корректировки (по умолчанию выкл)")
     p_cpi.add_argument("--reset-facts", dest="reset_facts", action="store_true",
                        help="Очистить существующие facts (по умолчанию сохраняются)")
     p_cpi.add_argument("--force", dest="force", action="store_true",

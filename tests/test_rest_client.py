@@ -60,3 +60,28 @@ def test_iter_operations_passes_filter():
     assert seen["operationTypes"] == ["OPERATION_TYPE_BUY"]
     assert seen["state"] == "OPERATION_STATE_EXECUTED"
     assert seen["withoutTrades"] is False
+
+
+def test_readonly_client_fetches_deposit_withdrawal_types():
+    """F4.10.1: read-only фасад запрашивает и INPUT/OUTPUT (для взносов), не только сделки."""
+    from datetime import datetime, timezone
+
+    from api.client import _FETCH_OPERATION_TYPES, ReadOnlyClient
+    assert "OPERATION_TYPE_INPUT" in _FETCH_OPERATION_TYPES
+    assert "OPERATION_TYPE_OUTPUT" in _FETCH_OPERATION_TYPES
+
+    rest = TinkoffReadOnlyClient(token="t")
+    seen = {}
+
+    def fake_post(service, method, payload):
+        seen.update(payload)
+        return {"items": [], "hasNext": False}
+
+    rest._post = fake_post  # type: ignore[assignment]
+    client = ReadOnlyClient(rest=rest)
+    now = datetime(2026, 6, 28, tzinfo=timezone.utc)
+    client.get_operations("acc-1", now, now)
+    assert "OPERATION_TYPE_INPUT" in seen["operationTypes"]
+    assert "OPERATION_TYPE_OUTPUT" in seen["operationTypes"]
+    # сделки остаются — оборот по-прежнему считается
+    assert "OPERATION_TYPE_BUY" in seen["operationTypes"]
