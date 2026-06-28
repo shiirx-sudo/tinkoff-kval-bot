@@ -276,6 +276,48 @@ def test_contributions_disabled_warning(tmp_path):
     assert "config/contribution_plan.example.json" in html
 
 
+def test_contributions_api_source_block(tmp_path):
+    data = _f48()
+    data["contributions_summary"] = {
+        "contributions_tracking_enabled": True,
+        "contribution_source": "readonly_operations_api",
+        "contribution_data_quality": "full",
+        "contribution_plan_started": True,
+        "days_until_plan_start": 0,
+        "contribution_plan_weekly_rub": 50000, "contribution_plan_monthly_rub": 200000,
+        "contribution_fact_weekly_rub": 50000, "contribution_fact_monthly_rub": 200000,
+        "contribution_gap_monthly_rub": 0, "missed_contributions_count_month": 0,
+        "contribution_api_deposit_facts_count": 4, "contribution_manual_facts_count": 0,
+        "contribution_api_withdrawal_facts_count": 1,
+        "withdrawal_fact_monthly_rub": 50000, "withdrawal_fact_ytd_rub": 50000,
+        "net_cash_flow_monthly_rub": 150000, "net_cash_flow_ytd_rub": 150000,
+        "last_contribution_date": "2026-06-22", "last_contribution_amount_rub": 50000,
+        "next_planned_contribution_date": "2026-07-06",
+        "contribution_required_to_catch_up_rub": 0, "warnings": []}
+    html = _html(tmp_path, data)
+    assert "E · Взносы" in html
+    assert "Источник факта" in html
+    assert "API операций (read-only)" in html
+    assert "Качество данных" in html
+    assert "Последний взнос" in html
+    assert "2026-06-22" in html
+    assert "Net cash flow" in html
+
+
+def test_contributions_manual_fallback_caution(tmp_path):
+    data = _f48()
+    cn = dict(data["contributions_summary"])
+    cn.update({"contributions_tracking_enabled": True,
+               "contribution_source": "manual_fallback",
+               "contribution_data_quality": "manual_fallback",
+               "contribution_plan_started": True,
+               "contribution_plan_weekly_rub": 50000})
+    data["contributions_summary"] = cn
+    html = _html(tmp_path, data)
+    assert "ручной fallback" in html
+    assert "операции API недоступны" in html
+
+
 def test_risk_section_concentration_and_negatives(tmp_path):
     html = _html(tmp_path)
     assert "F · Риск" in html

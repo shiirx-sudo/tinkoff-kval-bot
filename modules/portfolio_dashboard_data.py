@@ -715,16 +715,26 @@ def _empty_turnover(definition: str) -> dict:
 
 # ─── contributions summary ────────────────────────────────────────────────────
 
-def build_contributions_summary(*, plan, now, warnings: list[str]) -> dict:
-    """F4.8 contributions_summary через общий модуль F4.10 (единая логика)."""
+def build_contributions_summary(*, plan, now, warnings: list[str],
+                                operations=None) -> dict:
+    """F4.8 contributions_summary через общий модуль F4.10/F4.10.1 (единая логика).
+
+    Факт пополнений по умолчанию извлекается из read-only `operations` (тот же путь
+    F4.8). При недоступных операциях — ручной fallback с предупреждением. Никакого
+    нового брокерского вызова/токена здесь не делается.
+    """
     from modules.contribution_plan import (
         WARN_NOT_CONFIGURED,
         summarize_for_dashboard,
     )
-    summary = summarize_for_dashboard(plan, as_of=now.date())
+    summary = summarize_for_dashboard(
+        plan, as_of=now.date(), api_operations=operations, prefer_api=True)
     if not summary.get("contributions_tracking_enabled"):
         if WARN_NOT_CONFIGURED not in warnings:
             warnings.append(WARN_NOT_CONFIGURED)
+    for w in summary.get("warnings", []):
+        if w and w not in warnings:
+            warnings.append(w)
     return summary
 
 
@@ -956,10 +966,15 @@ def render_md(report: dict) -> str:
         "",
         "| Поле | Значение |",
         "| --- | --- |",
-        kv(cn, ["contributions_tracking_enabled", "contribution_plan_weekly_rub",
+        kv(cn, ["contributions_tracking_enabled", "contribution_source",
+                "contribution_data_quality", "contribution_plan_started",
+                "days_until_plan_start", "contribution_plan_weekly_rub",
                 "contribution_plan_monthly_rub", "contribution_fact_monthly_rub",
                 "contribution_gap_monthly_rub", "missed_contributions_count_month",
-                "next_planned_contribution_date", "contribution_source"]),
+                "contribution_api_deposit_facts_count",
+                "contribution_manual_facts_count", "last_contribution_date",
+                "last_contribution_amount_rub", "net_cash_flow_monthly_rub",
+                "next_planned_contribution_date"]),
         "",
         "## Риск / концентрация",
         "",
@@ -1089,7 +1104,8 @@ def load_portfolio_dashboard_data(
         resolver=resolver)
     plan = _load_json(contribution_plan_path or DEFAULT_CONTRIBUTION_PLAN)
     contributions = build_contributions_summary(plan=plan, now=now,
-                                                warnings=warnings)
+                                                warnings=warnings,
+                                                operations=operations)
     risk = build_risk_summary(positions=positions, portfolio_summary=portfolio)
     last_trade = build_last_trade_audit_summary(
         f44=f44, f45=f45, f46=f46, loaded_keys=loaded_keys)

@@ -1,5 +1,4 @@
 {
-  "_comment": "F4.8 contribution plan (read-only). Скопируйте в data/config/contribution_plan.json и заполните. data/config/contribution_plan.json — локальный пользовательский файл (не коммитится, см. .gitignore). Депозиты T-Invest read-only API надёжно не отдаёт, поэтому факт пополнений ведётся вручную здесь (manual model).",
   "enabled": true,
   "currency": "rub",
   "plan_weekly_rub": 50000,
@@ -7,8 +6,7 @@
   "plan_start_date": "2026-06-01",
   "next_planned_contribution_date": "2026-07-06",
   "source": "manual",
-  "facts": [
-    {"date": "2026-06-08", "amount_rub": 50000},
-    {"date": "2026-06-15", "amount_rub": 50000}
-  ]
+  "fact_source": "api_operations",
+  "manual_facts_enabled": false,
+  "facts": []
 }
