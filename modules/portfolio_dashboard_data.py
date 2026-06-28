@@ -88,6 +88,13 @@ _P4 = Decimal("0.0001")
 WARN_TAX_UNKNOWN = (
     "Налоговый режим неизвестен — net-доход не считаем (не угадываем); "
     "net-поля = null. Оценка дохода — БРУТТО.")
+# F4.11: доход к цели = scheduled (дивиденды/купоны) + strategy (бот/стратегия).
+# Strategy income — пока ТОЛЬКО плейсхолдер (без торговли в этом PR).
+STRATEGY_INCOME_STATUS_NOT_CONFIGURED = "NOT_CONFIGURED"
+STRATEGY_INCOME_CONFIDENCE_NONE = "none"
+WARN_STRATEGY_INCOME = (
+    "Доход стратегии учитывается только реализованным и за вычетом комиссий. "
+    "Paper/model-оценки показаны отдельно и не гарантированы.")
 WARN_CONTRIB_NOT_CONFIGURED = "contribution_plan_not_configured"
 WARN_TURNOVER_PARTIAL = (
     "Полная история операций недоступна — оборот частичный (из локальных отчётов "
@@ -392,8 +399,40 @@ def build_income_summary(*, positions: list[dict], f46, portfolio_value,
     target = Decimal(BASE_MONTHLY_LIVING_BASKET_RUB)
     index_mult = Decimal("1.0")  # индексация цели пока не применяется (база 2026-06)
     target_indexed = _q2(target * index_mult)
-    coverage = _pct(monthly_gross, target) if monthly_gross is not None else None
-    gap = _q2(target - monthly_gross) if monthly_gross is not None else None
+
+    # ── scheduled income (дивиденды/купоны/надёжные будущие события) ──
+    sched_monthly = monthly_gross           # Decimal | None (брутто)
+    sched_yearly = yearly_gross
+
+    # ── strategy income (бот/стратегия): ТОЛЬКО плейсхолдер в этом PR ──
+    # Консервативно учитываем лишь подтверждённый реализованный net (по умолчанию 0).
+    # Paper/model — отдельные оценки, НЕ входят в консервативное покрытие.
+    strategy_status = STRATEGY_INCOME_STATUS_NOT_CONFIGURED
+    strategy_realized_net = Decimal("0.00")  # реализованный net (нет отчётов → 0)
+    strategy_paper = None                    # paper-доход не настроен
+    strategy_model = None                    # model-доход не настроен
+    strategy_configured = strategy_status != STRATEGY_INCOME_STATUS_NOT_CONFIGURED
+    strategy_in_conservative = bool(strategy_configured)
+
+    # ── conservative total: scheduled + ТОЛЬКО реализованный net стратегии ──
+    strat_effective = strategy_realized_net if strategy_configured else Decimal(0)
+    if sched_monthly is None and not strategy_configured:
+        total_cons = None                    # данных нет → не угадываем
+    else:
+        total_cons = _q2((sched_monthly or Decimal(0)) + strat_effective)
+
+    def _add(base, extra):
+        if base is None:
+            return base if extra is None else _q2(extra)
+        return _q2(base + (extra or Decimal(0)))
+
+    total_with_paper = _add(total_cons, strategy_paper)
+    total_with_model = _add(total_cons, strategy_model)
+
+    cov_cons = _pct(total_cons, target) if total_cons is not None else None
+    cov_paper = _pct(total_with_paper, target) if total_with_paper is not None else None
+    cov_model = _pct(total_with_model, target) if total_with_model is not None else None
+    gap_cons = _q2(target - total_cons) if total_cons is not None else None
 
     # требуемый капитал при ЯВНОМ допущении доходности (не реальная доходность)
     annual_target_income = target * Decimal(12)
@@ -404,27 +443,87 @@ def build_income_summary(*, positions: list[dict], f46, portfolio_value,
 
     if WARN_TAX_UNKNOWN not in warnings:
         warnings.append(WARN_TAX_UNKNOWN)
+    if WARN_STRATEGY_INCOME not in warnings:
+        warnings.append(WARN_STRATEGY_INCOME)
 
     calendar_out = {m: _q2(v) for m, v in sorted(calendar.items())}
     events_sorted = sorted(events, key=lambda e: str(e.get("date") or ""))
+
+    scheduled_income = {
+        "scheduled_income_monthly_gross_rub": sched_monthly,
+        "scheduled_income_yearly_gross_rub": sched_yearly,
+        "scheduled_income_monthly_net_rub": None,
+        "scheduled_income_yearly_net_rub": None,
+        "scheduled_income_tax_warning": WARN_TAX_UNKNOWN,
+        "scheduled_income_sources": breakdown,
+        "scheduled_income_calendar_monthly": calendar_out,
+        "scheduled_income_next_events": events_sorted,
+    }
+    strategy_income = {
+        "strategy_income_monthly_realized_net_rub": _q2(strategy_realized_net),
+        "strategy_income_monthly_paper_rub": strategy_paper,
+        "strategy_income_monthly_model_rub": strategy_model,
+        "strategy_income_status": strategy_status,
+        "strategy_income_confidence": STRATEGY_INCOME_CONFIDENCE_NONE,
+        "strategy_income_included_in_conservative_coverage": strategy_in_conservative,
+        "strategy_income_warning": WARN_STRATEGY_INCOME,
+    }
+    total_income = {
+        "total_income_monthly_conservative_rub": total_cons,
+        "total_income_monthly_with_paper_rub": total_with_paper,
+        "total_income_monthly_with_model_rub": total_with_model,
+    }
+
     return {
-        "passive_income_rub_monthly_gross": monthly_gross,
-        "passive_income_rub_yearly_gross": yearly_gross,
-        "passive_income_rub_monthly_net": None,
-        "passive_income_rub_yearly_net": None,
-        "income_net_estimation_available": False,
-        "income_tax_warning": WARN_TAX_UNKNOWN,
-        "target_monthly_income_rub": BASE_MONTHLY_LIVING_BASKET_RUB,
-        "target_monthly_income_indexed_rub": target_indexed,
+        # ── F4.11 income-to-target model ──
+        "monthly_income_target_rub": BASE_MONTHLY_LIVING_BASKET_RUB,
+        "income_target_indexed_rub": target_indexed,
         "target_index_multiplier": index_mult,
-        "income_target_coverage_pct": coverage,
-        "income_gap_rub_monthly": gap,
+        # scheduled income (дивиденды/купоны) — подкатегория
+        "scheduled_income_monthly_gross_rub": sched_monthly,
+        "scheduled_income_yearly_gross_rub": sched_yearly,
+        "scheduled_income_monthly_net_rub": None,
+        "scheduled_income_yearly_net_rub": None,
+        "scheduled_income_tax_warning": WARN_TAX_UNKNOWN,
+        "scheduled_income_sources": breakdown,
+        # strategy income — плейсхолдер
+        "strategy_income_monthly_realized_net_rub": _q2(strategy_realized_net),
+        "strategy_income_monthly_paper_rub": strategy_paper,
+        "strategy_income_monthly_model_rub": strategy_model,
+        "strategy_income_status": strategy_status,
+        "strategy_income_confidence": STRATEGY_INCOME_CONFIDENCE_NONE,
+        "strategy_income_included_in_conservative_coverage": strategy_in_conservative,
+        # totals и покрытие цели
+        "total_income_monthly_conservative_rub": total_cons,
+        "total_income_monthly_with_paper_rub": total_with_paper,
+        "total_income_monthly_with_model_rub": total_with_model,
+        "target_coverage_conservative_pct": cov_cons,
+        "target_coverage_with_paper_pct": cov_paper,
+        "target_coverage_with_model_pct": cov_model,
+        "income_gap_conservative_rub_monthly": gap_cons,
+        # вложенные объекты-категории (для UI/отчёта)
+        "scheduled_income": scheduled_income,
+        "strategy_income": strategy_income,
+        "total_income": total_income,
+        # справочное
         "required_capital_rub": req_capital,
         "required_capital_assumption_yield_pct": REQUIRED_CAPITAL_ASSUMED_YIELD_PCT,
         "required_capital_gap_rub": req_gap,
         "income_sources_breakdown": breakdown,
         "income_calendar_monthly": calendar_out,
         "next_income_events": events_sorted,
+        "income_strategy_warning": WARN_STRATEGY_INCOME,
+        # ── LEGACY-алиасы (устаревшие; оставлены для обратной совместимости) ──
+        "passive_income_rub_monthly_gross": sched_monthly,
+        "passive_income_rub_yearly_gross": sched_yearly,
+        "passive_income_rub_monthly_net": None,
+        "passive_income_rub_yearly_net": None,
+        "income_net_estimation_available": False,
+        "income_tax_warning": WARN_TAX_UNKNOWN,
+        "target_monthly_income_rub": BASE_MONTHLY_LIVING_BASKET_RUB,
+        "target_monthly_income_indexed_rub": target_indexed,
+        "income_target_coverage_pct": cov_cons,
+        "income_gap_rub_monthly": gap_cons,
     }
 
 
@@ -801,6 +900,18 @@ def build_dashboard_kpi(*, portfolio, income, turnover, contributions,
         "portfolio_value_rub": portfolio.get("total_portfolio_value_rub"),
         "cash_rub": portfolio.get("cash_rub"),
         "cash_pct": portfolio.get("cash_pct"),
+        # F4.11 income-to-target KPI
+        "income_to_target_monthly_rub": income.get(
+            "total_income_monthly_conservative_rub"),
+        "monthly_income_target_rub": income.get("monthly_income_target_rub"),
+        "target_coverage_conservative_pct": income.get(
+            "target_coverage_conservative_pct"),
+        "income_gap_conservative_rub_monthly": income.get(
+            "income_gap_conservative_rub_monthly"),
+        "scheduled_income_monthly_rub": income.get(
+            "scheduled_income_monthly_gross_rub"),
+        "strategy_income_status": income.get("strategy_income_status"),
+        # legacy-алиасы (устаревшие)
         "passive_income_monthly_rub": income.get("passive_income_rub_monthly_gross"),
         "passive_income_target_rub": income.get("target_monthly_income_rub"),
         "passive_income_coverage_pct": income.get("income_target_coverage_pct"),
@@ -903,8 +1014,9 @@ def render_md(report: dict) -> str:
         "| KPI | Значение |",
         "| --- | --- |",
         kv(kpi, ["portfolio_value_rub", "cash_rub", "cash_pct",
-                 "passive_income_monthly_rub", "passive_income_target_rub",
-                 "passive_income_coverage_pct", "income_gap_rub_monthly",
+                 "income_to_target_monthly_rub", "monthly_income_target_rub",
+                 "target_coverage_conservative_pct",
+                 "income_gap_conservative_rub_monthly",
                  "turnover_ytd_rub", "turnover_annual_target_rub",
                  "turnover_ytd_progress_pct", "turnover_gap_rub",
                  "contribution_monthly_fact_rub", "contribution_monthly_plan_rub",
@@ -933,16 +1045,39 @@ def render_md(report: dict) -> str:
             f"{_fmt(p.get('income_data_source'))} |")
     lines += [
         "",
-        "## Пассивный доход",
+        "## Доход к цели",
+        "",
+        "Цель = `monthly_income_target_rub`. Доход = scheduled (дивиденды/купоны) + "
+        "strategy (бот/стратегия). Консервативное покрытие учитывает scheduled и "
+        "ТОЛЬКО реализованный net стратегии; paper/model — отдельно и НЕ в покрытии.",
         "",
         "| Поле | Значение |",
         "| --- | --- |",
-        kv(inc, ["passive_income_rub_monthly_gross", "passive_income_rub_yearly_gross",
-                 "passive_income_rub_monthly_net", "target_monthly_income_rub",
-                 "income_target_coverage_pct", "income_gap_rub_monthly",
+        kv(inc, ["monthly_income_target_rub", "income_target_indexed_rub",
+                 "scheduled_income_monthly_gross_rub",
+                 "scheduled_income_yearly_gross_rub",
+                 "scheduled_income_monthly_net_rub",
+                 "total_income_monthly_conservative_rub",
+                 "target_coverage_conservative_pct",
+                 "income_gap_conservative_rub_monthly",
                  "required_capital_rub", "required_capital_assumption_yield_pct",
                  "required_capital_gap_rub"]),
-        f"\n> {inc.get('income_tax_warning')}",
+        f"\n> {inc.get('scheduled_income_tax_warning')}",
+        "",
+        "### Strategy income (бот/стратегия) — плейсхолдер",
+        "",
+        "| Поле | Значение |",
+        "| --- | --- |",
+        kv(inc, ["strategy_income_status", "strategy_income_confidence",
+                 "strategy_income_monthly_realized_net_rub",
+                 "strategy_income_monthly_paper_rub",
+                 "strategy_income_monthly_model_rub",
+                 "strategy_income_included_in_conservative_coverage",
+                 "total_income_monthly_with_paper_rub",
+                 "total_income_monthly_with_model_rub",
+                 "target_coverage_with_paper_pct",
+                 "target_coverage_with_model_pct"]),
+        f"\n> {inc.get('income_strategy_warning')}",
         "",
         "## Оборот (buy+sell gross, не дивиденды; цель 6M за 4 квартала)",
         "",

@@ -442,10 +442,11 @@ def _kpi_strip(state: dict) -> str:
     return "".join([
         _kpi("Стоимость портфеля", _money(kpi.get("portfolio_value_rub")),
              sub="всего активов"),
-        _kpi("Пассивный доход / мес.",
-             _money(kpi.get("passive_income_monthly_rub")), sub="брутто"),
+        _kpi("Доход к цели / мес.",
+             _money(kpi.get("income_to_target_monthly_rub")),
+             sub="консервативно (scheduled + realized)"),
         _kpi("Покрытие цели 150 000 ₽/мес.",
-             _pct(kpi.get("passive_income_coverage_pct")),
+             _pct(kpi.get("target_coverage_conservative_pct")),
              sub="до 150 000 ₽/мес.", cls="k-warn"),
         _kpi("Свободный кэш", _money(kpi.get("cash_rub")),
              sub=_pct(kpi.get("cash_pct")) + " портфеля"),
@@ -468,7 +469,7 @@ def _interpretation(state: dict) -> str:
     tn = state.get("turnover_summary") or {}
     cn = state.get("contributions_summary") or {}
     rk = state.get("risk_summary") or {}
-    cov = inc.get("income_target_coverage_pct")
+    cov = inc.get("target_coverage_conservative_pct")
     neg = rk.get("negative_pnl_positions_count")
     cnt = pf.get("positions_count")
     cards = [
@@ -477,9 +478,9 @@ def _interpretation(state: dict) -> str:
          f"{_pct(pf.get('cash_pct'))}; нереализованный PnL "
          f"{_pnl(pf.get('unrealized_pnl_rub'))}."),
         ("Income",
-         f"Пассивный доход {_money(inc.get('passive_income_rub_monthly_gross'))}"
-         f"/мес.; покрытие цели 150 000 ₽/мес. — {_pct(cov)}, покрывает только "
-         f"{_pct(cov)} цели."),
+         f"Доход к цели {_money(inc.get('total_income_monthly_conservative_rub'))}"
+         f"/мес. (scheduled — дивиденды/купоны); покрытие цели 150 000 ₽/мес. — "
+         f"{_pct(cov)}, покрывает только {_pct(cov)} цели."),
         ("Turnover",
          f"Квал-оборот {_money(tn.get('kval_turnover_trailing_4q_rub'))} из "
          f"{_money(tn.get('kval_turnover_target_rub'))} за 4 квартала "
@@ -508,10 +509,10 @@ def _progress_card(state: dict) -> str:
     pf = state.get("portfolio_summary") or {}
     body = (
         _progress(
-            "Пассивный доход к цели 150 000 ₽/мес.",
-            _money(inc.get("passive_income_rub_monthly_gross")) + " / "
-            + _money(inc.get("target_monthly_income_rub")),
-            inc.get("income_target_coverage_pct"), color="warn")
+            "Доход к цели 150 000 ₽/мес.",
+            _money(inc.get("total_income_monthly_conservative_rub")) + " / "
+            + _money(inc.get("monthly_income_target_rub")),
+            inc.get("target_coverage_conservative_pct"), color="warn")
         + _progress(
             "Квал-оборот к цели 6M за 4 квартала",
             _money(tn.get("kval_turnover_trailing_4q_rub")) + " / "
@@ -585,42 +586,89 @@ def _positions_card(state: dict) -> str:
     return _card(f"B · Позиции ({len(positions)})", table, klass="card full")
 
 
+_STRATEGY_STATUS_LABELS = {
+    "NOT_CONFIGURED": "не настроен",
+    "PAPER": "paper",
+    "LIVE": "live (реализованный net)",
+}
+
+
 def _income_card(state: dict) -> str:
     inc = state.get("income_summary") or {}
-    net_avail = inc.get("income_net_estimation_available")
-    net_block = []
-    if net_avail:
-        net_block = [("Доход net / мес.",
-                      _money(inc.get("passive_income_rub_monthly_net"))),
-                     ("Доход net / год",
-                      _money(inc.get("passive_income_rub_yearly_net")))]
+    # ── цель и консервативный итог ──
     body = _kv([
-        ("Доход брутто / мес.",
-         _money(inc.get("passive_income_rub_monthly_gross"))),
-        ("Доход брутто / год",
-         _money(inc.get("passive_income_rub_yearly_gross"))),
-        *net_block,
-        ("Цель", _money(inc.get("target_monthly_income_rub")) + "/мес."),
-        ("Покрытие цели", _pct(inc.get("income_target_coverage_pct"))),
-        ("Разрыв до цели / мес.", _money(inc.get("income_gap_rub_monthly"))),
+        ("Цель", _money(inc.get("monthly_income_target_rub")) + "/мес."),
+        ("Доход к цели (консервативно)",
+         _money(inc.get("total_income_monthly_conservative_rub"))),
+        ("Покрытие цели (консервативно)",
+         _pct(inc.get("target_coverage_conservative_pct"))),
+        ("Разрыв до цели / мес.",
+         _money(inc.get("income_gap_conservative_rub_monthly"))),
         ("Требуемый капитал", _money(inc.get("required_capital_rub"))),
         ("Допущение доходности",
          _pct(inc.get("required_capital_assumption_yield_pct"))),
         ("Разрыв капитала", _money(inc.get("required_capital_gap_rub"))),
     ])
-    if not net_avail and inc.get("income_tax_warning"):
-        body += f'<div class="note">⚠️ {html.escape(str(inc["income_tax_warning"]))}</div>'
+    body += ('<div class="note">Консервативное покрытие = scheduled (дивиденды/'
+             'купоны) + ТОЛЬКО реализованный net стратегии. Paper/model-оценки '
+             'показаны отдельно и НЕ входят в покрытие.</div>')
+
+    # ── Scheduled income (дивиденды/купоны) ──
+    body += ("<h3>Scheduled income · дивиденды / купоны</h3>"
+             + _kv([
+                 ("Брутто / мес.",
+                  _money(inc.get("scheduled_income_monthly_gross_rub"))),
+                 ("Брутто / год",
+                  _money(inc.get("scheduled_income_yearly_gross_rub"))),
+                 ("Net / мес.",
+                  _money(inc.get("scheduled_income_monthly_net_rub"))),
+             ]))
+    if inc.get("scheduled_income_tax_warning"):
+        body += (f'<div class="note">⚠️ '
+                 f'{html.escape(str(inc["scheduled_income_tax_warning"]))}</div>')
+
+    # ── Strategy income (бот/стратегия) — плейсхолдер ──
+    status = inc.get("strategy_income_status")
+    status_label = _STRATEGY_STATUS_LABELS.get(str(status), _esc(status))
+    body += ("<h3>Strategy income · бот / торговая стратегия</h3>"
+             + _kv([
+                 ("Статус", _badge(status_label)),
+                 ("Уверенность", _esc(inc.get("strategy_income_confidence"))),
+                 ("Реализованный net / мес.",
+                  _money(inc.get("strategy_income_monthly_realized_net_rub"))),
+                 ("Paper / мес. (исключено из покрытия)",
+                  _money(inc.get("strategy_income_monthly_paper_rub"))),
+                 ("Model / мес. (исключено из покрытия)",
+                  _money(inc.get("strategy_income_monthly_model_rub"))),
+                 ("Учтён в консервативном покрытии",
+                  _badge("да" if inc.get(
+                      "strategy_income_included_in_conservative_coverage")
+                      else "нет")),
+             ]))
+    body += ("<h3>Покрытие цели с учётом оценок (справочно, не гарантия)</h3>"
+             + _kv([
+                 ("С paper / мес.",
+                  _money(inc.get("total_income_monthly_with_paper_rub")) + " · "
+                  + _pct(inc.get("target_coverage_with_paper_pct"))),
+                 ("С model / мес.",
+                  _money(inc.get("total_income_monthly_with_model_rub")) + " · "
+                  + _pct(inc.get("target_coverage_with_model_pct"))),
+             ]))
+    body += ('<div class="caution">Доход стратегии учитывается только реализованным '
+             'и за вычетом комиссий. Paper/model-оценки показаны отдельно и не '
+             'гарантированы.</div>')
+
     cal = inc.get("income_calendar_monthly") or {}
     if cal:
-        body += ("<h3>Календарь дохода по месяцам</h3>"
+        body += ("<h3>Календарь scheduled-дохода по месяцам</h3>"
                  + _barchart({str(m): v for m, v in cal.items()}))
     events = inc.get("next_income_events") or []
     if events:
         rows = [[_esc(e.get("date")), _esc(e.get("ticker")), _esc(e.get("type")),
                  _money(e.get("amount_total_rub"))] for e in events]
-        body += "<h3>Ближайшие события дохода</h3>" + _table(
+        body += "<h3>Ближайшие события scheduled-дохода</h3>" + _table(
             ["Дата", "Тикер", "Тип", "Сумма"], rows)
-    return _card("C · Пассивный доход / FIRE", body, klass="card full")
+    return _card("C · Доход к цели", body, klass="card full")
 
 
 def _kval_badge(status) -> str:

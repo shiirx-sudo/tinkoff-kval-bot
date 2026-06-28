@@ -14,8 +14,9 @@
 
 1. Сколько стоит портфель сейчас? → `portfolio_summary.total_portfolio_value_rub`
 2. Сколько свободного кэша? → `cash_summary.cash_rub` / `cash_pct`
-3. Сколько пассивного дохода в месяц? → `income_summary.passive_income_rub_monthly_gross`
-4. Насколько близко к цели 150 000 ₽/мес.? → `income_summary.income_target_coverage_pct` / `income_gap_rub_monthly`
+3. Сколько дохода к цели в месяц? → `income_summary.total_income_monthly_conservative_rub`
+   (scheduled дивиденды/купоны + только реализованный net стратегии)
+4. Насколько близко к цели 150 000 ₽/мес.? → `income_summary.target_coverage_conservative_pct` / `income_gap_conservative_rub_monthly`
 5. Какой оборот к цели 60 000 000 ₽/год? → `turnover_summary.turnover_ytd_rub` / `turnover_ytd_progress_pct`
 6. Взносы по плану или пропущены? → `contributions_summary`
 7. Есть ли критичные риски? → `risk_summary`
@@ -33,7 +34,10 @@
 
 ## Определения и цели
 
-- Цель пассивного дохода: `base_monthly_living_basket_rub = 150000` (база `2026-06`).
+- Цель дохода (income target): `monthly_income_target_rub = 150000` (база `2026-06`).
+  F4.11: доход к цели = **scheduled** (дивиденды/купоны) + **strategy** (бот/стратегия,
+  пока плейсхолдер). «Пассивный доход» — теперь подкатегория (scheduled), не вся
+  модель. См. `docs/portfolio_dashboard.md` → «Доход к цели (F4.11)».
 - Цель оборота: год `60 000 000 ₽`, месяц `5 000 000 ₽`, квартал `15 000 000 ₽`.
 - **Оборот = `sum(abs(gross BUY) + abs(gross SELL))`** (до комиссии). Дивиденды и
   купоны — это **доход/cashflow**, а **НЕ оборот**. Комиссии учитываются **отдельно**
@@ -41,9 +45,14 @@
 
 ## Правила расчёта (без угадывания)
 
-- Месячный пассивный доход (брутто) = годовой ожидаемый доход / 12.
-- Покрытие цели = месячный доход / 150 000 × 100.
-- Income gap = 150 000 − месячный доход.
+- Месячный scheduled-доход (брутто) = годовой ожидаемый доход / 12.
+- Консервативный доход к цели = scheduled (брутто) + только реализованный net
+  стратегии (по умолчанию 0). Paper/model в покрытие **не** входят.
+- Покрытие цели (консервативно) = доход к цели / 150 000 × 100.
+- Income gap (консервативно) = 150 000 − доход к цели.
+- Legacy-алиасы (`passive_income_rub_monthly_gross`, `income_target_coverage_pct`,
+  `income_gap_rub_monthly`, `target_monthly_income_rub`) сохранены для
+  совместимости и равны новым полям scheduled/conservative.
 - **Net-доход** при неизвестном налоговом режиме **не считается** (null + warning).
 - Одно будущее событие не аннуализируется, если источник этого не поддерживает.
 - BUY-оборот = gross покупки до комиссии; SELL-оборот = gross продажи до комиссии.
