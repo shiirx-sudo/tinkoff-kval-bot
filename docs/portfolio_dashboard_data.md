@@ -17,7 +17,10 @@
 3. Сколько дохода к цели в месяц? → `income_summary.total_income_monthly_conservative_rub`
    (scheduled дивиденды/купоны + только реализованный net стратегии)
 4. Насколько близко к цели 150 000 ₽/мес.? → `income_summary.target_coverage_conservative_pct` / `income_gap_conservative_rub_monthly`
-5. Какой оборот к цели 60 000 000 ₽/год? → `turnover_summary.turnover_ytd_rub` / `turnover_ytd_progress_pct`
+5. Какой оборот к цели 6 000 000 ₽ за trailing 4 квартала? →
+   `turnover_summary.kval_turnover_trailing_4q_rub` / `kval_turnover_progress_pct` /
+   `kval_turnover_gap_rub` (YTD-оборот `turnover_ytd_rub`/`turnover_ytd_progress_pct`
+   остаётся вторичной метрикой)
 6. Взносы по плану или пропущены? → `contributions_summary`
 7. Есть ли критичные риски? → `risk_summary`
 
@@ -38,7 +41,8 @@
   F4.11: доход к цели = **scheduled** (дивиденды/купоны) + **strategy** (бот/стратегия,
   пока плейсхолдер). «Пассивный доход» — теперь подкатегория (scheduled), не вся
   модель. См. `docs/portfolio_dashboard.md` → «Доход к цели (F4.11)».
-- Цель оборота: год `60 000 000 ₽`, месяц `5 000 000 ₽`, квартал `15 000 000 ₽`.
+- Цель оборота (путь к квалинвестору): `6 000 000 ₽ за trailing 4 квартала`, с
+  пропорциональными ориентирами `500 000 ₽/мес.` и `1 500 000 ₽/квартал`.
 - **Оборот = `sum(abs(gross BUY) + abs(gross SELL))`** (до комиссии). Дивиденды и
   купоны — это **доход/cashflow**, а **НЕ оборот**. Комиссии учитываются **отдельно**
   (`commissions_*`), не как оборот.
@@ -63,13 +67,19 @@
 
 ## Взносы (contributions)
 
-Депозиты read-only API надёжно не отдаёт, поэтому факт пополнений ведётся вручную
-(manual model). Нужен локальный план-конфиг **`data/config/contribution_plan.json`**
-(не коммитится). Если его нет — `contributions_tracking_enabled=false` и warning
-`contribution_plan_not_configured`. Пример полей — в
+ПЛАН (цели/старт/график) — локальный, в **`data/config/contribution_plan.json`**
+(не коммитится). ФАКТ пополнений (F4.10.1) по умолчанию **API-based** — извлекается
+из read-only операций брокера тем же путём, что и оборот: депозиты
+(`OPERATION_TYPE_INPUT`) = взносы, выводы (`OPERATION_TYPE_OUTPUT`) трекаются
+**отдельно** (net cash flow). Ручные `facts[]` — только fallback/корректировки.
+Конфиг-дефолты: `fact_source=api_operations`, `manual_facts_enabled=false`. Если
+плана нет — `contributions_tracking_enabled=false` и warning
+`contribution_plan_not_configured`. Если API-операции недоступны — manual fallback с
+warning `contribution_api_operations_unavailable_manual_fallback`. Пример полей — в
 **`config/contribution_plan.example.json`** (закоммичен): `enabled`,
 `plan_weekly_rub`, `plan_monthly_rub`, `plan_start_date`,
-`next_planned_contribution_date`, `source`, `facts: [{date, amount_rub}]`.
+`next_planned_contribution_date`, `source`, `fact_source`, `manual_facts_enabled`,
+`facts: [{date, amount_rub}]`. Подробности — `docs/contribution_plan.md`.
 
 ## CLI
 
