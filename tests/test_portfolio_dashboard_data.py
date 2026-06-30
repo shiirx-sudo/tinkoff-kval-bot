@@ -182,6 +182,80 @@ def test_required_capital_with_explicit_assumption(tmp_path):
     assert inc["required_capital_assumption_yield_pct"] == Decimal("10.0")
 
 
+# ─── F4.11 income-to-target model ─────────────────────────────────────────────
+
+def test_scheduled_income_equals_dividend_coupon_logic(tmp_path):
+    inc = _run(tmp_path)["income_summary"]
+    # scheduled = прежняя логика дивидендов/купонов (F4.6/F4.8)
+    assert inc["scheduled_income_monthly_gross_rub"] == Decimal("10.35")
+    assert inc["scheduled_income_yearly_gross_rub"] == Decimal("124.20")
+    assert inc["scheduled_income_tax_warning"]
+    assert inc["monthly_income_target_rub"] == 150000
+
+
+def test_conservative_total_equals_scheduled_when_strategy_not_configured(tmp_path):
+    inc = _run(tmp_path)["income_summary"]
+    assert inc["strategy_income_status"] == "NOT_CONFIGURED"
+    # стратегия не настроена → консервативный итог == scheduled gross
+    assert inc["total_income_monthly_conservative_rub"] == Decimal("10.35")
+    assert inc["target_coverage_conservative_pct"] == Decimal("0.0069")
+    assert inc["income_gap_conservative_rub_monthly"] == Decimal("149989.65")
+
+
+def test_strategy_income_placeholders_default(tmp_path):
+    inc = _run(tmp_path)["income_summary"]
+    assert inc["strategy_income_status"] == "NOT_CONFIGURED"
+    assert inc["strategy_income_confidence"] == "none"
+    assert inc["strategy_income_monthly_realized_net_rub"] == Decimal("0.00")
+    assert inc["strategy_income_monthly_paper_rub"] is None
+    assert inc["strategy_income_monthly_model_rub"] is None
+    assert inc["strategy_income_included_in_conservative_coverage"] is False
+
+
+def test_paper_model_not_in_conservative_coverage(tmp_path):
+    inc = _run(tmp_path)["income_summary"]
+    # paper/model = null → with_paper/with_model == conservative; покрытие совпадает
+    assert inc["total_income_monthly_with_paper_rub"] == Decimal("10.35")
+    assert inc["total_income_monthly_with_model_rub"] == Decimal("10.35")
+    assert inc["target_coverage_with_paper_pct"] == inc[
+        "target_coverage_conservative_pct"]
+    assert inc["target_coverage_with_model_pct"] == inc[
+        "target_coverage_conservative_pct"]
+    assert inc["strategy_income_included_in_conservative_coverage"] is False
+
+
+def test_legacy_passive_aliases_still_present(tmp_path):
+    inc = _run(tmp_path)["income_summary"]
+    # устаревшие алиасы сохранены и равны новым полям
+    assert inc["passive_income_rub_monthly_gross"] == inc[
+        "scheduled_income_monthly_gross_rub"]
+    assert inc["passive_income_rub_yearly_gross"] == inc[
+        "scheduled_income_yearly_gross_rub"]
+    assert inc["target_monthly_income_rub"] == inc["monthly_income_target_rub"]
+    assert inc["income_target_coverage_pct"] == inc[
+        "target_coverage_conservative_pct"]
+    assert inc["income_gap_rub_monthly"] == inc[
+        "income_gap_conservative_rub_monthly"]
+
+
+def test_strategy_warning_present_in_report_warnings(tmp_path):
+    rep = _run(tmp_path)
+    from modules.portfolio_dashboard_data import WARN_STRATEGY_INCOME
+    assert WARN_STRATEGY_INCOME in rep["warnings"]
+
+
+def test_income_summary_no_income_keeps_none_coverage(tmp_path):
+    # портфель без надёжного дохода → scheduled None, покрытие None (не угадываем)
+    rep = _run(tmp_path, reports={"f43": _f43()})  # без f46 → нет income
+    inc = rep["income_summary"]
+    assert inc["scheduled_income_monthly_gross_rub"] is None
+    assert inc["total_income_monthly_conservative_rub"] is None
+    assert inc["target_coverage_conservative_pct"] is None
+    assert inc["income_gap_conservative_rub_monthly"] is None
+    # legacy alias тоже None
+    assert inc["income_target_coverage_pct"] is None
+
+
 # ─── turnover ─────────────────────────────────────────────────────────────────
 
 def _op(op_type, price, qty, commission, date, uid="U1", itype="share"):

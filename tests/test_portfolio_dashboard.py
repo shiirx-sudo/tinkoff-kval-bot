@@ -60,6 +60,41 @@ def _f48():
         "cash_summary": {"cash_rub": 562.34, "cash_pct": 2.1383, "currency": "rub",
                          "partial": False},
         "income_summary": {
+            # F4.11 income-to-target model
+            "monthly_income_target_rub": 150000,
+            "income_target_indexed_rub": 150000.0,
+            "scheduled_income_monthly_gross_rub": 26.53,
+            "scheduled_income_yearly_gross_rub": 318.40,
+            "scheduled_income_monthly_net_rub": None,
+            "scheduled_income_yearly_net_rub": None,
+            "scheduled_income_tax_warning":
+                "Налоговый режим неизвестен — net не считаем.",
+            "scheduled_income_sources": {"api_known_future": {"yearly_rub": 318.40}},
+            "strategy_income_monthly_realized_net_rub": 0.0,
+            "strategy_income_monthly_paper_rub": None,
+            "strategy_income_monthly_model_rub": None,
+            "strategy_income_status": "NOT_CONFIGURED",
+            "strategy_income_confidence": "none",
+            "strategy_income_included_in_conservative_coverage": False,
+            "total_income_monthly_conservative_rub": 26.53,
+            "total_income_monthly_with_paper_rub": 26.53,
+            "total_income_monthly_with_model_rub": 26.53,
+            "target_coverage_conservative_pct": 0.0177,
+            "target_coverage_with_paper_pct": 0.0177,
+            "target_coverage_with_model_pct": 0.0177,
+            "income_gap_conservative_rub_monthly": 149973.47,
+            "income_strategy_warning":
+                "Доход стратегии учитывается только реализованным и за вычетом "
+                "комиссий. Paper/model-оценки показаны отдельно и не гарантированы.",
+            "required_capital_rub": 18000000.0,
+            "required_capital_assumption_yield_pct": 10.0,
+            "required_capital_gap_rub": 17973701.26,
+            "income_sources_breakdown": {"api_known_future": {"yearly_rub": 318.40}},
+            "income_calendar_monthly": {"2026-08": 124.2},
+            "next_income_events": [
+                {"date": "2026-08-24", "ticker": "T", "type": "dividend",
+                 "amount_total_rub": 124.2}],
+            # legacy-алиасы (устаревшие)
             "passive_income_rub_monthly_gross": 26.53,
             "passive_income_rub_yearly_gross": 318.40,
             "passive_income_rub_monthly_net": None,
@@ -68,15 +103,7 @@ def _f48():
             "income_tax_warning": "Налоговый режим неизвестен — net не считаем.",
             "target_monthly_income_rub": 150000,
             "income_target_coverage_pct": 0.0177,
-            "income_gap_rub_monthly": 149973.47,
-            "required_capital_rub": 18000000.0,
-            "required_capital_assumption_yield_pct": 10.0,
-            "required_capital_gap_rub": 17973701.26,
-            "income_sources_breakdown": {"api_known_future": {"yearly_rub": 318.40}},
-            "income_calendar_monthly": {"2026-08": 124.2},
-            "next_income_events": [
-                {"date": "2026-08-24", "ticker": "T", "type": "dividend",
-                 "amount_total_rub": 124.2}]},
+            "income_gap_rub_monthly": 149973.47},
         "turnover_summary": {
             "turnover_definition": "sum_abs_buy_sell_gross_amount",
             "turnover_partial": False, "turnover_ytd_rub": 34669.88,
@@ -200,10 +227,11 @@ def test_missing_report_friendly_page_no_crash(tmp_path):
 def test_kpi_strip_contains_key_metrics(tmp_path):
     html = _html(tmp_path)
     assert 'class="kpis"' in html
-    for label in ("Стоимость портфеля", "Свободный кэш", "Пассивный доход / мес.",
+    for label in ("Стоимость портфеля", "Свободный кэш", "Доход к цели / мес.",
                   "Покрытие цели 150 000 ₽/мес.", "Квал-оборот 4Q",
                   "PnL портфеля", "Взносы", "Безопасность"):
         assert label in html, label
+    assert "Пассивный доход / мес." not in html   # F4.11: больше не верхний уровень
     assert "26 298.74 ₽" in html       # стоимость портфеля
     assert "READ_ONLY_SAFE" in html
 
@@ -230,12 +258,26 @@ def test_positions_table_renders_all(tmp_path):
 
 def test_income_section_renders(tmp_path):
     html = _html(tmp_path)
-    assert "C · Пассивный доход" in html
-    assert "318.40 ₽" in html          # годовой брутто
+    assert "C · Доход к цели" in html
+    assert "C · Пассивный доход" not in html      # F4.11 переименование
+    assert "318.40 ₽" in html          # scheduled годовой брутто
     assert "150 000" in html
     assert "0.0177%" in html
-    assert "149 973.47 ₽" in html      # gap
+    assert "149 973.47 ₽" in html      # gap (консервативный)
     assert "Налоговый режим неизвестен" in html  # tax warning (net недоступен)
+
+
+def test_income_scheduled_and_strategy_shown_separately(tmp_path):
+    html = _html(tmp_path)
+    assert "Доход к цели / мес." in html          # KPI (тест #7)
+    assert "Scheduled income" in html             # дивиденды/купоны
+    assert "Strategy income" in html              # бот/стратегия
+    assert "Реализованный net" in html
+    assert "не настроен" in html                  # strategy NOT_CONFIGURED
+    # paper/model подписаны как исключённые из покрытия
+    assert "исключено из покрытия" in html
+    # дисклеймер о стратегии (реализованный net, paper/model отдельно)
+    assert "Paper/model-оценки показаны отдельно и не гарантированы" in html
 
 
 def test_turnover_section_buy_sell_gross_not_dividends(tmp_path):
@@ -557,7 +599,7 @@ def test_kpi_grid_redesigned(tmp_path):
     html = _html(tmp_path)
     assert 'class="kpis"' in html
     assert 'class="kpi ' in html or 'class="kpi"' in html
-    for label in ("Стоимость портфеля", "Пассивный доход / мес.",
+    for label in ("Стоимость портфеля", "Доход к цели / мес.",
                   "Покрытие цели 150 000 ₽/мес.", "Свободный кэш",
                   "Квал-оборот 4Q", "PnL портфеля"):
         assert label in html, label
@@ -565,7 +607,8 @@ def test_kpi_grid_redesigned(tmp_path):
 
 def test_passive_income_progress_bar(tmp_path):
     html = _html(tmp_path)
-    assert "Пассивный доход к цели 150 000 ₽/мес." in html
+    assert "Доход к цели 150 000 ₽/мес." in html
+    assert "Пассивный доход к цели" not in html       # F4.11 переименование
     assert 'class="track"' in html and 'class="fill' in html
 
 
@@ -584,7 +627,7 @@ def test_position_weight_allocation_donut_svg(tmp_path):
 
 def test_income_calendar_bar_chart(tmp_path):
     html = _html(tmp_path)
-    assert "Календарь дохода по месяцам" in html
+    assert "Календарь scheduled-дохода по месяцам" in html
     assert 'class="chart"' in html
     assert "2026-08" in html
 
