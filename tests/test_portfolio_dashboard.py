@@ -146,6 +146,55 @@ def _f48():
             "kval_frequency_passed": False, "kval_turnover_passed": False,
             "kval_criteria_passed": False, "kval_criteria_status": "NOT_PASSED",
             "kval_warnings": []},
+        "target_path_summary": {
+            "monthly_income_target_rub": 150000.0,
+            "annual_income_target_rub": 1800000.0,
+            "current_capital_rub": 26298.74,
+            "current_planned_monthly_contribution_rub": 8000.0,
+            "model": "simple_no_growth_no_return",
+            "yield_scenarios": [
+                {"yield_pct": 8.0, "required_capital_rub": 22500000.0,
+                 "capital_gap_rub": 22473701.26,
+                 "months_to_target_at_current_contribution": 2809.2,
+                 "years_to_target_at_current_contribution": 234.1,
+                 "required_monthly_contribution_3y_rub": 624269.48,
+                 "required_monthly_contribution_5y_rub": 374561.69,
+                 "required_monthly_contribution_10y_rub": 187280.84,
+                 "required_monthly_contribution_15y_rub": 124853.90},
+                {"yield_pct": 10.0, "required_capital_rub": 18000000.0,
+                 "capital_gap_rub": 17973701.26,
+                 "months_to_target_at_current_contribution": 2246.7,
+                 "years_to_target_at_current_contribution": 187.2,
+                 "required_monthly_contribution_3y_rub": 499269.48,
+                 "required_monthly_contribution_5y_rub": 299561.69,
+                 "required_monthly_contribution_10y_rub": 149780.84,
+                 "required_monthly_contribution_15y_rub": 99853.90},
+                {"yield_pct": 12.0, "required_capital_rub": 15000000.0,
+                 "capital_gap_rub": 14973701.26,
+                 "months_to_target_at_current_contribution": 1871.7,
+                 "years_to_target_at_current_contribution": 156.0,
+                 "required_monthly_contribution_3y_rub": 415936.15,
+                 "required_monthly_contribution_5y_rub": 249561.69,
+                 "required_monthly_contribution_10y_rub": 124780.84,
+                 "required_monthly_contribution_15y_rub": 83187.23},
+                {"yield_pct": 15.0, "required_capital_rub": 12000000.0,
+                 "capital_gap_rub": 11973701.26,
+                 "months_to_target_at_current_contribution": 1496.7,
+                 "years_to_target_at_current_contribution": 124.7,
+                 "required_monthly_contribution_3y_rub": 332602.81,
+                 "required_monthly_contribution_5y_rub": 199561.69,
+                 "required_monthly_contribution_10y_rub": 99780.84,
+                 "required_monthly_contribution_15y_rub": 66520.56},
+                {"yield_pct": 18.0, "required_capital_rub": 10000000.0,
+                 "capital_gap_rub": 9973701.26,
+                 "months_to_target_at_current_contribution": 1246.7,
+                 "years_to_target_at_current_contribution": 103.9,
+                 "required_monthly_contribution_3y_rub": 277047.26,
+                 "required_monthly_contribution_5y_rub": 166228.35,
+                 "required_monthly_contribution_10y_rub": 83114.18,
+                 "required_monthly_contribution_15y_rub": 55409.45}],
+            "warnings": ["target_path_simple_model_no_growth_no_return",
+                         "target_path_not_investment_advice"]},
         "contributions_summary": {
             "contributions_tracking_enabled": False,
             "contribution_plan_weekly_rub": None,
@@ -265,6 +314,25 @@ def test_income_section_renders(tmp_path):
     assert "0.0177%" in html
     assert "149 973.47 ₽" in html      # gap (консервативный)
     assert "Налоговый режим неизвестен" in html  # tax warning (net недоступен)
+
+
+def test_target_path_section_renders(tmp_path):
+    html = _html(tmp_path)
+    assert "D · Путь к цели" in html
+    assert "Нужный капитал" in html
+    assert "Простая модель" in html
+    # ключевые русские заголовки таблицы
+    for label in ("Доходность", "Не хватает", "Лет при текущем взносе",
+                  "Взнос/мес. для 5 лет", "Взнос/мес. для 10 лет",
+                  "Взнос/мес. для 15 лет"):
+        assert label in html, label
+    # цель и модель
+    assert "150 000.00 ₽" in html          # цель/мес.
+    assert "1 800 000.00 ₽" in html        # цель/год
+    # дисклеймер: не прогноз / не рекомендация
+    assert "не прогноз доходности и не инвестиционная рекомендация" in html
+    # нав-якорь
+    assert 'href="#targetpath"' in html and 'id="targetpath"' in html
 
 
 def test_income_scheduled_and_strategy_shown_separately(tmp_path):

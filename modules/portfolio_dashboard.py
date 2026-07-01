@@ -377,8 +377,9 @@ align-items:center}.nav{flex-direction:row;flex-wrap:wrap}.navnote{display:none}
 
 # Боковая навигация (только якоря на той же странице; не действия)
 _NAV = (("overview", "Overview"), ("portfolio", "Portfolio"), ("income", "Income"),
-        ("turnover", "Turnover"), ("contributions", "Contributions"),
-        ("risk", "Risk"), ("lasttrade", "Last trade"), ("raw", "Raw JSON"))
+        ("targetpath", "Target path"), ("turnover", "Turnover"),
+        ("contributions", "Contributions"), ("risk", "Risk"),
+        ("lasttrade", "Last trade"), ("raw", "Raw JSON"))
 # Палитра для донат-аллокации (inline, без внешних ресурсов)
 _DONUT_COLORS = ("#5b9cff", "#37d399", "#f0c264", "#c78bff", "#ff8a5b",
                  "#4fd0e0", "#ff6b9d", "#8a97a7")
@@ -671,6 +672,41 @@ def _income_card(state: dict) -> str:
     return _card("C · Доход к цели", body, klass="card full")
 
 
+def _target_path_card(state: dict) -> str:
+    tp = state.get("target_path_summary") or {}
+    scenarios = tp.get("yield_scenarios") or []
+    body = _kv([
+        ("Цель / мес.", _money(tp.get("monthly_income_target_rub"))),
+        ("Цель / год", _money(tp.get("annual_income_target_rub"))),
+        ("Текущий капитал", _money(tp.get("current_capital_rub"))),
+        ("Плановый взнос / мес.",
+         _money(tp.get("current_planned_monthly_contribution_rub"))),
+        ("Модель",
+         "Простая модель: без роста рынка, без реинвестирования, без налогов"),
+    ])
+    headers = ["Доходность", "Нужный капитал", "Не хватает",
+               "Лет при текущем взносе", "Взнос/мес. для 5 лет",
+               "Взнос/мес. для 10 лет", "Взнос/мес. для 15 лет"]
+    rows = []
+    for s in scenarios:
+        y = _to_num(s.get("yield_pct"))
+        y_txt = f"{y:.0f}%" if y is not None else _DASH
+        rows.append([
+            y_txt,
+            _money(s.get("required_capital_rub")),
+            _money(s.get("capital_gap_rub")),
+            _esc(s.get("years_to_target_at_current_contribution")),
+            _money(s.get("required_monthly_contribution_5y_rub")),
+            _money(s.get("required_monthly_contribution_10y_rub")),
+            _money(s.get("required_monthly_contribution_15y_rub")),
+        ])
+    body += _table(headers, rows) if rows else '<div class="note">Нет сценариев.</div>'
+    body += ('<div class="caution">Это не прогноз доходности и не инвестиционная '
+             'рекомендация. Это простая модель требуемого капитала при выбранной '
+             'доходности.</div>')
+    return _card("D · Путь к цели", body, klass="card full")
+
+
 def _kval_badge(status) -> str:
     s = str(status or "")
     cls = "ok" if s == "PASSED" else ("bad" if s == "NOT_PASSED" else "warn")
@@ -917,6 +953,8 @@ def build_portfolio_dashboard_html(state: dict) -> str:
 </section>
 <section id="income"><div class="sec-h">Income</div>
 {_income_card(state)}</section>
+<section id="targetpath"><div class="sec-h">Target path</div>
+{_target_path_card(state)}</section>
 <section id="turnover"><div class="sec-h">Turnover</div>
 {_turnover_card(state)}</section>
 <section id="contributions"><div class="sec-h">Contributions</div>

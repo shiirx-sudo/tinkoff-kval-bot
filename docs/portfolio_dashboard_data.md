@@ -81,6 +81,42 @@ warning `contribution_api_operations_unavailable_manual_fallback`. Пример 
 `next_planned_contribution_date`, `source`, `fact_source`, `manual_facts_enabled`,
 `facts: [{date, amount_rub}]`. Подробности — `docs/contribution_plan.md`.
 
+## Путь к цели (target_path_summary, F4.12)
+
+Блок `target_path_summary` отвечает: сколько **капитала** нужно, чтобы целевой
+месячный доход обеспечивался при разных допущениях годовой доходности, и как этого
+достичь текущими плановыми взносами. Это **простая статическая модель** планирования.
+
+Поля верхнего уровня: `monthly_income_target_rub` (из
+`income_summary.monthly_income_target_rub`, по умолчанию 150000),
+`annual_income_target_rub` (= месячная цель × 12), `current_capital_rub` (=
+`portfolio_summary.total_portfolio_value_rub`), `current_planned_monthly_contribution_rub`
+(= `contributions_summary.contribution_plan_monthly_rub`, если учёт взносов включён),
+`model = "simple_no_growth_no_return"`, `yield_scenarios[]`, `warnings`.
+
+Сценарии доходности: **8%, 10%, 12%, 15%, 18%**. Для каждого:
+
+- `required_capital_rub = annual_income_target_rub / (yield_pct / 100)`
+  (например, 1 800 000 / 0.10 = 18 000 000);
+- `capital_gap_rub = max(required_capital_rub − current_capital_rub, 0)`;
+- `months_to_target_at_current_contribution = capital_gap_rub /
+  current_planned_monthly_contribution_rub`; `years = months / 12`;
+- `required_monthly_contribution_{3,5,10,15}y_rub = capital_gap_rub / {36,60,120,180}`.
+
+**Ограничения модели (важно):**
+
+- без роста рынка, без реинвестирования, без налогов, без инфляции;
+- **прогнозные дивидендные доходности — это исследовательские допущения, а НЕ
+  подтверждённый доход**; они НЕ входят в консервативное покрытие цели;
+- зависит от плана взносов: если он отсутствует/выключен или взнос = 0, поля
+  `months_to_target_*`/`years_to_target_*` = `null` + warning
+  `target_path_contribution_plan_not_configured`;
+- если текущий капитал уже ≥ требуемого — gap/месяцы/годы/требуемый взнос = 0.
+
+Всегда добавляются предупреждения `target_path_simple_model_no_growth_no_return` и
+`target_path_not_investment_advice`. Это **не** прогноз доходности и **не**
+инвестиционная рекомендация.
+
 ## CLI
 
 ```powershell

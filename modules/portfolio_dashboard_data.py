@@ -82,6 +82,16 @@ WARN_KVAL_PARTIAL = "operations_history_incomplete_for_kval_tracking"
 # Явное допущение доходности для оценки требуемого капитала (не реальная доходность).
 REQUIRED_CAPITAL_ASSUMED_YIELD_PCT = Decimal("10.0")
 
+# F4.12 target path: сценарии требуемого капитала при РАЗНЫХ допущениях доходности.
+# Это простая статическая модель (без роста рынка/реинвеста/налога/инфляции) —
+# НЕ прогноз доходности и НЕ инвестиционная рекомендация.
+TARGET_PATH_YIELD_SCENARIOS_PCT = (8, 10, 12, 15, 18)
+TARGET_PATH_HORIZONS_MONTHS = {3: 36, 5: 60, 10: 120, 15: 180}
+TARGET_PATH_MODEL = "simple_no_growth_no_return"
+WARN_TARGET_PATH_MODEL = "target_path_simple_model_no_growth_no_return"
+WARN_TARGET_PATH_NOT_ADVICE = "target_path_not_investment_advice"
+WARN_TARGET_PATH_NO_CONTRIB = "target_path_contribution_plan_not_configured"
+
 _M2 = Decimal("0.01")
 _P4 = Decimal("0.0001")
 
@@ -155,6 +165,10 @@ def _first_str(*values):
 
 def _q2(value: Decimal | None) -> Decimal | None:
     return value.quantize(_M2) if value is not None else None
+
+
+def _q1(value: Decimal | None) -> Decimal | None:
+    return value.quantize(Decimal("0.1")) if value is not None else None
 
 
 def _q4(value: Decimal | None) -> Decimal | None:
@@ -837,6 +851,78 @@ def build_contributions_summary(*, plan, now, warnings: list[str],
     return summary
 
 
+# ─── target path summary (F4.12) ──────────────────────────────────────────────
+
+def build_target_path_summary(*, income: dict, portfolio: dict,
+                              contributions: dict, warnings: list[str]) -> dict:
+    """Путь к цели: требуемый капитал при разных допущениях доходности + трактория.
+
+    Простая СТАТИЧЕСКАЯ модель накопления: без роста рынка, без реинвестирования,
+    без налогов, без инфляции. Прогнозные дивидендные доходности НЕ учитываются как
+    подтверждённый доход. Это НЕ прогноз доходности и НЕ инвестиционная рекомендация.
+    """
+    monthly_target = (_to_decimal(income.get("monthly_income_target_rub"))
+                      or Decimal(BASE_MONTHLY_LIVING_BASKET_RUB))
+    annual_target = monthly_target * Decimal(12)
+    current_capital = _to_decimal(portfolio.get("total_portfolio_value_rub"))
+    cur = current_capital if current_capital is not None else Decimal(0)
+
+    contrib_enabled = bool(contributions.get("contributions_tracking_enabled"))
+    monthly_contrib = (_to_decimal(contributions.get("contribution_plan_monthly_rub"))
+                       if contrib_enabled else None)
+    contrib_usable = monthly_contrib is not None and monthly_contrib > 0
+
+    tp_warnings = [WARN_TARGET_PATH_MODEL, WARN_TARGET_PATH_NOT_ADVICE]
+    if not contrib_usable:
+        tp_warnings.append(WARN_TARGET_PATH_NO_CONTRIB)
+
+    scenarios: list[dict] = []
+    for y in TARGET_PATH_YIELD_SCENARIOS_PCT:
+        yld = Decimal(str(y))
+        required = _q2(annual_target / (yld / Decimal(100)))
+        already_reached = current_capital is not None and cur >= required
+        gap = Decimal(0) if already_reached else max(required - cur, Decimal(0))
+
+        if already_reached:
+            months = years = Decimal(0)
+            by_horizon = {h: Decimal("0.00") for h in TARGET_PATH_HORIZONS_MONTHS}
+        else:
+            if contrib_usable:
+                months = _q1(gap / monthly_contrib)
+                years = _q1((gap / monthly_contrib) / Decimal(12))
+            else:
+                months = years = None
+            by_horizon = {h: _q2(gap / Decimal(m))
+                          for h, m in TARGET_PATH_HORIZONS_MONTHS.items()}
+
+        scenarios.append({
+            "yield_pct": float(yld),
+            "required_capital_rub": required,
+            "capital_gap_rub": _q2(gap),
+            "months_to_target_at_current_contribution": months,
+            "years_to_target_at_current_contribution": years,
+            "required_monthly_contribution_3y_rub": by_horizon[3],
+            "required_monthly_contribution_5y_rub": by_horizon[5],
+            "required_monthly_contribution_10y_rub": by_horizon[10],
+            "required_monthly_contribution_15y_rub": by_horizon[15],
+        })
+
+    for w in tp_warnings:
+        if w not in warnings:
+            warnings.append(w)
+
+    return {
+        "monthly_income_target_rub": _q2(monthly_target),
+        "annual_income_target_rub": _q2(annual_target),
+        "current_capital_rub": _q2(current_capital),
+        "current_planned_monthly_contribution_rub": (
+            _q2(monthly_contrib) if monthly_contrib is not None else None),
+        "model": TARGET_PATH_MODEL,
+        "yield_scenarios": scenarios,
+        "warnings": tp_warnings,
+    }
+
+
 # ─── risk summary ─────────────────────────────────────────────────────────────
 
 def build_risk_summary(*, positions: list[dict], portfolio_summary: dict) -> dict:
@@ -991,6 +1077,7 @@ def render_md(report: dict) -> str:
     inc = report["income_summary"]
     tn = report["turnover_summary"]
     cn = report["contributions_summary"]
+    tp = report.get("target_path_summary") or {}
     rk = report["risk_summary"]
     lt = report["last_trade_audit_summary"]
 
@@ -1078,6 +1165,29 @@ def render_md(report: dict) -> str:
                  "target_coverage_with_paper_pct",
                  "target_coverage_with_model_pct"]),
         f"\n> {inc.get('income_strategy_warning')}",
+        "",
+        "## Путь к цели (простая модель: без роста/реинвеста/налога)",
+        "",
+        "| Поле | Значение |",
+        "| --- | --- |",
+        kv(tp, ["monthly_income_target_rub", "annual_income_target_rub",
+                "current_capital_rub", "current_planned_monthly_contribution_rub",
+                "model"]),
+        "",
+        "| Доходность | Нужный капитал | Не хватает | Лет при взносе | "
+        "Взнос/мес. 5 лет | Взнос/мес. 10 лет | Взнос/мес. 15 лет |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
+        *[(f"| {_fmt(s.get('yield_pct'))}% | "
+           f"{_fmt(s.get('required_capital_rub'))} | "
+           f"{_fmt(s.get('capital_gap_rub'))} | "
+           f"{_fmt(s.get('years_to_target_at_current_contribution'))} | "
+           f"{_fmt(s.get('required_monthly_contribution_5y_rub'))} | "
+           f"{_fmt(s.get('required_monthly_contribution_10y_rub'))} | "
+           f"{_fmt(s.get('required_monthly_contribution_15y_rub'))} |")
+          for s in (tp.get("yield_scenarios") or [])],
+        "",
+        "> Это не прогноз доходности и не инвестиционная рекомендация. Простая "
+        "модель требуемого капитала при выбранной доходности.",
         "",
         "## Оборот (buy+sell gross, не дивиденды; цель 6M за 4 квартала)",
         "",
@@ -1241,6 +1351,9 @@ def load_portfolio_dashboard_data(
     contributions = build_contributions_summary(plan=plan, now=now,
                                                 warnings=warnings,
                                                 operations=operations)
+    target_path = build_target_path_summary(
+        income=income, portfolio=portfolio, contributions=contributions,
+        warnings=warnings)
     risk = build_risk_summary(positions=positions, portfolio_summary=portfolio)
     last_trade = build_last_trade_audit_summary(
         f44=f44, f45=f45, f46=f46, loaded_keys=loaded_keys)
@@ -1297,6 +1410,7 @@ def load_portfolio_dashboard_data(
         "income_summary": income,
         "turnover_summary": turnover,
         "contributions_summary": contributions,
+        "target_path_summary": target_path,
         "risk_summary": risk,
         "last_trade_audit_summary": last_trade,
         "dashboard_kpi": kpi,
