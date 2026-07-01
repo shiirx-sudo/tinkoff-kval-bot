@@ -1723,8 +1723,9 @@ def cmd_portfolio_dashboard_data(args: argparse.Namespace) -> int:
           f"sources: {result['data_sources_used']}")
     print(f"  portfolio_value: {kpi['portfolio_value_rub']} | cash: {kpi['cash_rub']} "
           f"| positions: {result['portfolio_summary']['positions_count']}")
-    print(f"  passive_income/mo: {kpi['passive_income_monthly_rub']} | coverage%: "
-          f"{kpi['passive_income_coverage_pct']} | gap/mo: {kpi['income_gap_rub_monthly']}")
+    print(f"  income_to_target/mo: {kpi['income_to_target_monthly_rub']} | coverage%: "
+          f"{kpi['target_coverage_conservative_pct']} | gap/mo: "
+          f"{kpi['income_gap_conservative_rub_monthly']}")
     print(f"  turnover_ytd: {kpi['turnover_ytd_rub']} / {kpi['turnover_annual_target_rub']} "
           f"(progress% {kpi['turnover_ytd_progress_pct']})")
     print(f"  safety_status: {kpi['safety_status']} | live_token_used: "

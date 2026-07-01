@@ -53,9 +53,13 @@ def test_status_on_track_when_facts_meet_plan():
 
 
 def test_status_behind_when_below_plan():
-    plan = _plan(facts=[{"date": MON, "amount_rub": 10000}])
+    # F4.11.1: BEHIND только если дата планового платежа уже наступила (в прошлом)
+    # и недельный факт < плана.
+    plan = _plan(next_planned_contribution_date="2026-06-25",  # в прошлом vs AS_OF
+                 facts=[{"date": MON, "amount_rub": 10000}])
     st = cp.compute_status(plan, as_of=AS_OF)
     assert st["status"] == "BEHIND"
+    assert st["missed_contributions_count_week"] == 1
     assert st["contribution_gap_monthly_rub"] > 0
 
 
@@ -219,8 +223,11 @@ def test_add_duplicate_allowed_with_flag():
 # ─── reports ──────────────────────────────────────────────────────────────────
 
 def test_status_reports_generated(tmp_path):
-    st = cp.compute_status(_plan(facts=[{"date": MON, "amount_rub": 50000}]),
-                           as_of=AS_OF)
+    # overdue-план (срок платежа в прошлом, факт < плана) → BEHIND в отчёте
+    st = cp.compute_status(
+        _plan(next_planned_contribution_date="2026-06-25",
+              facts=[{"date": MON, "amount_rub": 10000}]),
+        as_of=AS_OF)
     out = cp.write_status_report(
         st, json_path=str(tmp_path / "s.json"), md_path=str(tmp_path / "s.md"))
     assert Path(out["_output_json"]).exists()
@@ -270,7 +277,9 @@ def test_config_mutated_flag_for_mutating_commands():
 # ─── F4.8 shared logic ────────────────────────────────────────────────────────
 
 def test_summarize_for_dashboard_richer():
-    plan = _plan(facts=[{"date": MON, "amount_rub": 50000}])
+    # overdue-план (срок в прошлом, недельный факт < плана) → BEHIND
+    plan = _plan(next_planned_contribution_date="2026-06-25",
+                 facts=[{"date": MON, "amount_rub": 10000}])
     s = cp.summarize_for_dashboard(plan, as_of=AS_OF)
     # совместимые F4.8-ключи
     for k in ("contributions_tracking_enabled", "contribution_plan_weekly_rub",
@@ -296,7 +305,8 @@ def test_f48_uses_shared_logic(tmp_path):
     # F4.8 contributions_summary должен содержать новые ключи из общей логики
     from datetime import timezone
     from modules import portfolio_dashboard_data as pdd
-    plan = _plan(facts=[{"date": MON, "amount_rub": 50000}])
+    plan = _plan(next_planned_contribution_date="2026-06-25",
+                 facts=[{"date": MON, "amount_rub": 10000}])
     p = tmp_path / "plan.json"
     p.write_text(json.dumps(plan), encoding="utf-8")
     import datetime as _dt
@@ -306,7 +316,7 @@ def test_f48_uses_shared_logic(tmp_path):
         contribution_plan_path=str(p), now=now, read_token_present=False)
     cs = rep["contributions_summary"]
     assert cs["contributions_tracking_enabled"] is True
-    assert cs["contribution_status"] == "BEHIND"
+    assert cs["contribution_status"] == "BEHIND"   # срок в прошлом, факт < плана
     assert "contribution_gap_ytd_rub" in cs
 
 
@@ -352,11 +362,76 @@ def test_pre_start_facts_still_shown():
 
 
 def test_on_start_date_normal_logic_applies():
-    plan = _plan(plan_start_date="2026-06-29", facts=[])
+    # старт и срок платежа = сегодня, факта нет → нормальная логика → BEHIND
+    plan = _plan(plan_start_date="2026-06-29",
+                 next_planned_contribution_date="2026-06-29", facts=[])
     st = cp.compute_status(plan, as_of=date(2026, 6, 29))
     assert st["contribution_plan_started"] is True
     assert st["days_until_plan_start"] == 0
-    assert st["status"] == "BEHIND"  # ожидание > 0, факта нет
+    assert st["status"] == "BEHIND"  # срок наступил, ожидание > 0, факта нет
+
+
+# ─── F4.11.1 due-date semantics (не BEHIND до даты планового платежа) ──────────
+
+def _due_plan(**over):
+    """План из багрепорта: неделя 2000, месяц 8000, старт 2026-06-01, срок 2026-07-06."""
+    base = dict(enabled=True, currency="rub", plan_weekly_rub=2000,
+                plan_monthly_rub=8000, plan_start_date="2026-06-01",
+                next_planned_contribution_date="2026-07-06", source="manual",
+                fact_source="api_operations", manual_facts_enabled=False, facts=[])
+    base.update(over)
+    return base
+
+
+def test_before_due_date_not_behind_weekly_not_missed():
+    # 2026-07-01, срок 2026-07-06, недельный факт 0 → НЕ BEHIND, missed_week 0
+    st = cp.compute_status(_due_plan(), as_of=date(2026, 7, 1))
+    assert st["status"] != "BEHIND"
+    assert st["status"] in ("DUE_SOON", "ON_TRACK")
+    assert st["missed_contributions_count_week"] == 0
+    # недельный разрыв остаётся видимым как предстоящий (не overdue)
+    assert st["contribution_gap_weekly_rub"] == Decimal("2000.00")
+    assert st["days_until_next_planned_contribution"] == 5
+
+
+def test_on_due_date_not_on_track():
+    # 2026-07-06 (== срок), недельный факт 0 → не ON_TRACK (BEHIND/DUE)
+    st = cp.compute_status(_due_plan(), as_of=date(2026, 7, 6))
+    assert st["status"] != "ON_TRACK"
+    assert st["status"] in ("BEHIND", "DUE_SOON")
+
+
+def test_after_due_date_behind_weekly_missed():
+    # 2026-07-07 (после срока), недельный факт 0 → BEHIND, missed_week > 0
+    st = cp.compute_status(_due_plan(), as_of=date(2026, 7, 7))
+    assert st["status"] == "BEHIND"
+    assert st["missed_contributions_count_week"] > 0
+    assert st["contribution_gap_weekly_rub"] == Decimal("2000.00")
+
+
+def test_new_month_monthly_gap_alone_not_behind_before_due():
+    # первый день месяца, месячный факт 0, срок в будущем → месячный gap виден,
+    # но статус не BEHIND
+    st = cp.compute_status(_due_plan(), as_of=date(2026, 7, 1))
+    assert st["contribution_gap_monthly_rub"] == Decimal("8000.00")  # виден
+    assert st["status"] != "BEHIND"
+
+
+def test_before_due_api_source_preserved():
+    # источник факта остаётся readonly_operations_api при доступных операциях
+    ops = [_op("OPERATION_TYPE_INPUT", 2000, "2026-06-15T10:00:00Z", "d1")]
+    s = cp.summarize_for_dashboard(_due_plan(), as_of=date(2026, 7, 1),
+                                   api_operations=ops)
+    assert s["contribution_source"] == "readonly_operations_api"
+    assert s["contribution_status"] != "BEHIND"
+    assert s["missed_contributions_count_week"] == 0
+
+
+def test_manual_facts_enabled_false_default_preserved():
+    plan = cp.init_plan(weekly_rub=2000, monthly_rub=8000,
+                        start_date="2026-06-01", next_date="2026-07-06")
+    assert plan["manual_facts_enabled"] is False
+    assert plan["fact_source"] == "api_operations"
 
 
 # ─── F4.10.1 API contribution extraction ──────────────────────────────────────
