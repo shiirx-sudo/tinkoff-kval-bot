@@ -48,10 +48,15 @@ STAGE = "F4_10_CONTRIBUTION_PLAN_TRACKING_LOCAL"
 MODE = "CONTRIBUTION_PLAN_LOCAL"
 
 STATUS_ON_TRACK = "ON_TRACK"
+STATUS_DUE_SOON = "DUE_SOON"
 STATUS_BEHIND = "BEHIND"
 STATUS_NOT_STARTED = "NOT_STARTED"
 STATUS_DISABLED = "DISABLED"
 STATUS_NOT_CONFIGURED = "NOT_CONFIGURED"
+
+# Взнос НЕ считается пропущенным до next_planned_contribution_date (даты платежа).
+# В окне DUE_SOON_WINDOW_DAYS до срока показываем DUE_SOON (не BEHIND).
+DUE_SOON_WINDOW_DAYS = 7
 
 # ── источники факта пополнений ──
 FACT_SOURCE_API = "api_operations"
@@ -518,11 +523,17 @@ def _compute_core(plan: dict | None, as_of: date, *,
     days_until_start = ((plan_start - as_of).days
                         if (plan_start is not None and as_of < plan_start) else 0)
 
+    # F4.11.1: взнос становится «просроченным» ТОЛЬКО с даты планового платежа
+    # (next_planned_contribution_date). До неё разрыв — «предстоящий», не overdue.
+    days_until_next = (next_date - as_of).days if next_date is not None else None
+    due_reached = next_date is not None and as_of >= next_date
+
     if not plan_started:
         exp_week = exp_month = exp_ytd = Decimal(0)
         gap_week = gap_month = gap_ytd = Decimal(0)
         missed_week = missed_month = missed_ytd = 0
         catch_up = Decimal(0)
+        primary_gap = Decimal(0)
     else:
         exp_week = plan_weekly
         exp_month = plan_monthly
@@ -536,15 +547,35 @@ def _compute_core(plan: dict | None, as_of: date, *,
         def gap(exp, fact):
             return _q2(max(exp - fact, Decimal(0))) if exp is not None else None
 
+        # Разрывы остаются видимыми (предстоящая/требуемая сумма), см. gap_week.
         gap_week = gap(exp_week, fw)
         gap_month = gap(exp_month, fm)
         gap_ytd = gap(exp_ytd, fy)
 
-        missed_week = (1 if (plan_weekly and plan_weekly > 0 and fw < (exp_week or 0))
-                       else (0 if plan_weekly is not None else None))
+        # Неделя «пропущена» только если срок платежа наступил и факт < плана.
+        weekly_short = (plan_weekly is not None and plan_weekly > 0
+                        and fw < (exp_week or Decimal(0)))
+        if plan_weekly is None:
+            missed_week = None
+        else:
+            missed_week = 1 if (due_reached and weekly_short) else 0
+        # Месячный/YTD catch-up — информационные (сколько недельных взносов нужно
+        # довнести), не гейтятся сроком; статус ими не управляется до срока.
         missed_month = _missed(gap_month, plan_weekly)
         missed_ytd = _missed(gap_ytd, plan_weekly)
         catch_up = gap_month
+
+        # Основной разрыв для статуса: недельный (если есть недельный план), иначе
+        # месячный. Просрочка (BEHIND) — только после даты планового платежа.
+        if plan_weekly is not None and plan_weekly > 0:
+            primary_gap = gap_week or Decimal(0)
+        else:
+            primary_gap = gap_month or Decimal(0)
+
+    overdue = plan_started and due_reached and primary_gap > 0
+    due_soon = (plan_started and not overdue and primary_gap > 0
+                and days_until_next is not None
+                and 0 <= days_until_next <= DUE_SOON_WINDOW_DAYS)
 
     if plan is None:
         status = STATUS_NOT_CONFIGURED
@@ -552,10 +583,12 @@ def _compute_core(plan: dict | None, as_of: date, *,
         status = STATUS_DISABLED
     elif not plan_started:
         status = STATUS_NOT_STARTED
-    elif (gap_month or Decimal(0)) == 0 and (gap_week or Decimal(0)) == 0:
-        status = STATUS_ON_TRACK
-    else:
+    elif overdue:
         status = STATUS_BEHIND
+    elif due_soon:
+        status = STATUS_DUE_SOON
+    else:
+        status = STATUS_ON_TRACK
 
     return _Core(
         enabled=enabled, currency=currency, plan_weekly=plan_weekly,
