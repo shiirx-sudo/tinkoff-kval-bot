@@ -256,6 +256,104 @@ def test_income_summary_no_income_keeps_none_coverage(tmp_path):
     assert inc["income_target_coverage_pct"] is None
 
 
+# ─── F4.12 target path scenarios ──────────────────────────────────────────────
+
+def _target_path(current, monthly_contrib=None, target=150000, enabled=True):
+    return pdd.build_target_path_summary(
+        income={"monthly_income_target_rub": target},
+        portfolio={"total_portfolio_value_rub": current},
+        contributions={"contributions_tracking_enabled": enabled,
+                       "contribution_plan_monthly_rub": monthly_contrib},
+        warnings=[])
+
+
+def _scn(tp, yld):
+    return next(s for s in tp["yield_scenarios"] if s["yield_pct"] == yld)
+
+
+def test_target_path_summary_exists_in_report(tmp_path):
+    rep = _run(tmp_path)
+    assert "target_path_summary" in rep
+    tp = rep["target_path_summary"]
+    assert tp["monthly_income_target_rub"] == Decimal("150000.00")
+    assert tp["annual_income_target_rub"] == Decimal("1800000.00")
+    assert tp["model"] == "simple_no_growth_no_return"
+    # текущий капитал = стоимость портфеля (partial: известные позиции T = 7243.02)
+    assert tp["current_capital_rub"] == Decimal("7243.02")
+
+
+def test_target_path_required_capital_10pct():
+    tp = _target_path(Decimal("26361"), monthly_contrib=8000)
+    assert _scn(tp, 10.0)["required_capital_rub"] == Decimal("18000000.00")
+
+
+def test_target_path_all_yield_scenarios_present():
+    tp = _target_path(Decimal("26361"), monthly_contrib=8000)
+    assert {s["yield_pct"] for s in tp["yield_scenarios"]} == {8.0, 10.0, 12.0,
+                                                               15.0, 18.0}
+
+
+def test_target_path_capital_gap_uses_portfolio_never_negative():
+    tp = _target_path(Decimal("26361"), monthly_contrib=8000)
+    assert _scn(tp, 10.0)["capital_gap_rub"] == Decimal("17973639.00")
+    assert all(s["capital_gap_rub"] >= 0 for s in tp["yield_scenarios"])
+
+
+def test_target_path_already_reached_zeroes():
+    tp = _target_path(Decimal("50000000"), monthly_contrib=8000)
+    s = _scn(tp, 8.0)  # нужный капитал 22.5M < 50M → цель достигнута
+    assert s["capital_gap_rub"] == Decimal("0.00")
+    assert s["months_to_target_at_current_contribution"] == Decimal("0")
+    assert s["years_to_target_at_current_contribution"] == Decimal("0")
+    assert s["required_monthly_contribution_5y_rub"] == Decimal("0.00")
+
+
+def test_target_path_months_years_null_without_contribution():
+    tp = _target_path(Decimal("26361"), monthly_contrib=None, enabled=False)
+    s = _scn(tp, 10.0)
+    assert s["months_to_target_at_current_contribution"] is None
+    assert s["years_to_target_at_current_contribution"] is None
+    assert "target_path_contribution_plan_not_configured" in tp["warnings"]
+    # требуемый взнос по горизонтам считается независимо от текущего взноса
+    assert s["required_monthly_contribution_5y_rub"] is not None
+
+
+def test_target_path_months_years_null_when_contribution_zero():
+    tp = _target_path(Decimal("26361"), monthly_contrib=0)
+    s = _scn(tp, 10.0)
+    assert s["months_to_target_at_current_contribution"] is None
+    assert "target_path_contribution_plan_not_configured" in tp["warnings"]
+
+
+def test_target_path_required_monthly_by_horizon():
+    tp = _target_path(Decimal("26361"), monthly_contrib=8000)
+    s = _scn(tp, 10.0)
+    gap = Decimal("17973639.00")
+    q2 = Decimal("0.01")
+    assert s["required_monthly_contribution_3y_rub"] == (gap / 36).quantize(q2)
+    assert s["required_monthly_contribution_5y_rub"] == (gap / 60).quantize(q2)
+    assert s["required_monthly_contribution_10y_rub"] == (gap / 120).quantize(q2)
+    assert s["required_monthly_contribution_15y_rub"] == (gap / 180).quantize(q2)
+
+
+def test_target_path_months_years_computed_with_contribution():
+    tp = _target_path(Decimal("26361"), monthly_contrib=8000)
+    s = _scn(tp, 10.0)
+    gap = Decimal("17973639.00")
+    assert s["months_to_target_at_current_contribution"] == (
+        gap / 8000).quantize(Decimal("0.1"))
+    assert s["years_to_target_at_current_contribution"] == (
+        gap / 8000 / 12).quantize(Decimal("0.1"))
+
+
+def test_target_path_report_has_model_warnings(tmp_path):
+    rep = _run(tmp_path)  # без плана взносов
+    for w in ("target_path_simple_model_no_growth_no_return",
+              "target_path_not_investment_advice",
+              "target_path_contribution_plan_not_configured"):
+        assert w in rep["warnings"], w
+
+
 # ─── turnover ─────────────────────────────────────────────────────────────────
 
 def _op(op_type, price, qty, commission, date, uid="U1", itype="share"):
